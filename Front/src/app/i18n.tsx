@@ -1,0 +1,308 @@
+"use client";
+
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
+
+export type UILanguage = "fr" | "en";
+
+export const UI_LANGUAGE_STORAGE_KEY = "dv_ui_language";
+
+const translations = {
+  fr: {
+    settings: "Parametres",
+    language: "Langue",
+    languageDescription:
+      "Choisissez la langue de l'interface. Cela ne change pas la langue utilisee par le LLM.",
+    interfaceLanguage: "Langue de l'interface",
+    french: "Francais",
+    english: "Anglais",
+    back: "Retour",
+    llm: "LLM",
+    directories: "Dossiers",
+    emails: "E-mails",
+    languageModel: "Modele de langage",
+    loading: "Chargement...",
+    provider: "Fournisseur",
+    model: "Modele",
+    modelNamePlaceholder: "nom du modele",
+    temperature: "Temperature",
+    maxTokens: "Max tokens",
+    streaming: "Streaming",
+    save: "Enregistrer",
+    saving: "Enregistrement...",
+    testLlm: "Tester le LLM",
+    testing: "Test...",
+    allowedDirectories: "Dossiers autorises",
+    pathPlaceholder: "Chemin (ex: C:\\Docs\\Projets)",
+    labelPlaceholder: "Label (facultatif)",
+    add: "Ajouter",
+    noDirectoryDefined: "Aucun dossier defini.",
+    noLabel: "Sans label",
+    disable: "Desactiver",
+    enable: "Activer",
+    enabled: "Active",
+    disabled: "Desactive",
+    test: "Tester",
+    testAccess: "Tester l'acces",
+    remove: "Supprimer",
+    emailBoxes: "Boites e-mails",
+    noEmailFolderDetected: "Aucun dossier detecte pour l'instant.",
+    emailFolderPlaceholder: "Nom du dossier (ex : Boite de reception)",
+    noEmailFolderSelected: "Aucun dossier selectionne.",
+    ingestEmails: "Ingerer emails",
+    syncing: "Synchronisation...",
+    syncInProgress:
+      "Synchronisation en cours... Verifie le statut dans quelques secondes.",
+    syncEmailsHelp:
+      "Declenche une synchronisation manuelle des e-mails pour les dossiers selectionnes.",
+    account: "Compte",
+    interface: "Interface",
+    theme: "Theme",
+    barStyle: "Style de barre",
+    themeDefault: "Bleu",
+    themeDefaultDesc: "Theme par defaut",
+    themeLight: "Clair",
+    themeLightDesc: "Mode lumineux",
+    themeDark: "Sombre",
+    themeDarkDesc: "Mode nuit",
+    themeGrayDark: "Gris fonce",
+    themeGrayDarkDesc: "Style ChatGPT",
+    themeCreme: "Creme",
+    themeCremeDesc: "Couleurs chaudes et douces",
+    styleFlat: "Standard",
+    styleFlatDesc: "Fond solide",
+    styleGradient: "Degrade",
+    styleGradientDesc: "Effet de transparence",
+    close: "Fermer",
+    emailIngestion: "Ingestion emails",
+    reindex: "Reindex",
+    signOut: "Deconnexion",
+    newDiscussion: "Nouvelle discussion",
+    searchChatPlaceholder: "Rechercher un chat",
+    clear: "Effacer",
+    chats: "Chats",
+    noResults: "Aucun resultat...",
+    pendingConversation:
+      "Conversation en attente: envoyez un message pour la creer.",
+    pending: "en attente",
+    moreActions: "Plus d'actions",
+    rename: "Renommer",
+    delete: "Supprimer",
+    serverOffline: "Serveur deconnecte",
+    serverOfflineHelp:
+      "Le serveur backend ne repond pas. Verifiez qu'il est demarre.",
+    focusMode: "Mode Focus",
+    exitFocus: "Quitter Focus",
+    enableFocusTitle: "Activer le mode Focus (F9)",
+    exitFocusTitle: "Quitter le mode Focus (F9)",
+    askPlaceholder: "Poser une question",
+    inputAria: "Saisie",
+    chooseSources: "Choisir les sources",
+    automatic: "Automatique",
+    automaticDesc: "L'IA choisit la meilleure source",
+    localSearch: "Recherche locale",
+    localSearchDesc: "Recherche dans vos documents",
+    general: "General",
+    generalDesc: "Conversation sans contexte",
+    webSearch: "Recherche web",
+    webSearchDesc: "Recherche sur Internet en temps reel",
+    send: "Envoyer",
+    stop: "Stop",
+    replyToAssistant: "Reponse a l'IA",
+    replyToYou: "Reponse a vous",
+    cancelReply: "Annuler la reponse",
+    showSources: "Afficher les sources",
+    hideSources: "Masquer les sources",
+    reply: "Repondre",
+    copyMessage: "Copier le message",
+    copy: "Copier",
+    copied: "Copie !",
+    modeLocal: "Appui sur vos documents",
+    modeWeb: "Recherche web",
+    modeGeneral: "Reponse generale",
+    webTag: "web",
+    chunk: "chunk",
+    exploreTitle: "Que souhaitez-vous explorer ?",
+    exploreSubtitle:
+      "Un assistant concu pour reveler la valeur de votre savoir collectif.",
+    scrollBottom: "Descendre en bas",
+    user: "Utilisateur",
+    signIn: "Se connecter",
+    continueWithMicrosoft: "Continuer avec Microsoft",
+    loginHelp:
+      "Une fenetre Microsoft va s'ouvrir. Choisis ton compte Microsoft.",
+  },
+  en: {
+    settings: "Settings",
+    language: "Language",
+    languageDescription:
+      "Choose the interface language. This does not change the language used by the LLM.",
+    interfaceLanguage: "Interface language",
+    french: "French",
+    english: "English",
+    back: "Back",
+    llm: "LLM",
+    directories: "Directories",
+    emails: "Emails",
+    languageModel: "Language model",
+    loading: "Loading...",
+    provider: "Provider",
+    model: "Model",
+    modelNamePlaceholder: "model name",
+    temperature: "Temperature",
+    maxTokens: "Max tokens",
+    streaming: "Streaming",
+    save: "Save",
+    saving: "Saving...",
+    testLlm: "Test LLM",
+    testing: "Testing...",
+    allowedDirectories: "Allowed directories",
+    pathPlaceholder: "Path (e.g. C:\\Docs\\Projects)",
+    labelPlaceholder: "Label (optional)",
+    add: "Add",
+    noDirectoryDefined: "No directory defined.",
+    noLabel: "No label",
+    disable: "Disable",
+    enable: "Enable",
+    enabled: "Enabled",
+    disabled: "Disabled",
+    test: "Test",
+    testAccess: "Test access",
+    remove: "Remove",
+    emailBoxes: "Email folders",
+    noEmailFolderDetected: "No folder detected yet.",
+    emailFolderPlaceholder: "Folder name (e.g. Inbox)",
+    noEmailFolderSelected: "No folder selected.",
+    ingestEmails: "Ingest emails",
+    syncing: "Syncing...",
+    syncInProgress: "Sync in progress... Check the status again in a few seconds.",
+    syncEmailsHelp: "Triggers a manual email sync for the selected folders.",
+    account: "Account",
+    interface: "Interface",
+    theme: "Theme",
+    barStyle: "Bar style",
+    themeDefault: "Blue",
+    themeDefaultDesc: "Default theme",
+    themeLight: "Light",
+    themeLightDesc: "Bright mode",
+    themeDark: "Dark",
+    themeDarkDesc: "Night mode",
+    themeGrayDark: "Dark gray",
+    themeGrayDarkDesc: "ChatGPT-style look",
+    themeCreme: "Cream",
+    themeCremeDesc: "Warm, soft colors",
+    styleFlat: "Standard",
+    styleFlatDesc: "Solid background",
+    styleGradient: "Gradient",
+    styleGradientDesc: "Transparency effect",
+    close: "Close",
+    emailIngestion: "Email ingestion",
+    reindex: "Reindex",
+    signOut: "Sign out",
+    newDiscussion: "New chat",
+    searchChatPlaceholder: "Search chats",
+    clear: "Clear",
+    chats: "Chats",
+    noResults: "No results...",
+    pendingConversation: "Conversation pending: send a message to create it.",
+    pending: "pending",
+    moreActions: "More actions",
+    rename: "Rename",
+    delete: "Delete",
+    serverOffline: "Server offline",
+    serverOfflineHelp:
+      "The backend server is not responding. Make sure it is running.",
+    focusMode: "Focus mode",
+    exitFocus: "Exit Focus",
+    enableFocusTitle: "Enable Focus mode (F9)",
+    exitFocusTitle: "Exit Focus mode (F9)",
+    askPlaceholder: "Ask a question",
+    inputAria: "Input",
+    chooseSources: "Choose sources",
+    automatic: "Automatic",
+    automaticDesc: "The AI chooses the best source",
+    localSearch: "Local search",
+    localSearchDesc: "Search within your documents",
+    general: "General",
+    generalDesc: "Conversation without context",
+    webSearch: "Web search",
+    webSearchDesc: "Search the Internet in real time",
+    send: "Send",
+    stop: "Stop",
+    replyToAssistant: "Replying to AI",
+    replyToYou: "Replying to you",
+    cancelReply: "Cancel reply",
+    showSources: "Show sources",
+    hideSources: "Hide sources",
+    reply: "Reply",
+    copyMessage: "Copy message",
+    copy: "Copy",
+    copied: "Copied!",
+    modeLocal: "Grounded in your documents",
+    modeWeb: "Web search",
+    modeGeneral: "General answer",
+    webTag: "web",
+    chunk: "chunk",
+    exploreTitle: "What would you like to explore?",
+    exploreSubtitle:
+      "An assistant designed to reveal the value of your collective knowledge.",
+    scrollBottom: "Scroll to bottom",
+    user: "User",
+    signIn: "Sign in",
+    continueWithMicrosoft: "Continue with Microsoft",
+    loginHelp:
+      "A Microsoft window will open. Choose your Microsoft account.",
+  },
+} as const;
+
+type TranslationKey = keyof typeof translations.fr;
+
+type LanguageContextValue = {
+  language: UILanguage;
+  setLanguage: (language: UILanguage) => void;
+  t: (key: TranslationKey) => string;
+};
+
+const LanguageContext = createContext<LanguageContextValue | null>(null);
+
+export function LanguageProvider({ children }: { children: ReactNode }) {
+  const [language, setLanguage] = useState<UILanguage>("fr");
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    const stored = localStorage.getItem(UI_LANGUAGE_STORAGE_KEY);
+    if (stored === "fr" || stored === "en") {
+      setLanguage(stored);
+    }
+    setReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    document.documentElement.lang = language;
+    localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, language);
+  }, [language, ready]);
+
+  const value = useMemo<LanguageContextValue>(
+    () => ({
+      language,
+      setLanguage,
+      t: (key) => translations[language][key],
+    }),
+    [language]
+  );
+
+  return <LanguageContext.Provider value={value}>{children}</LanguageContext.Provider>;
+}
+
+export function useLanguage() {
+  const ctx = useContext(LanguageContext);
+  if (!ctx) throw new Error("useLanguage must be used within LanguageProvider");
+  return ctx;
+}

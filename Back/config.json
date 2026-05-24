@@ -1,0 +1,82 @@
+{
+  "roots": [
+    "C:\\Users\\aejau\\OneDrive\\Desktop\\Programme IA"
+  ],
+  "index_dir": "C:\\Users\\aejau\\OneDrive\\Desktop\\Programme IA\\Application\\index_rag",
+  "exclude_globs": [
+    "*/index_rag/*",
+    "*/emails_cache/*",
+    "*/email_attachments/*"
+  ],
+  "follow_symlinks": false,
+  "graph": {
+    "client_id": "9f9d4471-a297-4095-86ff-8af1173f700d",
+    "authority": "https://login.microsoftonline.com/consumers",
+    "scopes": [
+      "https://graph.microsoft.com/User.Read",
+      "https://graph.microsoft.com/Mail.Read"
+    ]
+  },
+  "email_ingest": {
+    "output_dir": "C:\\Users\\aejau\\OneDrive\\Desktop\\Programme IA\\Application\\data\\emails_cache",
+    "attachments_dir": "C:\\Users\\aejau\\OneDrive\\Desktop\\Programme IA\\Application\\data\\email_attachments",
+    "max_emails": 1000,
+    "folders": [
+      "Boîte de réception"
+    ],
+    "date_since": "2024-01-01T00:00:00Z",
+    "include_body_html": false,
+    "flatten_for_rag_dir": "C:\\Users\\aejau\\OneDrive\\Desktop\\Programme IA\\Application\\data\\emails_flattened"
+  },
+  "rag_params": {
+    "answerability_threshold": -0.5,
+    "final_k": 12,
+    "max_context_chars": 7000,
+    "overlap_min": 1,
+    "context_relevance_threshold": 0.3,
+    "enable_query_condensation": true,
+    "enable_query_expansion": true,
+    "enable_faithfulness_check": true,
+    "faithfulness_threshold": 0.4,
+    "faithfulness_strict_only": true,
+    "fresh_news_keywords": [
+      "aujourd'hui",
+      "dernière",
+      "mise à jour",
+      "version",
+      "PDG",
+      "score",
+      "match",
+      "prix",
+      "sortie",
+      "release",
+      "2024",
+      "2025",
+      "actualité",
+      "breaking"
+    ]
+  },
+  "timeouts": {
+    "llm_sec": 18,
+    "web_sec": 8,
+    "math_sec": 8
+  },
+  "rate_limit": {
+    "max_req": 50,
+    "per_sec": 10
+  },
+  "llm": {
+    "provider": "mistral",
+    "model": "mistral-small",
+    "temperature": 0.2,
+    "max_tokens": 2000,
+    "stream": true
+  },
+  "directories": [
+    {
+      "path": "C:\\Users\\aejau\\OneDrive\\Documents",
+      "label": "",
+      "enabled": true
+    }
+  ]
+}

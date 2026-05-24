@@ -1,0 +1,12 @@
+Pour changer la hauteur de l'imput de départ : 
+
+<div className="text-center w-full px-4 translate-y-[8px]">  #Il faut agir sur le "-8"	
+
+className="fixed z-20 bg-gray-50 (border-t border-gray-200)  #Pour afficher la bordure ou non au dessus de l'input
+
+Dans config.json :
+
+"authority": "https://login.microsoftonline.com/consumers",
+
+# common pour tous les comptes
+# consumers pour les comptes perso uniquement

@@ -1,0 +1,41 @@
+# --- FRONT (Next.js / Node.js) ---
+Front/node_modules/
+Front/.next/
+Front/out/
+Front/dist/
+Front/.env.local
+*.log
+
+# --- BACK (FastAPI / Python) ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+Back/.venv/
+Back/venv/
+Back/.env
+Back/.env.*
+
+# --- Données et caches spécifiques ---
+Back/index_rag/
+Back/emails_cache/
+Back/email_attachments/
+Back/api/app.db
+Back/api/app.db-shm
+Back/api/app.db-wal
+Back/api/chat_secret.key
+**/token_cache.bin
+
+# --- Fichiers locaux / temporaires ---
+*.backup
+*.tmp
+Front/src/app/page.tsx.backup3
+
+# --- OS / IDE ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- OneDrive fichiers temporaires ---
+~$*

@@ -1,0 +1,274 @@
+/* ===== Tailwind v4 ===== */
+@import "tailwindcss";
+
+/* =====================================================================
+   Variables de thème (par défaut + 3 thèmes) + rôles (sidebar, bulles)
+   ===================================================================== */
+
+/* --- Fallback (si aucun data-theme n’est posé) : thème "default" --- */
+:root {
+  /* palette par défaut (clair) */
+  --bg: #f5f7fb;
+  --surface: #ffffff;
+  --text: #0f172a;
+  --muted-text: #6b7280;
+  --border: #e5e7eb;
+  --primary: #1f6feb;   /* bleu par défaut */
+  --accent: #2ea043;    /* vert accent */
+  --muted: #eef2f7;
+  --primary-foreground: #ffffff; /* couleur du texte/icône sur fond primary */
+
+  /* rôles (découplés) */
+  --sidebar-bg: var(--surface);
+  --sidebar-border: var(--border);
+  --sidebar-text: var(--text);
+
+  --bubble-user-bg: var(--muted);
+  --bubble-user-text: var(--text);
+  --bubble-assistant-bg: transparent;
+  --bubble-assistant-text: var(--text);
+
+  /* Scrollbar (par défaut) */
+  --scrollbar-track: var(--bg);
+  --scrollbar-thumb: color-mix(in oklab, var(--text) 25%, transparent 75%);
+}
+
+/* --- Thème 1 : "default" (bleu) --- */
+:root[data-theme="default"] {
+  --bg: #f5f7fb;
+  --surface: #ffffff;
+  --text: #0f172a;
+  --muted-text: #6b7280;
+  --border: #e5e7eb;
+  --primary: #1f6feb;
+  --accent: #2ea043;
+  --muted: #eef2f7;
+  --primary-foreground: #ffffff;
+
+  --sidebar-bg: var(--surface);
+  --sidebar-border: var(--border);
+  --sidebar-text: var(--text);
+
+  --bubble-user-bg: var(--muted);
+  --bubble-user-text: var(--text);
+
+  --scrollbar-track: var(--surface);
+  --scrollbar-thumb: color-mix(in oklab, var(--text) 25%, transparent 75%);
+}
+
+/* --- Thème 2 : "light" (clair neutre) --- */
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --text: #000000;
+  --muted-text: #6b7280;
+  --border: #e5e7eb;
+  --primary: #000000;
+  --accent: #10b981;
+  --muted: #f3f4f6;
+  --primary-foreground: #ffffff;
+
+  --sidebar-bg: #fafafa;
+  --sidebar-border: var(--border);
+  --sidebar-text: #111827;
+
+  --bubble-user-bg: #f3f4f6;
+  --bubble-user-text: #111827;
+
+  --scrollbar-track: var(--surface);
+  --scrollbar-thumb: color-mix(in oklab, #111827 25%, transparent 75%);
+}
+
+/* --- Thème 3 : "dark" --- */
+:root[data-theme="dark"] {
+  --bg: #0b1020;
+  --surface: #12172a;
+  --text: #e5e7eb;
+  --muted-text: #9ca3af;
+  --border: #263046;
+  --primary: #60a5fa;
+  --accent: #34d399;
+  --muted: #1a2238;
+  --primary-foreground: #000000;
+
+  --sidebar-bg: #0f1529;
+  --sidebar-border: #263046;
+  --sidebar-text: #e5e7eb;
+
+  --bubble-user-bg: #1a2238;
+  --bubble-user-text: #e5e7eb;
+
+  --scrollbar-track: #12172a;
+  --scrollbar-thumb: #2a375a;
+}
+
+/* --- Thème 4 : "gray-dark" (type ChatGPT - nuances de gris uniquement) --- */
+:root[data-theme="gray-dark"] {
+  --bg: #212121;
+  --surface: #2f2f2f;
+  --text: #ececec;
+  --muted-text: #b4b4b4;
+  --border: #4a4a4a;
+  --primary: #ffffff;
+  --accent: #d1d1d1;
+  --muted: #3a3a3a;
+  --primary-foreground: #000000;
+
+  --sidebar-bg: #202020;
+  --sidebar-border: #3d3d3d;
+  --sidebar-text: #ececec;
+
+  --bubble-user-bg: #3a3a3a;
+  --bubble-user-text: #ececec;
+
+  --scrollbar-track: #2f2f2f;
+  --scrollbar-thumb: #5a5a5a;
+}
+
+/* --- Thème 5 : "creme" (crème chaud et doux) --- */
+:root[data-theme="creme"] {
+  /* Palette chaleureuse et douce, contrastes AA pour le texte principal */
+  --bg: #FAF3E6;              /* crème très clair */
+  --surface: #FFF9EF;         /* surface ivoire */
+  --text: #3A2F2A;            /* brun doux (bon contraste) */
+  --muted-text: #7A6F6A;      /* brun/gris adouci */
+  --border: #E8DCCB;          /* beige sable pour séparateurs */
+  --primary: #C47E2F;         /* caramel/terre cuite doux */
+  --accent: #B08968;          /* noisette */
+  --muted: #F4E9D8;           /* beige pâle pour hovers/bulles */
+  --primary-foreground: #ffffff; /* texte sur primary */
+
+  --sidebar-bg: #FFF6EA;      /* léger différentiel pour la sidebar */
+  --sidebar-border: #E8DCCB;
+  --sidebar-text: var(--text);
+
+  --bubble-user-bg: #F4E9D8;  /* bulles utilisateur */
+  --bubble-user-text: var(--text);
+
+  /* Scrollbars doux et intégrés */
+  --scrollbar-track: var(--surface);
+  --scrollbar-thumb: color-mix(in oklab, var(--text) 20%, transparent 80%);
+}
+
+/* =====================================================================
+   (Optionnel) mapping @theme inline pour Tailwind v4 (couleurs/typos)
+   ===================================================================== */
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains-mono);
+}
+
+/* =====================================================================
+   Styles globaux simples
+   ===================================================================== */
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-inter), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+code, pre {
+  font-family: var(--font-jetbrains-mono), "Courier New", monospace;
+}
+
+/* =====================================================================
+   Scrollbars thémées (Firefox + WebKit)
+   ===================================================================== */
+
+/* Firefox */
+html, body, aside, [class*="overflow-y-auto"], [class*="overflow-x-auto"] {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+/* WebKit (Chrome/Edge/Safari/Opera) */
+::-webkit-scrollbar {
+  width: 20px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 8px;
+  border: 2px solid var(--scrollbar-track);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--scrollbar-thumb) 85%, white 15%);
+}
+
+/* =====================================================================
+   Animations & styles pour l'indicateur de "Réflexion"
+   ===================================================================== */
+@keyframes dv-pulse-ring {
+  0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 30%, transparent); }
+  70% { box-shadow: 0 0 0 10px color-mix(in oklab, var(--primary) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 0%, transparent); }
+}
+
+@keyframes dv-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes dv-dot-wave {
+  0%, 60%, 100% { transform: translateY(0); opacity: .7; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+
+.dv-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+  color: var(--muted-text);
+}
+
+.dv-thinking .dv-bubble {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg,
+      color-mix(in oklab, var(--surface) 85%, var(--primary) 15%),
+      color-mix(in oklab, var(--surface) 92%, var(--primary) 8%),
+      color-mix(in oklab, var(--surface) 85%, var(--primary) 15%));
+  background-size: 200% 100%;
+  border: 1px solid var(--border);
+  animation: dv-shimmer 2.2s ease-in-out infinite;
+}
+
+.dv-thinking .dv-bubble::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  animation: dv-pulse-ring 1.8s ease-out infinite;
+}
+
+.dv-thinking .dv-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--primary) 80%, var(--surface) 20%);
+  animation: dv-dot-wave 1.2s ease-in-out infinite;
+}
+.dv-thinking .dv-dot:nth-child(2) { animation-delay: .15s; }
+.dv-thinking .dv-dot:nth-child(3) { animation-delay: .30s; }
+
+.dv-thinking .dv-label {
+  font-size: .875rem; /* 14px */
+  color: var(--muted-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dv-thinking .dv-bubble,
+  .dv-thinking .dv-bubble::after,
+  .dv-thinking .dv-dot {
+    animation: none !important;
+  }
+}
