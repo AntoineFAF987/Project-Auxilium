@@ -1,0 +1,24 @@
+{
+  "id": "AQMkADAwATM0MDAAMi1hYQAwZi1hZmRhLTAwAi0wMAoARgAAA-vjaCipR3pDj15unY3ef8wHANkKC1tlK4dEkaS1tHrxuSUAAAIBDAAAANkKC1tlK4dEkaS1tHrxuSUAAAIFZwAAAA==",
+  "subject": "Nouvelle(s) application(s) connectée(s) à votre compte Microsoft",
+  "from_": {
+    "name": "Équipe des comptes Microsoft",
+    "address": "account-security-noreply@accountprotection.microsoft.com"
+  },
+  "to": [
+    {
+      "name": "demo.auxilium@outlook.com",
+      "address": "demo.auxilium@outlook.com"
+    }
+  ],
+  "cc": [],
+  "receivedDateTime": "2026-06-01T17:39:05Z",
+  "conversationId": "AQQkADAwATM0MDAAMi1hYQAwZi1hZmRhLTAwAi0wMAoAEAB5titDUcxCTq_y64Ja_ABv",
+  "categories": [],
+  "hasAttachments": false,
+  "body_text": "Compte Microsoft De nouvelles applications ont accès à vos données MailRAG-Dev connecté au compte Microsoft de**m@outlook.com . Si vous n'avez pas accordé cet accès, supprimez les applications de votre compte. Gérer vos applications Vous pouvez également refuser ou modifier l'endroit où vous recevez des notifications de sécurité. Vous en remerciant, L’équipe des comptes Microsoft Déclaration de confidentialité Microsoft Corporation, One Microsoft Way, Redmond, WA 98052",
+  "body_html": null,
+  "user": "demo.auxilium@outlook.com",
+  "folder": "Boîte de réception",
+  "attachment_paths": []
+}

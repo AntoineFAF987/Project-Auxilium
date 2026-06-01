@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useMsal } from "@azure/msal-react";
 import { loginRequest } from "./msalConfig";
 
@@ -17,16 +17,16 @@ export function useAuth() {
 
   const isAuthenticated = !!account;
 
-  async function signIn() {
+  const signIn = useCallback(async function signIn() {
     // Popup only (pas de redirect ici)
     const res = await instance.loginPopup(loginRequest as any);
     // Hydrate le cache et fixe active account
     await instance.acquireTokenSilent({ ...loginRequest, account: res.account } as any);
     instance.setActiveAccount(res.account);
     return res.account;
-  }
+  }, [instance]);
 
-  async function getTokens(): Promise<Tokens> {
+  const getTokens = useCallback(async function getTokens(): Promise<Tokens> {
     const acc = instance.getActiveAccount() || accounts[0];
     const req = { ...loginRequest, account: acc } as const;
     try {
@@ -37,12 +37,12 @@ export function useAuth() {
       instance.setActiveAccount(r.account);
       return { accessToken: r.accessToken, idToken: r.idToken };
     }
-  }
+  }, [accounts, instance]);
 
-  async function signOut() {
+  const signOut = useCallback(async function signOut() {
     const acc = instance.getActiveAccount() || accounts[0];
     await instance.logoutRedirect(acc ? { account: acc } : undefined);
-  }
+  }, [accounts, instance]);
 
   return { account, isAuthenticated, signIn, getTokens, signOut, inProgress };
 }

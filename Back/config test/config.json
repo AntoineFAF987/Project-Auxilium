@@ -1,12 +1,10 @@
 {
-  "roots": [
-    "C:\\Users\\aejau\\OneDrive\\Desktop\\Programme IA"
-  ],
-  "index_dir": "C:\\Users\\aejau\\OneDrive\\Desktop\\Programme IA\\Application\\index_rag",
+  "roots": [],
+  "index_dir": "./data/index_rag",
   "exclude_globs": [
-    "*/index_rag/*",
-    "*/emails_cache/*",
-    "*/email_attachments/*"
+    "*/data/index_rag/*",
+    "*/data/emails_cache/*",
+    "*/data/email_attachments/*"
   ],
   "follow_symlinks": false,
 
@@ -19,12 +17,12 @@
   },
 
   "email_ingest": {
-    "output_dir": "C:\\Users\\aejau\\OneDrive\\Desktop\\Programme IA\\Application\\data\\emails_cache",
-    "attachments_dir": "C:\\Users\\aejau\\OneDrive\\Desktop\\Programme IA\\Application\\data\\email_attachments",
+    "output_dir": "./data/emails_cache",
+    "attachments_dir": "./data/email_attachments",
     "max_emails": 1000,
     "folders": ["Inbox", "Boîte de réception"],
     "date_since": "2024-01-01T00:00:00Z",
     "include_body_html": false,
-    "flatten_for_rag_dir": "C:\\Users\\aejau\\OneDrive\\Desktop\\Programme IA\\Application\\data\\emails_flattened"
+    "flatten_for_rag_dir": "./data/emails_flattened"
   }
 }

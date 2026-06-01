@@ -1,0 +1,6 @@
+Subject: API throttling complaints
+From: Antoine JAUMOUILLE <auxilium.tuto@outlook.com>
+To: demo.auxilium@outlook.com <demo.auxilium@outlook.com>
+Date: 2026-06-01T17:33:47Z
+
+Several customers report receiving HTTP 429 responses. Can someone verify current API limits? Product team

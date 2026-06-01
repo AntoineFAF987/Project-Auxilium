@@ -7,9 +7,11 @@ Created on Sun Aug 31 09:54:20 2025
 
 # user_paths.py
 import os
+from pathlib import Path
 from dataclasses import dataclass
 
-BASE_DATA = os.path.abspath(os.getenv("DATA_DIR", "./data"))  # override possible via .env
+BACK_DIR = Path(__file__).resolve().parent
+BASE_DATA = os.path.abspath(os.getenv("DATA_DIR", str(BACK_DIR / "data")))  # override possible via .env
 
 @dataclass
 class UserPaths:

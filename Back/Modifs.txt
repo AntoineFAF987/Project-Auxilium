@@ -1,1 +1,0 @@
-Ajout de la possibilité d'ingérer tous types de fichiers et d'extensions

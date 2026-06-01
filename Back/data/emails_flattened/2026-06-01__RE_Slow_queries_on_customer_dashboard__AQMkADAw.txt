@@ -1,0 +1,6 @@
+Subject: RE: Slow queries on customer dashboard
+From: Antoine JAUMOUILLE <auxilium.tuto@outlook.com>
+To: Antoine JAUMOUILLE <demo.auxilium@outlook.com>
+Date: 2026-06-01T17:28:03Z
+
+Thanks David. The index was deployed to staging yesterday. Average response time dropped from 8.3s to 740ms. We'll schedule production deployment on September 18. De : Antoine JAUMOUILLE <demo.auxilium@outlook.com> Envoyé : lundi 1 juin 2026 17:27 À : Antoine JAUMOUILLE <auxilium.tuto@outlook.com> Objet : RE: Slow queries on customer dashboard   Hi Sarah, I reviewed the query plan. The main issue is that the query is performing a sequential scan on customer_events . The table is missing a composite index on: (customer_id, event_timestamp) I recommend adding the index in staging first. David De : Antoine JAUMOUILLE <auxilium.tuto@outlook.com> Envoyé : lundi 1 juin 2026 19:19 À : demo.auxilium@outlook.com <demo.auxilium@outlook.com> Objet : Slow queries on customer dashboard   Hi team, We've noticed that several dashboard pages are taking more than 8 seconds to load. Initial investigation suggests that the issue may be related to the customer_events  table, which currently contains approximately 42 million rows. Could someone review the execution plan and identify possible optimizations? Thanks, Sarah

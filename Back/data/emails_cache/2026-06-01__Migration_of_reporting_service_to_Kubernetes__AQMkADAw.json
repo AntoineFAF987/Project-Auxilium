@@ -1,0 +1,24 @@
+{
+  "id": "AQMkADAwATM0MDAAMi1hYQAwZi1hZmRhLTAwAi0wMAoARgAAA-vjaCipR3pDj15unY3ef8wHANkKC1tlK4dEkaS1tHrxuSUAAAIBDAAAANkKC1tlK4dEkaS1tHrxuSUAAAIFXAAAAA==",
+  "subject": "Migration of reporting service to Kubernetes",
+  "from_": {
+    "name": "Antoine JAUMOUILLE",
+    "address": "auxilium.tuto@outlook.com"
+  },
+  "to": [
+    {
+      "name": "demo.auxilium@outlook.com",
+      "address": "demo.auxilium@outlook.com"
+    }
+  ],
+  "cc": [],
+  "receivedDateTime": "2026-06-01T17:30:35Z",
+  "conversationId": "AQQkADAwATM0MDAAMi1hYQAwZi1hZmRhLTAwAi0wMAoAEAC0pCcPVvKyQqAuYZkCZiA0",
+  "categories": [],
+  "hasAttachments": false,
+  "body_text": "Hi team, We plan to migrate the reporting service from Docker Compose to Kubernetes next month. Target migration date: August 12. Emma",
+  "body_html": null,
+  "user": "demo.auxilium@outlook.com",
+  "folder": "Boîte de réception",
+  "attachment_paths": []
+}

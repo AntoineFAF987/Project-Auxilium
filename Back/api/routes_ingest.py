@@ -208,6 +208,7 @@ def ingest_mails():
         with idx_lock:
             idx.roots = _recompute_roots_with_flat_emails()
             idx.rebuild_incremental()
+
         return {
             "ok": True,
             "purged": purged,
@@ -259,6 +260,7 @@ def ingest_mails_only(request: Request):
         with idx_lock:
             idx.roots = _recompute_roots_with_flat_emails()
             idx.rebuild_incremental()
+
         return {
             "ok": True,
             "purged": purged,
@@ -276,11 +278,11 @@ def ingest_mails_only(request: Request):
             ingest_emails(str(CONFIG_PATH), override_folders=folders)
             mode = "legacy"
 
-        # 🔁 Réindexation locale **avec** recalcul des roots (inclure flat_dir)
         with idx_lock:
             idx.roots = _recompute_roots_with_flat_emails()
             idx.rebuild_incremental()
 
+        # 🔁 Réindexation locale **avec** recalcul des roots (inclure flat_dir)
         return {
             "ok": True,
             "purged": purged,

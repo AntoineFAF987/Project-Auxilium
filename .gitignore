@@ -17,12 +17,17 @@ Back/.env
 Back/.env.*
 
 # --- Données et caches spécifiques ---
-Back/index_rag/
-Back/emails_cache/
-Back/email_attachments/
 Back/api/app.db
 Back/api/app.db-shm
 Back/api/app.db-wal
+Back/api/chats.db
+Back/api/chats.db-shm
+Back/api/chats.db-wal
+Back/data/chats.db
+Back/data/chats.db-shm
+Back/data/chats.db-wal
+Back/data/settings.db-shm
+Back/data/settings.db-wal
 Back/api/chat_secret.key
 **/token_cache.bin
 

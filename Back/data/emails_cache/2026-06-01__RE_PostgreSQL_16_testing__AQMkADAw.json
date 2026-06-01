@@ -1,0 +1,24 @@
+{
+  "id": "AQMkADAwATM0MDAAMi1hYQAwZi1hZmRhLTAwAi0wMAoARgAAA-vjaCipR3pDj15unY3ef8wHANkKC1tlK4dEkaS1tHrxuSUAAAIBDAAAANkKC1tlK4dEkaS1tHrxuSUAAAIFZQAAAA==",
+  "subject": "RE: PostgreSQL 16 testing",
+  "from_": {
+    "name": "Antoine JAUMOUILLE",
+    "address": "auxilium.tuto@outlook.com"
+  },
+  "to": [
+    {
+      "name": "demo.auxilium@outlook.com",
+      "address": "demo.auxilium@outlook.com"
+    }
+  ],
+  "cc": [],
+  "receivedDateTime": "2026-06-01T17:37:44Z",
+  "conversationId": "AQQkADAwATM0MDAAMi1hYQAwZi1hZmRhLTAwAi0wMAoAEADYJGjPF4BvTr3vqwoAJ9LK",
+  "categories": [],
+  "hasAttachments": false,
+  "body_text": "Benchmark results: 18% faster analytical queries 11% lower CPU utilization No compatibility issues detected. De : Auxilim Tuto Envoyé : lundi 1 juin 2026 17:35 À : demo.auxilium@outlook.com <demo.auxilium@outlook.com> Objet : PostgreSQL 16 testing   Testing of PostgreSQL 16 has begun in staging. Current production version is PostgreSQL 14. Infrastructure team",
+  "body_html": null,
+  "user": "demo.auxilium@outlook.com",
+  "folder": "Boîte de réception",
+  "attachment_paths": []
+}

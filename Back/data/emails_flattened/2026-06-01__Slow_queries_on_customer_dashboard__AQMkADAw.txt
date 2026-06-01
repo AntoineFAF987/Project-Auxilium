@@ -1,0 +1,6 @@
+Subject: Slow queries on customer dashboard
+From: Antoine JAUMOUILLE <auxilium.tuto@outlook.com>
+To: demo.auxilium@outlook.com <demo.auxilium@outlook.com>
+Date: 2026-06-01T17:19:07Z
+
+Hi team, We've noticed that several dashboard pages are taking more than 8 seconds to load. Initial investigation suggests that the issue may be related to the customer_events  table, which currently contains approximately 42 million rows. Could someone review the execution plan and identify possible optimizations? Thanks, Sarah

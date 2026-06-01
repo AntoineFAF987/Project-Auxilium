@@ -1,0 +1,6 @@
+Subject: PostgreSQL 16 testing
+From: Antoine JAUMOUILLE <auxilium.tuto@outlook.com>
+To: demo.auxilium@outlook.com <demo.auxilium@outlook.com>
+Date: 2026-06-01T17:35:28Z
+
+Testing of PostgreSQL 16 has begun in staging. Current production version is PostgreSQL 14. Infrastructure team

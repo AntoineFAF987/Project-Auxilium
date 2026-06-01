@@ -1,0 +1,6 @@
+Subject: Nouvelle(s) application(s) connectée(s) à votre compte Microsoft
+From: Équipe des comptes Microsoft <account-security-noreply@accountprotection.microsoft.com>
+To: demo.auxilium@outlook.com <demo.auxilium@outlook.com>
+Date: 2026-06-01T17:39:05Z
+
+Compte Microsoft De nouvelles applications ont accès à vos données MailRAG-Dev connecté au compte Microsoft de**m@outlook.com . Si vous n'avez pas accordé cet accès, supprimez les applications de votre compte. Gérer vos applications Vous pouvez également refuser ou modifier l'endroit où vous recevez des notifications de sécurité. Vous en remerciant, L’équipe des comptes Microsoft Déclaration de confidentialité Microsoft Corporation, One Microsoft Way, Redmond, WA 98052

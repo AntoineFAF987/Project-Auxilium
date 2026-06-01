@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import re, json, uuid, hashlib
+from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from fastapi import APIRouter, HTTPException, Request
@@ -65,6 +66,17 @@ def _safe_llm(fn, *args, **kwargs):
         return _call_llm_with_retries(fn, *args, **kwargs)
     finally:
         LLM_SEM.release()
+
+def _local_index_ready() -> bool:
+    try:
+        return all(Path(p).exists() for p in [idx.corpus_path, idx.emb_path, idx.faiss_path])
+    except Exception:
+        return False
+
+def _missing_index_message(mode_in: str) -> str:
+    if mode_in in {"local", "web_index"}:
+        return "L'index local n'existe pas encore. Lance une reindexation avant d'utiliser ce mode."
+    return ""
 
 # ---------- Auth helpers (optionnels) ----------
 def _try_get_auth_ids(request: Request):
@@ -448,6 +460,29 @@ def ask(body: AskIn, request: Request):
         try:
             ans = _safe_llm(ask_mistral_with_context, q, context_text=reply_preamble, history=hist, timeout=LLM_TIMEOUT_SEC)
             return AskOut(answer=ans, sources=[], mode="GENERAL(vague-no-history)", ctx_len=len(reply_preamble), request_id=request_id)
+        except FuturesTimeout:
+            raise HTTPException(status_code=504, detail="LLM timeout")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"LLM error: {e}")
+
+    if not _local_index_ready():
+        if mode_in in {"local", "web_index"}:
+            return AskOut(
+                answer=_missing_index_message(mode_in),
+                sources=[],
+                mode="STRICT(local)",
+                ctx_len=0,
+                request_id=request_id,
+            )
+        try:
+            ans = _safe_llm(
+                ask_mistral_with_context,
+                q,
+                context_text=reply_preamble,
+                history=hist,
+                timeout=LLM_TIMEOUT_SEC,
+            )
+            return AskOut(answer=ans, sources=[], mode="GENERAL(no-index)", ctx_len=len(reply_preamble), request_id=request_id)
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
         except Exception as e:
@@ -1006,6 +1041,33 @@ async def ask_stream(body: AskIn, request: Request):
                 for chunk in ask_mistral_with_context_stream(q, context_text=reply_preamble, history=hist):
                     yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
                 yield f"data: {json.dumps({'type': 'done', 'sources': [], 'mode': 'GENERAL(vague-no-history)'})}\n\n"
+                return
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+                return
+
+        if not _local_index_ready():
+            if mode_in in {"local", "web_index"}:
+                yield f"data: {json.dumps({'type': 'content', 'content': _missing_index_message(mode_in)})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'sources': [], 'mode': 'STRICT(local)'})}\n\n"
+                return
+            try:
+                full_general_answer = ""
+                for chunk in ask_mistral_with_context_stream(q, context_text=reply_preamble, history=hist):
+                    full_general_answer += chunk
+                    yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
+                tenant_id, user_id = _try_get_auth_ids(request)
+                chat_id = (body.thread_id or "").strip()
+                if tenant_id and user_id:
+                    try:
+                        title = (q[:60] + "…") if len(q) > 60 else q
+                        chat_id = chat_id or str(uuid.uuid4())
+                        create_chat(tenant_id, user_id, title=title or "Nouveau chat", chat_id=chat_id)
+                        append_message(tenant_id, user_id, chat_id, "user", q, meta={"stream": True, "mode": "general"})
+                        append_message(tenant_id, user_id, chat_id, "assistant", full_general_answer, meta={"mode": "GENERAL(no-index)", "stream": True})
+                    except Exception:
+                        pass
+                yield f"data: {json.dumps({'type': 'done', 'sources': [], 'mode': 'GENERAL(no-index)', 'chat_id': (chat_id or None)})}\n\n"
                 return
             except Exception as e:
                 yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"

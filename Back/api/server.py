@@ -61,11 +61,21 @@ PER_SEC = int(rate_limit["per_sec"])
 
 # Initialiser le rate limiter avec les valeurs de config
 RATE_LIMITER = _RateLimiter(max_req=MAX_REQ, per_sec=PER_SEC)
+RATE_LIMIT_EXEMPT_GET_PATHS = {
+    "/config",
+    "/emails/available",
+    "/settings/directories",
+    "/settings/email-folders",
+    "/settings/extensions",
+}
 
 @app.middleware("http")
 async def rate_limiter_mw(request: Request, call_next):
     # Exempter les requêtes OPTIONS (CORS preflight) du rate limiting
     if request.method == "OPTIONS":
+        return await call_next(request)
+
+    if request.method == "GET" and request.url.path in RATE_LIMIT_EXEMPT_GET_PATHS:
         return await call_next(request)
     
     client_ip = request.client.host if request.client else "unknown"

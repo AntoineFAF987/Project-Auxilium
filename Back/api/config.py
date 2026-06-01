@@ -6,6 +6,7 @@ from typing import Dict, Tuple, List, Any
 # --------- Config générale ---------
 APP_DIR = Path(__file__).resolve().parent.parent  # racine du projet
 CONFIG_PATH = APP_DIR / "config.json"
+DATA_DIR = APP_DIR / "data"
 
 def _load_cfg() -> dict:
     if not CONFIG_PATH.exists():
@@ -15,7 +16,7 @@ def _load_cfg() -> dict:
 
 def _core_from_cfg(cfg: dict):
     roots = cfg.get("roots") or [str(APP_DIR)]
-    index_dir = cfg.get("index_dir") or str(APP_DIR / "index_rag")
+    index_dir = cfg.get("index_dir") or str(DATA_DIR / "index_rag")
     exclude_globs = cfg.get("exclude_globs") or []
     follow_symlinks = bool(cfg.get("follow_symlinks", False))
     return roots, index_dir, exclude_globs, follow_symlinks

@@ -1,0 +1,24 @@
+{
+  "id": "AQMkADAwATM0MDAAMi1hYQAwZi1hZmRhLTAwAi0wMAoARgAAA-vjaCipR3pDj15unY3ef8wHANkKC1tlK4dEkaS1tHrxuSUAAAIBDAAAANkKC1tlK4dEkaS1tHrxuSUAAAIFXwAAAA==",
+  "subject": "RE: Suspicious login detected",
+  "from_": {
+    "name": "Auxilim Tuto",
+    "address": "auxilium.tuto@outlook.com"
+  },
+  "to": [
+    {
+      "name": "demo.auxilium@outlook.com",
+      "address": "demo.auxilium@outlook.com"
+    }
+  ],
+  "cc": [],
+  "receivedDateTime": "2026-06-01T17:32:46Z",
+  "conversationId": "AQQkADAwATM0MDAAMi1hYQAwZi1hZmRhLTAwAi0wMAoAEACRDK_AnSenTLN9MiDVmp4X",
+  "categories": [],
+  "hasAttachments": false,
+  "body_text": "Investigation complete. No compromise was identified. The activity was caused by an employee travelling in Singapore. De : Antoine JAUMOUILLE Envoyé : lundi 1 juin 2026 17:32 À : demo.auxilium@outlook.com <demo.auxilium@outlook.com> Objet : Suspicious login detected   We detected multiple failed login attempts originating from an IP address located outside our normal operating regions. The account involved belongs to a contractor. Security team",
+  "body_html": null,
+  "user": "demo.auxilium@outlook.com",
+  "folder": "Boîte de réception",
+  "attachment_paths": []
+}

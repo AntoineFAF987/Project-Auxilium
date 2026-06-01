@@ -1,0 +1,24 @@
+{
+  "id": "AQMkADAwATM0MDAAMi1hYQAwZi1hZmRhLTAwAi0wMAoARgAAA-vjaCipR3pDj15unY3ef8wHANkKC1tlK4dEkaS1tHrxuSUAAAIBDAAAANkKC1tlK4dEkaS1tHrxuSUAAAIFYQAAAA==",
+  "subject": "RE: API throttling complaints",
+  "from_": {
+    "name": "Auxilim Tuto",
+    "address": "auxilium.tuto@outlook.com"
+  },
+  "to": [
+    {
+      "name": "Antoine JAUMOUILLE",
+      "address": "demo.auxilium@outlook.com"
+    }
+  ],
+  "cc": [],
+  "receivedDateTime": "2026-06-01T17:34:37Z",
+  "conversationId": "AQQkADAwATM0MDAAMi1hYQAwZi1hZmRhLTAwAi0wMAoAEAD9VLgKS8awTa3KX7S7oo6v",
+  "categories": [],
+  "hasAttachments": false,
+  "body_text": "Thanks. We'll update the documentation to reflect the current limits. De : Antoine JAUMOUILLE <demo.auxilium@outlook.com> Envoyé : lundi 1 juin 2026 17:34 À : Antoine JAUMOUILLE <auxilium.tuto@outlook.com> Objet : RE: API throttling complaints   Current limits: Free plan: 100 requests/minute Pro plan: 500 requests/minute Enterprise: unlimited Platform team De : Antoine JAUMOUILLE <auxilium.tuto@outlook.com> Envoyé : lundi 1 juin 2026 19:33 À : demo.auxilium@outlook.com <demo.auxilium@outlook.com> Objet : API throttling complaints   Several customers report receiving HTTP 429 responses. Can someone verify current API limits? Product team",
+  "body_html": null,
+  "user": "demo.auxilium@outlook.com",
+  "folder": "Boîte de réception",
+  "attachment_paths": []
+}

@@ -42,6 +42,7 @@ except Exception:
 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
+DATA_DIR = APP_DIR / "data"
 
 # -------------------------------------------------------------------
 # Utilitaires CONFIG
@@ -73,7 +74,7 @@ def write_default_config_if_missing():
         return
     default = {
         "roots": [str(APP_DIR.parent)],
-        "index_dir": str(APP_DIR / "index_rag"),
+        "index_dir": str(DATA_DIR / "index_rag"),
         "exclude_globs": [
             "*/Windows/*", "*/Program Files/*", "*/Program Files (x86)/*",
             "*/AppData/*", "*/$Recycle.Bin/*", "*/System Volume Information/*"
@@ -90,7 +91,7 @@ def config_get_core_settings(cfg: dict):
     en appliquant des valeurs par défaut si manquants.
     """
     roots = cfg.get("roots") or [str(APP_DIR.parent)]
-    index_dir = cfg.get("index_dir") or str(APP_DIR / "index_rag")
+    index_dir = cfg.get("index_dir") or str(DATA_DIR / "index_rag")
     exclude_globs = cfg.get("exclude_globs") or [
         "*/Windows/*", "*/Program Files/*", "*/Program Files (x86)/*",
         "*/AppData/*", "*/$Recycle.Bin/*", "*/System Volume Information/*"

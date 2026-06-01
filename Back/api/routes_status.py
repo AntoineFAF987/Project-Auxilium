@@ -1,11 +1,18 @@
 # -*- coding: utf-8 -*-
 import time
 from fastapi import APIRouter, HTTPException
-from .config import index_dir
+from .config import index_dir, CONFIG_PATH
 from .directories_db import get_selected_directories
+from .email_db import get_selected_folders
 from .extensions_db import get_allowed_extensions  # ✅
 from .index_singleton import idx, idx_lock
+from .routes_ingest import _recompute_roots_with_flat_emails
 from .sessions import SESSIONS
+
+try:
+    from ingest_emails import ingest_emails
+except Exception:
+    ingest_emails = None
 
 # pour modifier la constante dynamiquement
 from rag_core import utils as rag_utils
@@ -36,20 +43,13 @@ def reindex():
       1) Dossiers autorisés (Paramètres → Dossiers)
       2) Extensions autorisées (Paramètres → Extensions)
     """
-    import os as _os
+    folders = get_selected_folders() or []
+    if folders:
+        if ingest_emails is None:
+            raise HTTPException(status_code=400, detail="ingest_emails non disponible")
+        ingest_emails(str(CONFIG_PATH), override_folders=folders)
 
-    try:
-        selected = get_selected_directories() or []
-    except Exception:
-        selected = []
-
-    roots: list[str] = []
-    for d in selected:
-        if not d.get("enabled", True):
-            continue
-        p = str(d.get("path") or "").strip()
-        if p:
-            roots.append(_os.path.abspath(p))
+    roots = _recompute_roots_with_flat_emails()
 
     # Extensions autorisées (peut être vide -> on garde un fallback minimal côté rag_core.utils)
     exts = get_allowed_extensions() or []

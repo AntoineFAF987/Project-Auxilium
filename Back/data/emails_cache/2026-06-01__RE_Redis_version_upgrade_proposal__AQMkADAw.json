@@ -1,0 +1,24 @@
+{
+  "id": "AQMkADAwATM0MDAAMi1hYQAwZi1hZmRhLTAwAi0wMAoARgAAA-vjaCipR3pDj15unY3ef8wHANkKC1tlK4dEkaS1tHrxuSUAAAIBDAAAANkKC1tlK4dEkaS1tHrxuSUAAAIFWwAAAA==",
+  "subject": "RE: Redis version upgrade proposal",
+  "from_": {
+    "name": "Antoine JAUMOUILLE",
+    "address": "auxilium.tuto@outlook.com"
+  },
+  "to": [
+    {
+      "name": "Antoine JAUMOUILLE",
+      "address": "demo.auxilium@outlook.com"
+    }
+  ],
+  "cc": [],
+  "receivedDateTime": "2026-06-01T17:29:15Z",
+  "conversationId": "AQQkADAwATM0MDAAMi1hYQAwZi1hZmRhLTAwAi0wMAoAEAA5iuF06SqWRZThZ_nYrbZ_",
+  "categories": [],
+  "hasAttachments": false,
+  "body_text": "Compatibility testing completed successfully. Redis 7.2 has now been approved for production rollout. Deployment window: October 14. De : Antoine JAUMOUILLE <demo.auxilium@outlook.com> Envoyé : lundi 1 juin 2026 17:21 À : Antoine JAUMOUILLE <auxilium.tuto@outlook.com> Objet : RE: Redis version upgrade proposal   Hi Michael, Redis 7.2 looks good. However, several legacy services still rely on deprecated commands. We should complete compatibility testing before proceeding. Kevin De : Antoine JAUMOUILLE <auxilium.tuto@outlook.com> Envoyé : lundi 1 juin 2026 19:20 À : demo.auxilium@outlook.com <demo.auxilium@outlook.com> Objet : Redis version upgrade proposal   Hi all, Our production environment is currently running Redis 6.2. Support ends next year. I propose upgrading to Redis 7.2 during Q4. Michael",
+  "body_html": null,
+  "user": "demo.auxilium@outlook.com",
+  "folder": "Boîte de réception",
+  "attachment_paths": []
+}

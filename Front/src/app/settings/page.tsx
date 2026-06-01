@@ -256,25 +256,27 @@ export default function SettingsPage() {
   return (
     <RequireAuth>
       <div className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
-        <header className="h-16 sticky top-0 bg-[var(--surface)] border-b border-[var(--border)] flex items-center px-4 z-10 relative">
-          <h1 className="text-xl font-medium">{t("settings")}</h1>
+        <header className="h-16 sticky top-0 bg-[var(--surface)] border-b border-[var(--border)] flex items-center justify-center px-4 z-10 relative">
+          <h1 className="text-xl font-medium text-center">{t("settings")}</h1>
           <Link
             href="/"
-            className="absolute right-4 top-1/2 -translate-y-1/2 h-9 px-3 rounded-full border border-[var(--border)] grid place-items-center hover:bg-[var(--muted)] cursor-pointer"
+            className="absolute left-4 top-1/2 -translate-y-1/2 inline-flex items-center gap-1.5 text-sm hover:opacity-70 cursor-pointer"
             aria-label={t("back")}
             title={t("back")}
           >
             <svg
               viewBox="0 0 24 24"
-              className="h-4.5 w-4.5"
+              className="h-4 w-4"
               fill="none"
               stroke="currentColor"
-              strokeWidth="1.8"
+              strokeWidth="2"
               strokeLinecap="round"
               strokeLinejoin="round"
+              aria-hidden="true"
             >
-              <path d="M15 18l-6-6 6-6" />
+              <path d="M15 6L9 12L15 18" />
             </svg>
+            <span>{t("back")}</span>
           </Link>
         </header>
 

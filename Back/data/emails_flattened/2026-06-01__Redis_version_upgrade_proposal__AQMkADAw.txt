@@ -1,0 +1,6 @@
+Subject: Redis version upgrade proposal
+From: Antoine JAUMOUILLE <auxilium.tuto@outlook.com>
+To: demo.auxilium@outlook.com <demo.auxilium@outlook.com>
+Date: 2026-06-01T17:20:47Z
+
+Hi all, Our production environment is currently running Redis 6.2. Support ends next year. I propose upgrading to Redis 7.2 during Q4. Michael

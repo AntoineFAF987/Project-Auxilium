@@ -1,0 +1,6 @@
+Subject: Migration of reporting service to Kubernetes
+From: Antoine JAUMOUILLE <auxilium.tuto@outlook.com>
+To: demo.auxilium@outlook.com <demo.auxilium@outlook.com>
+Date: 2026-06-01T17:30:35Z
+
+Hi team, We plan to migrate the reporting service from Docker Compose to Kubernetes next month. Target migration date: August 12. Emma

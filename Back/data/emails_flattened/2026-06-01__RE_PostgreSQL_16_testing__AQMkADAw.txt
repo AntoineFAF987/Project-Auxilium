@@ -1,0 +1,6 @@
+Subject: RE: PostgreSQL 16 testing
+From: Antoine JAUMOUILLE <auxilium.tuto@outlook.com>
+To: demo.auxilium@outlook.com <demo.auxilium@outlook.com>
+Date: 2026-06-01T17:37:44Z
+
+Benchmark results: 18% faster analytical queries 11% lower CPU utilization No compatibility issues detected. De : Auxilim Tuto Envoyé : lundi 1 juin 2026 17:35 À : demo.auxilium@outlook.com <demo.auxilium@outlook.com> Objet : PostgreSQL 16 testing   Testing of PostgreSQL 16 has begun in staging. Current production version is PostgreSQL 14. Infrastructure team

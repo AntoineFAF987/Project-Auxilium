@@ -1,0 +1,6 @@
+Subject: RE: Suspicious login detected
+From: Auxilim Tuto <auxilium.tuto@outlook.com>
+To: demo.auxilium@outlook.com <demo.auxilium@outlook.com>
+Date: 2026-06-01T17:32:46Z
+
+Investigation complete. No compromise was identified. The activity was caused by an employee travelling in Singapore. De : Antoine JAUMOUILLE Envoyé : lundi 1 juin 2026 17:32 À : demo.auxilium@outlook.com <demo.auxilium@outlook.com> Objet : Suspicious login detected   We detected multiple failed login attempts originating from an IP address located outside our normal operating regions. The account involved belongs to a contractor. Security team

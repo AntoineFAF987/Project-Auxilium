@@ -1,0 +1,6 @@
+Subject: Suspicious login detected
+From: Antoine JAUMOUILLE <auxilium.tuto@outlook.com>
+To: demo.auxilium@outlook.com <demo.auxilium@outlook.com>
+Date: 2026-06-01T17:32:18Z
+
+We detected multiple failed login attempts originating from an IP address located outside our normal operating regions. The account involved belongs to a contractor. Security team

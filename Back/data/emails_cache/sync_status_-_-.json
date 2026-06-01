@@ -1,0 +1,19 @@
+{
+  "status": "error",
+  "updated_at": "2026-06-01T19:53:31Z",
+  "cache_cleanup": {
+    "purged": {
+      "json_removed": 0,
+      "txt_removed": 0,
+      "att_removed": 0
+    },
+    "pruned": {
+      "state_removed": 0,
+      "state_total": 1
+    },
+    "backfill_reset": {
+      "empty_folders_reset": 0
+    }
+  },
+  "error": "Échec token: AADSTS70016: The provided request has not yet been authorized by the user. The user must input their code. Trace ID: 66ab8649-73dc-4f4b-867e-f74cfa6a9200 Correlation ID: a79e49be-c25b-41e2-a459-35a1af15224a Timestamp: 2026-06-01 20:08:29Z"
+}

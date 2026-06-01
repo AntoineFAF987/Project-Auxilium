@@ -1,0 +1,6 @@
+Subject: RE: Migration of reporting service to Kubernetes
+From: Antoine JAUMOUILLE <auxilium.tuto@outlook.com>
+To: Antoine JAUMOUILLE <demo.auxilium@outlook.com>
+Date: 2026-06-01T17:31:18Z
+
+Understood. Migration postponed until September 5 while memory issues are investigated. De : Antoine JAUMOUILLE <demo.auxilium@outlook.com> Envoyé : lundi 1 juin 2026 17:30 À : Antoine JAUMOUILLE <auxilium.tuto@outlook.com> Objet : RE: Migration of reporting service to Kubernetes   Hi Emma, The migration should be postponed. Load testing revealed memory spikes exceeding 5 GB per pod. Daniel De : Antoine JAUMOUILLE <auxilium.tuto@outlook.com> Envoyé : lundi 1 juin 2026 19:30 À : demo.auxilium@outlook.com <demo.auxilium@outlook.com> Objet : Migration of reporting service to Kubernetes   Hi team, We plan to migrate the reporting service from Docker Compose to Kubernetes next month. Target migration date: August 12. Emma
