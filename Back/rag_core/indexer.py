@@ -31,6 +31,13 @@ from ingest_pdfs import (
 )
 
 from .constants import ANSWER_MIN_CE  # utilisé indirectement par l'orchestration
+from .contracts import (
+    RETRIEVAL_VARIANTS,
+    RetrievalCandidate,
+    RetrievalResult,
+    RetrievalTrace,
+    RetrievalVariant,
+)
 
 
 def mmr_select(query_vec: np.ndarray, cand_vecs: np.ndarray, cand_ids: np.ndarray, k: int = 8, lambda_mult: float = 0.7) -> List[int]:
@@ -534,3 +541,331 @@ class RAGIndexer:
                 pass
 
         return [(0.0, self._meta_with_text(i)) for _, i in prelim], ce_scores_list
+
+    # -------------------- OPT-IN INSTRUMENTATION --------------------
+    def search_instrumented(
+        self,
+        query: str,
+        retrieve_k: int = RETRIEVE_K,
+        top_k_faiss: int = TOP_K_FAISS,
+        hybrid_alpha: float = HYBRID_ALPHA,
+        use_rerank: bool = True,
+        allowed_sources: Optional[set] = None,
+        *,
+        variant: RetrievalVariant = "hybrid_current",
+        include_trace: bool = True,
+    ) -> RetrievalResult:
+        """Run observable retrieval without changing the production ``search``.
+
+        ``variant='hybrid_current'`` intentionally mirrors ``search()`` line by
+        line and is protected by parity tests. Other variants are benchmark-only
+        feature flags; none is used by the application runtime.
+        """
+
+        if variant not in RETRIEVAL_VARIANTS:
+            raise ValueError(f"Unknown retrieval variant: {variant}")
+        if self.faiss_index is None:
+            raise RuntimeError("Index introuvable; lance build_or_update() d'abord.")
+        if not self.metas:
+            trace = RetrievalTrace(
+                query=query,
+                variant=variant,
+                parameters=self._trace_parameters(
+                    retrieve_k, top_k_faiss, hybrid_alpha, use_rerank, allowed_sources
+                ),
+            ) if include_trace else None
+            return RetrievalResult(items=[], ce_scores=[], trace=trace)
+
+        with torch.no_grad():
+            q = self.embed_model.encode(query, convert_to_tensor=True, normalize_embeddings=True)
+        q_np = q.detach().cpu().numpy().astype("float32").reshape(1, -1)
+
+        k_faiss = min(top_k_faiss, len(self.metas))
+        if k_faiss <= 0:
+            return RetrievalResult(items=[], ce_scores=[], trace=None)
+
+        faiss_scores, faiss_ids = self.faiss_index.search(q_np, k_faiss)
+        faiss_scores, faiss_ids = faiss_scores[0], faiss_ids[0]
+
+        bm25_scores_full = []
+        bm25_available = False
+        if self.bm25_index is not None:
+            try:
+                bm25_scores_full = self.bm25_index.get_scores(tokenize_for_bm25(query))
+                bm25_available = True
+            except Exception:
+                bm25_scores_full = []
+        bm25_scores_full = np.array(bm25_scores_full, dtype=np.float32) if len(bm25_scores_full) else np.zeros(len(self.metas), dtype=np.float32)
+        if len(bm25_scores_full) > 0:
+            bmin, bmax = float(np.min(bm25_scores_full)), float(np.max(bm25_scores_full))
+            bm25_scores_full = ((bm25_scores_full - bmin) / (bmax - bmin) if bmax > bmin else np.zeros_like(bm25_scores_full, dtype=np.float32))
+
+        top_bm25 = np.argsort(bm25_scores_full)[-TOP_K_BM25:]
+        faiss_map = {int(i): float(s) for s, i in zip(faiss_scores, faiss_ids) if i != -1}
+        cand_ids_all = np.unique(np.concatenate([top_bm25.astype(int), faiss_ids[faiss_ids != -1].astype(int)]))
+
+        if allowed_sources:
+            kept = []
+            for idx_id in cand_ids_all:
+                meta = self.metas[int(idx_id)]
+                src = (meta.get("source") or "").lower()
+                is_web = self._is_web_doc(meta)
+                if "web" in allowed_sources:
+                    if is_web: kept.append(int(idx_id))
+                else:
+                    if (src in allowed_sources) and (not is_web):
+                        kept.append(int(idx_id))
+            cand_ids_all = np.array(kept, dtype=int)
+            if cand_ids_all.size == 0:
+                trace = RetrievalTrace(
+                    query=query,
+                    variant=variant,
+                    parameters=self._trace_parameters(
+                        retrieve_k, top_k_faiss, hybrid_alpha, use_rerank, allowed_sources
+                    ),
+                ) if include_trace else None
+                return RetrievalResult(items=[], ce_scores=[], trace=trace)
+
+        candidate_map: Dict[int, RetrievalCandidate] = {}
+        union_ids = [int(i) for i in cand_ids_all]
+
+        def candidate(idx_id: int) -> RetrievalCandidate:
+            idx_int = int(idx_id)
+            if idx_int not in candidate_map:
+                metadata = dict(self.metas[idx_int])
+                metadata["idx"] = idx_int
+                candidate_map[idx_int] = RetrievalCandidate(
+                    candidate_id=idx_int,
+                    metadata=metadata,
+                )
+            return candidate_map[idx_int]
+
+        union_id_set = set(union_ids)
+        for rank, idx_id in enumerate(union_ids, start=1):
+            candidate(idx_id).union_rank = rank
+
+        dense_ids = [int(i) for i in faiss_ids if i != -1 and int(i) in union_id_set]
+        for rank, idx_id in enumerate(dense_ids, start=1):
+            item = candidate(idx_id)
+            item.dense_score = faiss_map[idx_id]
+            item.dense_rank = rank
+
+        bm25_ids = sorted(
+            (int(i) for i in top_bm25 if int(i) in union_id_set),
+            key=lambda idx_id: float(bm25_scores_full[idx_id]),
+            reverse=True,
+        )
+        for rank, idx_id in enumerate(bm25_ids, start=1):
+            item = candidate(idx_id)
+            if bm25_available:
+                item.bm25_score = float(bm25_scores_full[idx_id])
+            item.bm25_rank = rank
+
+        parameters = self._trace_parameters(
+            retrieve_k, top_k_faiss, hybrid_alpha, use_rerank, allowed_sources
+        )
+
+        # Benchmark-only single-signal baselines. They do not enter search().
+        if variant == "dense_only":
+            chosen_ids = dense_ids[:retrieve_k]
+            items = [(float(faiss_map[idx_id]), self._meta_with_text(idx_id)) for idx_id in chosen_ids]
+            trace = self._build_trace(
+                query, variant, parameters, candidate_map, dense_ids, bm25_ids,
+                union_ids, [], [], [], [], chosen_ids,
+            ) if include_trace else None
+            return RetrievalResult(items=items, ce_scores=[], trace=trace)
+
+        if variant == "bm25_only":
+            chosen_ids = bm25_ids[:retrieve_k]
+            items = [(float(bm25_scores_full[idx_id]), self._meta_with_text(idx_id)) for idx_id in chosen_ids]
+            trace = self._build_trace(
+                query, variant, parameters, candidate_map, dense_ids, bm25_ids,
+                union_ids, [], [], [], [], chosen_ids,
+            ) if include_trace else None
+            return RetrievalResult(items=items, ce_scores=[], trace=trace)
+
+        fused = []
+        q_lower = query.lower()
+        for idx_id in cand_ids_all:
+            idx_int = int(idx_id)
+            vec_score = faiss_map.get(idx_int, 0.0)
+            bm_score = float(bm25_scores_full[idx_int]) if 0 <= idx_int < len(bm25_scores_full) else 0.0
+            txt_lower = self._get_text(idx_int).lower()
+            bonus = 0.15 if (len(q_lower) >= 6 and q_lower in txt_lower) else 0.0
+            score = hybrid_alpha * bm_score + (1 - hybrid_alpha) * vec_score + bonus
+            item = candidate(idx_int)
+            if idx_int in faiss_map:
+                item.dense_score = vec_score
+            if bm25_available:
+                item.bm25_score = bm_score
+            item.exact_match_bonus = bonus
+            item.hybrid_score = float(score)
+            fused.append((score, idx_int))
+        fused.sort(key=lambda x: x[0], reverse=True)
+        fusion_ids = [idx_id for _, idx_id in fused]
+        for rank, idx_id in enumerate(fusion_ids, start=1):
+            candidate(idx_id).fusion_rank = rank
+
+        prelim_k = max(retrieve_k * 2, retrieve_k)
+        cand_ids_sorted = np.array([idx_id for _, idx_id in fused[:prelim_k]], dtype=int)
+        top_pool_ids = [int(i) for i in cand_ids_sorted]
+        for rank, idx_id in enumerate(top_pool_ids, start=1):
+            candidate(idx_id).top_pool_rank = rank
+        if cand_ids_sorted.size == 0:
+            trace = self._build_trace(
+                query, variant, parameters, candidate_map, dense_ids, bm25_ids,
+                union_ids, fusion_ids, top_pool_ids, [], [], [],
+            ) if include_trace else None
+            return RetrievalResult(items=[], ce_scores=[], trace=trace)
+
+        if variant == "hybrid_no_mmr":
+            stage_ids = top_pool_ids[:retrieve_k]
+            mmr_ids: List[int] = []
+        else:
+            cand_vecs = self.embeddings[cand_ids_sorted]
+            q_vec = q_np[0]
+            mmr_ids = mmr_select(q_vec, cand_vecs, cand_ids_sorted, k=retrieve_k, lambda_mult=0.7)
+            stage_ids = mmr_ids
+            if include_trace:
+                mmr_scores = (
+                    self._mmr_scores_for_selected(
+                        q_vec,
+                        cand_vecs,
+                        cand_ids_sorted,
+                        mmr_ids,
+                        lambda_mult=0.7,
+                    )
+                    if cand_ids_sorted.size > retrieve_k
+                    else {}
+                )
+                for rank, idx_id in enumerate(mmr_ids, start=1):
+                    item = candidate(idx_id)
+                    item.selected_by_mmr = True
+                    item.mmr_rank = rank
+                    item.mmr_score = mmr_scores.get(idx_id)
+
+        prelim = [(0.0, idx_id) for idx_id in stage_ids]
+        ce_scores_list: List[float] = []
+        reranked_ids: List[int] = []
+        rerank_enabled = use_rerank and variant != "hybrid_no_reranker"
+        if rerank_enabled and self.cross_encoder is not None and len(prelim) > 0:
+            pairs = [(query, self._get_text(idx_id)) for _, idx_id in prelim]
+            try:
+                ce_scores = self.cross_encoder.predict(pairs)
+                ce_scores_list = [float(score) for score in ce_scores]
+                for idx_id, score in zip(stage_ids, ce_scores_list):
+                    candidate(idx_id).reranker_score = score
+                reranked = sorted(
+                    zip(ce_scores_list, stage_ids), key=lambda x: x[0], reverse=True
+                )
+                chosen = reranked[:retrieve_k]
+                reranked_ids = [idx_id for _, idx_id in chosen]
+                for rank, idx_id in enumerate(reranked_ids, start=1):
+                    candidate(idx_id).reranker_rank = rank
+                items = [
+                    (float(score), self._meta_with_text(idx_id))
+                    for score, idx_id in chosen
+                ]
+                trace = self._build_trace(
+                    query, variant, parameters, candidate_map, dense_ids, bm25_ids,
+                    union_ids, fusion_ids, top_pool_ids, mmr_ids, reranked_ids, reranked_ids,
+                ) if include_trace else None
+                return RetrievalResult(items=items, ce_scores=ce_scores_list, trace=trace)
+            except Exception as exc:
+                trace_error = f"reranker: {type(exc).__name__}: {exc}"
+        else:
+            trace_error = None
+
+        final_ids = stage_ids
+        items = [(0.0, self._meta_with_text(idx_id)) for idx_id in final_ids]
+        trace = self._build_trace(
+            query, variant, parameters, candidate_map, dense_ids, bm25_ids,
+            union_ids, fusion_ids, top_pool_ids, mmr_ids, reranked_ids, final_ids,
+        ) if include_trace else None
+        if trace is not None and trace_error:
+            trace.errors.append(trace_error)
+        return RetrievalResult(items=items, ce_scores=ce_scores_list, trace=trace)
+
+    @staticmethod
+    def _trace_parameters(
+        retrieve_k: int,
+        top_k_faiss: int,
+        hybrid_alpha: float,
+        use_rerank: bool,
+        allowed_sources: Optional[set],
+    ) -> Dict:
+        return {
+            "retrieve_k": int(retrieve_k),
+            "top_k_faiss": int(top_k_faiss),
+            "top_k_bm25": int(TOP_K_BM25),
+            "hybrid_alpha": float(hybrid_alpha),
+            "prelim_k": int(max(retrieve_k * 2, retrieve_k)),
+            "mmr_lambda": 0.7,
+            "use_rerank": bool(use_rerank),
+            "allowed_sources": sorted(allowed_sources) if allowed_sources else None,
+        }
+
+    @staticmethod
+    def _mmr_scores_for_selected(
+        query_vec: np.ndarray,
+        cand_vecs: np.ndarray,
+        cand_ids: np.ndarray,
+        selected_ids: List[int],
+        lambda_mult: float,
+    ) -> Dict[int, float]:
+        q = query_vec / (np.linalg.norm(query_vec) + 1e-9)
+        c = cand_vecs / (
+            np.linalg.norm(cand_vecs, axis=1, keepdims=True) + 1e-9
+        )
+        id_to_pos = {int(idx_id): pos for pos, idx_id in enumerate(cand_ids)}
+        selected_positions: List[int] = []
+        scores: Dict[int, float] = {}
+        sim_to_query = (c @ q).reshape(-1)
+        for idx_id in selected_ids:
+            pos = id_to_pos[int(idx_id)]
+            if not selected_positions:
+                score = float(sim_to_query[pos])
+            else:
+                max_sim_to_selected = float(
+                    np.max(c[pos] @ c[selected_positions].T)
+                )
+                score = float(
+                    lambda_mult * sim_to_query[pos]
+                    - (1 - lambda_mult) * max_sim_to_selected
+                )
+            scores[int(idx_id)] = score
+            selected_positions.append(pos)
+        return scores
+
+    @staticmethod
+    def _build_trace(
+        query: str,
+        variant: RetrievalVariant,
+        parameters: Dict,
+        candidate_map: Dict[int, RetrievalCandidate],
+        dense_ids: List[int],
+        bm25_ids: List[int],
+        union_ids: List[int],
+        fusion_ids: List[int],
+        top_pool_ids: List[int],
+        mmr_ids: List[int],
+        reranked_ids: List[int],
+        final_ids: List[int],
+    ) -> RetrievalTrace:
+        for rank, idx_id in enumerate(final_ids, start=1):
+            candidate_map[idx_id].final_rank = rank
+        candidates = sorted(candidate_map.values(), key=lambda item: item.candidate_id)
+        return RetrievalTrace(
+            query=query,
+            variant=variant,
+            parameters=parameters,
+            candidates=candidates,
+            dense_candidate_ids=dense_ids,
+            bm25_candidate_ids=bm25_ids,
+            union_candidate_ids=union_ids,
+            fusion_candidate_ids=fusion_ids,
+            top_pool_candidate_ids=top_pool_ids,
+            mmr_selected_ids=mmr_ids,
+            reranked_candidate_ids=reranked_ids,
+            final_candidate_ids=final_ids,
+        )
