@@ -3,22 +3,25 @@
 ask_mistral_with_context — style naturel; STRICT si contexte fourni.
 Ajout: adaptation au ton/humeur (cheerful, sad, frustrated, angry, confused, urgent, polite_formal, neutral).
 """
-from typing import List, Dict
+from typing import List, Dict, Optional
 from .affect import detect_mood
+from runtime_settings import get_runtime_settings
 
 def ask_mistral_with_context(
     question: str,
     context_text: str,
     history: List[Dict] = None,
     model: str = None,
-    temperature: float = 0.5,
-    max_tokens: int = 1200,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
     smalltalk_mode: bool = False,
     smalltalk_kind: str | None = None,
     roleplay_mode: bool = False,
     **kwargs,
 ) -> str:
-    import os as _os, re as _re, requests as _requests
+    import os as _os, requests as _requests
+
+    generation = get_runtime_settings().generation
 
     api_key = _os.getenv("MISTRAL_API_KEY")
     if not api_key:
@@ -153,8 +156,16 @@ def ask_mistral_with_context(
                 messages.append({"role": m["role"], "content": m["content"]})
         messages.append({"role": "user", "content": question})
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = {"model": model or _os.getenv("MISTRAL_MODEL","mistral-small-latest"), "messages": messages, "temperature": _adjust_temp(max(temperature,0.9)), "top_p": 0.9, "max_tokens": min(max_tokens,220)}
-        r = _requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=60)
+        roleplay_temperature = max(
+            temperature if temperature is not None else generation.roleplay_temperature,
+            generation.roleplay_temperature,
+        )
+        roleplay_max_tokens = min(
+            max_tokens if max_tokens is not None else generation.roleplay_max_tokens,
+            generation.roleplay_max_tokens,
+        )
+        payload = {"model": model or generation.model, "messages": messages, "temperature": _adjust_temp(roleplay_temperature), "top_p": generation.top_p, "max_tokens": roleplay_max_tokens}
+        r = _requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=generation.http_timeout_sec)
         if r.status_code == 401: raise RuntimeError("401 Unauthorized: vérifie MISTRAL_API_KEY.")
         if r.status_code == 429: raise RuntimeError("429 Too Many Requests: quota/ratelimit.")
         r.raise_for_status(); return r.json()["choices"][0]["message"]["content"]
@@ -176,8 +187,16 @@ def ask_mistral_with_context(
                 messages.append({"role": m["role"], "content": m["content"]})
         messages.append({"role": "user", "content": question})
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = {"model": _os.getenv("MISTRAL_MODEL","mistral-small-latest"), "messages": messages, "temperature": _adjust_temp(max(temperature,0.65)), "top_p": 0.9, "max_tokens": min(max_tokens,200)}
-        r = _requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=60)
+        smalltalk_temperature = max(
+            temperature if temperature is not None else generation.smalltalk_temperature,
+            generation.smalltalk_temperature,
+        )
+        smalltalk_max_tokens = min(
+            max_tokens if max_tokens is not None else generation.smalltalk_max_tokens,
+            generation.smalltalk_max_tokens,
+        )
+        payload = {"model": model or generation.model, "messages": messages, "temperature": _adjust_temp(smalltalk_temperature), "top_p": generation.top_p, "max_tokens": smalltalk_max_tokens}
+        r = _requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=generation.http_timeout_sec)
         if r.status_code == 401: raise RuntimeError("401 Unauthorized: vérifie MISTRAL_API_KEY.")
         if r.status_code == 429: raise RuntimeError("429 Too Many Requests: quota/ratelimit.")
         r.raise_for_status(); return r.json()["choices"][0]["message"]["content"]
@@ -240,15 +259,18 @@ def ask_mistral_with_context(
 
     context_text = context_text or ""
     if not context_text.strip():
-        user_content = question; final_temperature, top_p = 0.6, 0.9
+        user_content = question
+        final_temperature = generation.temperature if temperature is None else temperature
+        top_p = generation.top_p
     else:
         user_content = f"CONTEXTE:\n{context_text}\n\nQUESTION: {question}\nConsigne: réponds factuellement à partir du CONTEXTE uniquement."
-        final_temperature, top_p = 0.45, 1.0
+        final_temperature = generation.strict_temperature if temperature is None else temperature
+        top_p = generation.strict_top_p
 
     messages.append({"role": "user", "content": user_content})
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {"model": _os.getenv("MISTRAL_MODEL","mistral-small-latest"), "messages": messages, "temperature": _adjust_temp(final_temperature), "top_p": top_p, "max_tokens": 1200}
-    r = _requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=60)
+    payload = {"model": model or generation.model, "messages": messages, "temperature": _adjust_temp(final_temperature), "top_p": top_p, "max_tokens": max_tokens if max_tokens is not None else generation.max_tokens}
+    r = _requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=generation.http_timeout_sec)
     if r.status_code == 401: raise RuntimeError("401 Unauthorized: vérifie MISTRAL_API_KEY.")
     if r.status_code == 429: raise RuntimeError("429 Too Many Requests: quota/ratelimit.")
     r.raise_for_status()

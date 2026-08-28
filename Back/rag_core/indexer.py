@@ -19,6 +19,8 @@ from sentence_transformers import SentenceTransformer, CrossEncoder
 from .constants import (
     EMBED_MODEL_NAME, RERANK_MODEL_NAME, DEVICE,
     TOP_K_FAISS, TOP_K_BM25, RETRIEVE_K, HYBRID_ALPHA, NORMALIZE_EMBED,
+    EXACT_MATCH_BONUS, EXACT_MATCH_MIN_CHARS, MMR_LAMBDA,
+    PRELIMINARY_POOL_MULTIPLIER,
 )
 from .utils import (
     ensure_dir, file_fingerprint, _is_under, _safe_walk, tokenize_for_bm25, SUPPORTED_EXTS, read_supported_text,
@@ -40,7 +42,13 @@ from .contracts import (
 )
 
 
-def mmr_select(query_vec: np.ndarray, cand_vecs: np.ndarray, cand_ids: np.ndarray, k: int = 8, lambda_mult: float = 0.7) -> List[int]:
+def mmr_select(
+    query_vec: np.ndarray,
+    cand_vecs: np.ndarray,
+    cand_ids: np.ndarray,
+    k: int = 8,
+    lambda_mult: float = MMR_LAMBDA,
+) -> List[int]:
     if cand_ids.size <= k:
         return list(map(int, cand_ids))
     q = query_vec / (np.linalg.norm(query_vec) + 1e-9)
@@ -68,7 +76,7 @@ class RAGIndexer:
 
         print(f"➡️  Device: {DEVICE}")
         self.embed_model = SentenceTransformer(EMBED_MODEL_NAME, device=DEVICE)
-        _ = self.embed_model.encode(["warmup"], convert_to_tensor=True, normalize_embeddings=True)
+        _ = self.embed_model.encode(["warmup"], convert_to_tensor=True, normalize_embeddings=NORMALIZE_EMBED)
 
         self.cross_encoder = None
         self.rerank_model_used = None
@@ -197,7 +205,7 @@ class RAGIndexer:
             from tqdm import trange as _tr
             for i in _tr(0, len(texts), bs, desc="🔢 Encodage"):
                 batch = texts[i:i+bs]
-                emb = self.embed_model.encode(batch, convert_to_tensor=True, normalize_embeddings=True)
+                emb = self.embed_model.encode(batch, convert_to_tensor=True, normalize_embeddings=NORMALIZE_EMBED)
                 outs.append(emb.detach().cpu())
         return torch.cat(outs, dim=0).numpy().astype("float32")
 
@@ -468,7 +476,7 @@ class RAGIndexer:
             return [], []
 
         with torch.no_grad():
-            q = self.embed_model.encode(query, convert_to_tensor=True, normalize_embeddings=True)
+            q = self.embed_model.encode(query, convert_to_tensor=True, normalize_embeddings=NORMALIZE_EMBED)
         q_np = q.detach().cpu().numpy().astype("float32").reshape(1, -1)
 
         k_faiss = min(top_k_faiss, len(self.metas))
@@ -514,18 +522,18 @@ class RAGIndexer:
             vec_score = faiss_map.get(int(idx), 0.0)
             bm_score = float(bm25_scores_full[int(idx)]) if 0 <= int(idx) < len(bm25_scores_full) else 0.0
             txt_lower = self._get_text(int(idx)).lower()
-            bonus = 0.15 if (len(q_lower) >= 6 and q_lower in txt_lower) else 0.0
+            bonus = EXACT_MATCH_BONUS if (len(q_lower) >= EXACT_MATCH_MIN_CHARS and q_lower in txt_lower) else 0.0
             score = hybrid_alpha * bm_score + (1 - hybrid_alpha) * vec_score + bonus
             fused.append((score, int(idx)))
         fused.sort(key=lambda x: x[0], reverse=True)
 
-        prelim_k = max(retrieve_k * 2, retrieve_k)
+        prelim_k = max(retrieve_k * PRELIMINARY_POOL_MULTIPLIER, retrieve_k)
         cand_ids_sorted = np.array([idx for _, idx in fused[:prelim_k]], dtype=int)
         if cand_ids_sorted.size == 0:
             return [], []
         cand_vecs = self.embeddings[cand_ids_sorted]
         q_vec = q_np[0]
-        mmr_ids = mmr_select(q_vec, cand_vecs, cand_ids_sorted, k=retrieve_k, lambda_mult=0.7)
+        mmr_ids = mmr_select(q_vec, cand_vecs, cand_ids_sorted, k=retrieve_k, lambda_mult=MMR_LAMBDA)
         prelim = [(0.0, i) for i in mmr_ids]
 
         ce_scores_list: List[float] = []
@@ -577,7 +585,7 @@ class RAGIndexer:
             return RetrievalResult(items=[], ce_scores=[], trace=trace)
 
         with torch.no_grad():
-            q = self.embed_model.encode(query, convert_to_tensor=True, normalize_embeddings=True)
+            q = self.embed_model.encode(query, convert_to_tensor=True, normalize_embeddings=NORMALIZE_EMBED)
         q_np = q.detach().cpu().numpy().astype("float32").reshape(1, -1)
 
         k_faiss = min(top_k_faiss, len(self.metas))
@@ -691,7 +699,7 @@ class RAGIndexer:
             vec_score = faiss_map.get(idx_int, 0.0)
             bm_score = float(bm25_scores_full[idx_int]) if 0 <= idx_int < len(bm25_scores_full) else 0.0
             txt_lower = self._get_text(idx_int).lower()
-            bonus = 0.15 if (len(q_lower) >= 6 and q_lower in txt_lower) else 0.0
+            bonus = EXACT_MATCH_BONUS if (len(q_lower) >= EXACT_MATCH_MIN_CHARS and q_lower in txt_lower) else 0.0
             score = hybrid_alpha * bm_score + (1 - hybrid_alpha) * vec_score + bonus
             item = candidate(idx_int)
             if idx_int in faiss_map:
@@ -706,7 +714,7 @@ class RAGIndexer:
         for rank, idx_id in enumerate(fusion_ids, start=1):
             candidate(idx_id).fusion_rank = rank
 
-        prelim_k = max(retrieve_k * 2, retrieve_k)
+        prelim_k = max(retrieve_k * PRELIMINARY_POOL_MULTIPLIER, retrieve_k)
         cand_ids_sorted = np.array([idx_id for _, idx_id in fused[:prelim_k]], dtype=int)
         top_pool_ids = [int(i) for i in cand_ids_sorted]
         for rank, idx_id in enumerate(top_pool_ids, start=1):
@@ -724,7 +732,7 @@ class RAGIndexer:
         else:
             cand_vecs = self.embeddings[cand_ids_sorted]
             q_vec = q_np[0]
-            mmr_ids = mmr_select(q_vec, cand_vecs, cand_ids_sorted, k=retrieve_k, lambda_mult=0.7)
+            mmr_ids = mmr_select(q_vec, cand_vecs, cand_ids_sorted, k=retrieve_k, lambda_mult=MMR_LAMBDA)
             stage_ids = mmr_ids
             if include_trace:
                 mmr_scores = (
@@ -733,7 +741,7 @@ class RAGIndexer:
                         cand_vecs,
                         cand_ids_sorted,
                         mmr_ids,
-                        lambda_mult=0.7,
+                        lambda_mult=MMR_LAMBDA,
                     )
                     if cand_ids_sorted.size > retrieve_k
                     else {}
@@ -799,8 +807,10 @@ class RAGIndexer:
             "top_k_faiss": int(top_k_faiss),
             "top_k_bm25": int(TOP_K_BM25),
             "hybrid_alpha": float(hybrid_alpha),
-            "prelim_k": int(max(retrieve_k * 2, retrieve_k)),
-            "mmr_lambda": 0.7,
+            "prelim_k": int(max(retrieve_k * PRELIMINARY_POOL_MULTIPLIER, retrieve_k)),
+            "mmr_lambda": float(MMR_LAMBDA),
+            "exact_match_bonus": float(EXACT_MATCH_BONUS),
+            "exact_match_min_chars": int(EXACT_MATCH_MIN_CHARS),
             "use_rerank": bool(use_rerank),
             "allowed_sources": sorted(allowed_sources) if allowed_sources else None,
         }

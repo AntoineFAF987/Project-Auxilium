@@ -5,7 +5,7 @@ Small talk — détection sémantique (embeddings) — inchangé.
 from typing import Dict, List, Optional
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from .constants import EMBED_MODEL_NAME, DEVICE
+from .constants import DEVICE, EMBED_MODEL_NAME, NORMALIZE_EMBED
 
 _SMALLTALK_PROTOS: Dict[str, List[str]] = {
     "greeting": ["bonjour", "salut", "bonsoir", "hello", "hi", "hey", "hola", "ola", "ciao", "👋"],
@@ -22,7 +22,11 @@ def _prepare_smalltalk_cache(embed_model: SentenceTransformer):
         return _SMALLTALK_CACHE
     labels = {}
     for lab, phrases in _SMALLTALK_PROTOS.items():
-        vecs = embed_model.encode(phrases, convert_to_tensor=False, normalize_embeddings=True)
+        vecs = embed_model.encode(
+            phrases,
+            convert_to_tensor=False,
+            normalize_embeddings=NORMALIZE_EMBED,
+        )
         labels[lab] = np.array(vecs, dtype=np.float32)
     _SMALLTALK_CACHE = labels
     return _SMALLTALK_CACHE
@@ -36,7 +40,11 @@ def classify_smalltalk_semantic(q: str, embed_model: SentenceTransformer, thresh
     if len(s) > 140:  # small talk = court
         return ""
     cache = _prepare_smalltalk_cache(embed_model)
-    qv = embed_model.encode([s], convert_to_tensor=False, normalize_embeddings=True)[0].astype(np.float32)
+    qv = embed_model.encode(
+        [s],
+        convert_to_tensor=False,
+        normalize_embeddings=NORMALIZE_EMBED,
+    )[0].astype(np.float32)
     best_label, best_sim = "", -1.0
     for lab, mat in cache.items():
         sim = float(np.max(mat @ qv))

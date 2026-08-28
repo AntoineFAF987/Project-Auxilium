@@ -89,7 +89,7 @@ response_cache = _LRUCacheTTL(capacity=256, ttl=60)
 
 # --------- Rate limiting (token bucket simple) ---------
 class _RateLimiter:
-    def __init__(self, max_req: int = 10, per_sec: int = 10):
+    def __init__(self, max_req: int, per_sec: int):
         self.max_req = max_req
         self.per_sec = per_sec
         self._buckets: Dict[str, Tuple[float, float]] = {}
@@ -106,5 +106,3 @@ class _RateLimiter:
                 return False
             self._buckets[key] = (tokens - 1.0, now)
             return True
-
-RATE_LIMITER = _RateLimiter(max_req=12, per_sec=10)

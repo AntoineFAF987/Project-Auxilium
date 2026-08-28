@@ -21,14 +21,15 @@ export type EmailAccount = {
 
 export type AppConfig = {
   version?: number;
-  directories?: DirectoryItem[];
   email?: { accounts?: EmailAccount[] };
   llm?: {
-    provider?: "openai" | "azure_openai" | "mistral" | "ollama";
+    provider?: "mistral";
     model?: string;
     temperature?: number;
+    strict_temperature?: number;
+    top_p?: number;
+    strict_top_p?: number;
     max_tokens?: number;
-    stream?: boolean;
   };
   // compat extensible
   [k: string]: any;
@@ -161,26 +162,6 @@ export async function testEmail(account: EmailAccount, token?: string) {
   const data = await r.json().catch(() => ({} as any));
   if (!r.ok) throw new Error(data?.detail || `POST /config/test/email: ${r.status} ${r.statusText}`);
   return data; // { ok: true, message: "..." } ou erreur
-}
-
-/** Modifs locales (puis appeler putConfig pour persister côté back) */
-export function addDirectoryLocal(cfg: AppConfig, item: DirectoryItem): AppConfig {
-  const list = [...(cfg.directories || [])];
-  list.push({ ...item, enabled: item.enabled ?? true });
-  return { ...cfg, directories: list };
-}
-export function removeDirectoryLocal(cfg: AppConfig, index: number): AppConfig {
-  const list = [...(cfg.directories || [])];
-  if (index >= 0 && index < list.length) list.splice(index, 1);
-  return { ...cfg, directories: list };
-}
-export function toggleDirectoryLocal(cfg: AppConfig, index: number): AppConfig {
-  const list = [...(cfg.directories || [])];
-  if (index >= 0 && index < list.length) {
-    const cur = list[index];
-    list[index] = { ...cur, enabled: !(cur.enabled ?? true) };
-  }
-  return { ...cfg, directories: list };
 }
 
 /* ================== E-MAILS (DB locale – pas de config.json) ================== */

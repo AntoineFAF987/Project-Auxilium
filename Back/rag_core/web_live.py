@@ -3,11 +3,19 @@
 Recherche web live (Tavily) — inchangé.
 """
 import requests
-from .constants import ENABLE_WEB_SEARCH, TAVILY_API_KEY
+from .constants import TAVILY_API_KEY
+from runtime_settings import get_runtime_settings
 
-def web_search_context(query: str, max_chars: int = 4000, k: int = 5) -> str:
-    if not ENABLE_WEB_SEARCH or not TAVILY_API_KEY:
+def web_search_context(
+    query: str,
+    max_chars: int | None = None,
+    k: int | None = None,
+) -> str:
+    settings = get_runtime_settings()
+    if not settings.features.enable_web_search or not TAVILY_API_KEY:
         return ""
+    max_chars = settings.conversation.web_max_chars if max_chars is None else max_chars
+    k = settings.conversation.web_result_k if k is None else k
     try:
         url = "https://api.tavily.com/search"
         payload = {
@@ -17,7 +25,11 @@ def web_search_context(query: str, max_chars: int = 4000, k: int = 5) -> str:
             "search_depth": "basic",
             "include_answer": False,
         }
-        r = requests.post(url, json=payload, timeout=30)
+        r = requests.post(
+            url,
+            json=payload,
+            timeout=settings.timeouts.web_http_sec,
+        )
         r.raise_for_status()
         data = r.json()
         parts = []

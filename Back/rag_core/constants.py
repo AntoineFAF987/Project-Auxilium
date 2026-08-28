@@ -1,31 +1,38 @@
 # -*- coding: utf-8 -*-
-"""
-Constantes exportées — reprises strictement de rag_core.py.
-"""
+"""Exports de compatibilité dérivés de la configuration runtime typée."""
 import os
 import torch
+from runtime_settings import get_runtime_settings
 
 # =========================
 # Constantes exportées
 # =========================
-EMBED_MODEL_NAME = "paraphrase-multilingual-mpnet-base-v2"
-# Reranker multilingue FR/EN pour meilleur classement en français
-RERANK_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
-# Fallback si indisponible
-RERANK_MODEL_FALLBACK = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+_SETTINGS = get_runtime_settings()
+_RETRIEVAL = _SETTINGS.retrieval
 
-TOP_K_FAISS = 100
-TOP_K_BM25 = 100
-RETRIEVE_K = 12
-FINAL_K = 10
-HYBRID_ALPHA = 0.80
-NORMALIZE_EMBED = True
+EMBED_MODEL_NAME = _RETRIEVAL.embedding_model
+RERANK_MODEL_NAME = _RETRIEVAL.reranker_model
+RERANK_MODEL_FALLBACK = _RETRIEVAL.reranker_fallback
+DEVICE = (
+    ("cuda" if torch.cuda.is_available() else "cpu")
+    if _RETRIEVAL.device == "auto"
+    else _RETRIEVAL.device
+)
 
-MAX_CONTEXT_CHARS = 12000
-FUSE_ADJACENT_GAP = 1
-ANSWER_MIN_CE = -0.50
+TOP_K_FAISS = _RETRIEVAL.top_k_faiss
+TOP_K_BM25 = _RETRIEVAL.top_k_bm25
+RETRIEVE_K = _RETRIEVAL.retrieve_k
+FINAL_K = _RETRIEVAL.final_k
+HYBRID_ALPHA = _RETRIEVAL.hybrid_alpha
+EXACT_MATCH_BONUS = _RETRIEVAL.exact_match_bonus
+EXACT_MATCH_MIN_CHARS = _RETRIEVAL.exact_match_min_chars
+MMR_LAMBDA = _RETRIEVAL.mmr_lambda
+PRELIMINARY_POOL_MULTIPLIER = _RETRIEVAL.preliminary_pool_multiplier
+NORMALIZE_EMBED = _RETRIEVAL.normalize_embeddings
 
-ENABLE_WEB_SEARCH = True
+MAX_CONTEXT_CHARS = _RETRIEVAL.max_context_chars
+FUSE_ADJACENT_GAP = _RETRIEVAL.fuse_adjacent_gap
+ANSWER_MIN_CE = _SETTINGS.thresholds.answerability
+
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-HISTORY_MAX_TURNS = 6
+HISTORY_MAX_TURNS = _SETTINGS.conversation.history_max_turns

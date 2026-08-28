@@ -1,0 +1,3373 @@
+{
+  "schema_version": 1,
+  "benchmark_name": "auxilium-current-pilot",
+  "commit_git": "e135468e6bfe05fcddfe2923d4d518e04badf9ff",
+  "timestamp_utc": "2026-08-27T19:03:42.214352+00:00",
+  "configuration": {
+    "configuration_hash": "9df865c646ef7fea7cd091d5e26ca891519268889502a42adf5db6ca8b6e81e7",
+    "runtime": {
+      "index": {
+        "index_dir": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\index_rag",
+        "exclude_globs": [
+          "*/data/index_rag/*",
+          "*/data/emails_cache/*",
+          "*/data/email_attachments/*"
+        ],
+        "follow_symlinks": false
+      },
+      "retrieval": {
+        "embedding_model": "paraphrase-multilingual-mpnet-base-v2",
+        "reranker_model": "BAAI/bge-reranker-v2-m3",
+        "reranker_fallback": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        "device": "auto",
+        "retrieve_k": 12,
+        "top_k_faiss": 100,
+        "top_k_bm25": 100,
+        "final_k": 10,
+        "hybrid_alpha": 0.8,
+        "exact_match_bonus": 0.15,
+        "exact_match_min_chars": 6,
+        "mmr_lambda": 0.7,
+        "preliminary_pool_multiplier": 2,
+        "normalize_embeddings": true,
+        "max_context_chars": 12000,
+        "fuse_adjacent_gap": 1
+      },
+      "thresholds": {
+        "answerability": -0.5,
+        "context_relevance": 0.3,
+        "overlap_min": 1,
+        "faithfulness": 0.4
+      },
+      "features": {
+        "enable_reranker": true,
+        "enable_web_search": true,
+        "enable_query_condensation": true,
+        "enable_query_expansion": true,
+        "enable_faithfulness_check": true,
+        "faithfulness_strict_only": true
+      },
+      "generation": {
+        "provider": "mistral",
+        "model": "mistral-small-latest",
+        "temperature": 0.6,
+        "strict_temperature": 0.45,
+        "top_p": 0.9,
+        "strict_top_p": 1.0,
+        "max_tokens": 1200,
+        "roleplay_temperature": 0.9,
+        "roleplay_max_tokens": 220,
+        "smalltalk_temperature": 0.65,
+        "smalltalk_max_tokens": 200,
+        "http_timeout_sec": 60
+      },
+      "timeouts": {
+        "llm_sec": 18,
+        "web_sec": 8,
+        "web_http_sec": 30,
+        "math_sec": 8
+      },
+      "rate_limit": {
+        "max_req": 50,
+        "per_sec": 10
+      },
+      "conversation": {
+        "history_max_turns": 6,
+        "reply_history_max_turns": 12,
+        "web_max_chars": 4000,
+        "web_result_k": 5,
+        "fresh_news_keywords": [
+          "aujourd'hui",
+          "dernière",
+          "mise à jour",
+          "version",
+          "PDG",
+          "score",
+          "match",
+          "prix",
+          "sortie",
+          "release",
+          "2024",
+          "2025",
+          "actualité",
+          "breaking"
+        ]
+      }
+    },
+    "resolved_device": "cpu",
+    "pipeline": "current",
+    "retrieval_variant": "hybrid_current",
+    "record_trace": false,
+    "dataset": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\eval\\data\\pilot.jsonl",
+    "dataset_sha256": "69b4db1d39dccbf46cfdac368a8399a31b75f6538238feb1d4951a08afe81ccb",
+    "index_chunks": 23,
+    "corpus_sha256": "0fb18b9573ebcdf95c3e9fca78d91125123b4101a1d75b22fc12a51928ee77e5",
+    "embeddings_sha256": "ed79a4e2ce7294824e6431c620be334bae6a1fe622598846a57478bff5479d60",
+    "faiss_sha256": "bb070a3d48e39b6f4bdf74e7da867d8144a180a2796ab610be5bbfbd341083a1"
+  },
+  "embedding_model": "paraphrase-multilingual-mpnet-base-v2",
+  "reranker": "BAAI/bge-reranker-v2-m3",
+  "query_count": 20,
+  "retrieval_evaluated_queries": 17,
+  "unanswerable_queries": 3,
+  "failed_queries": 0,
+  "metrics_global": {
+    "hit_rate@1": 0.9411764705882353,
+    "hit_rate@10": 1.0,
+    "hit_rate@3": 1.0,
+    "hit_rate@5": 1.0,
+    "mrr": 0.9607843137254901,
+    "ndcg@1": 0.9411764705882353,
+    "ndcg@10": 0.9040081328488586,
+    "ndcg@3": 0.8828521356337479,
+    "ndcg@5": 0.8828521356337479,
+    "precision@1": 0.9411764705882353,
+    "precision@10": 0.12941176470588237,
+    "precision@3": 0.37254901960784315,
+    "precision@5": 0.2235294117647059,
+    "recall@1": 0.7745098039215685,
+    "recall@10": 0.9411764705882353,
+    "recall@3": 0.8823529411764706,
+    "recall@5": 0.8823529411764706
+  },
+  "metrics_by_question_type": {
+    "comparative_multi_documents": {
+      "hit_rate@1": 1.0,
+      "hit_rate@10": 1.0,
+      "hit_rate@3": 1.0,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0,
+      "ndcg@1": 1.0,
+      "ndcg@10": 1.0,
+      "ndcg@3": 1.0,
+      "ndcg@5": 1.0,
+      "precision@1": 1.0,
+      "precision@10": 0.2,
+      "precision@3": 0.6666666666666666,
+      "precision@5": 0.4,
+      "recall@1": 0.5,
+      "recall@10": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0
+    },
+    "distracteurs_semantiques": {
+      "hit_rate@1": 1.0,
+      "hit_rate@10": 1.0,
+      "hit_rate@3": 1.0,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0,
+      "ndcg@1": 1.0,
+      "ndcg@10": 1.0,
+      "ndcg@3": 1.0,
+      "ndcg@5": 1.0,
+      "precision@1": 1.0,
+      "precision@10": 0.1,
+      "precision@3": 0.3333333333333333,
+      "precision@5": 0.2,
+      "recall@1": 1.0,
+      "recall@10": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0
+    },
+    "email_metadata": {
+      "hit_rate@1": 1.0,
+      "hit_rate@10": 1.0,
+      "hit_rate@3": 1.0,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0,
+      "ndcg@1": 1.0,
+      "ndcg@10": 1.0,
+      "ndcg@3": 1.0,
+      "ndcg@5": 1.0,
+      "precision@1": 1.0,
+      "precision@10": 0.1,
+      "precision@3": 0.3333333333333333,
+      "precision@5": 0.2,
+      "recall@1": 1.0,
+      "recall@10": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0
+    },
+    "exhaustive": {
+      "hit_rate@1": 1.0,
+      "hit_rate@10": 1.0,
+      "hit_rate@3": 1.0,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0,
+      "ndcg@1": 1.0,
+      "ndcg@10": 0.8956462005846456,
+      "ndcg@3": 0.8129131942200405,
+      "ndcg@5": 0.8129131942200405,
+      "precision@1": 1.0,
+      "precision@10": 0.3,
+      "precision@3": 0.6666666666666666,
+      "precision@5": 0.4,
+      "recall@1": 0.3333333333333333,
+      "recall@10": 1.0,
+      "recall@3": 0.6666666666666666,
+      "recall@5": 0.6666666666666666
+    },
+    "exhaustive_multi_documents": {
+      "hit_rate@1": 1.0,
+      "hit_rate@10": 1.0,
+      "hit_rate@3": 1.0,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0,
+      "ndcg@1": 1.0,
+      "ndcg@10": 0.7461976723150333,
+      "ndcg@3": 0.4692787260227565,
+      "ndcg@5": 0.4692787260227565,
+      "precision@1": 1.0,
+      "precision@10": 0.3,
+      "precision@3": 0.3333333333333333,
+      "precision@5": 0.2,
+      "recall@1": 0.3333333333333333,
+      "recall@10": 1.0,
+      "recall@3": 0.3333333333333333,
+      "recall@5": 0.3333333333333333
+    },
+    "factuelle_multi_faits": {
+      "hit_rate@1": 1.0,
+      "hit_rate@10": 1.0,
+      "hit_rate@3": 1.0,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0,
+      "ndcg@1": 1.0,
+      "ndcg@10": 1.0,
+      "ndcg@3": 1.0,
+      "ndcg@5": 1.0,
+      "precision@1": 1.0,
+      "precision@10": 0.1,
+      "precision@3": 0.3333333333333333,
+      "precision@5": 0.2,
+      "recall@1": 1.0,
+      "recall@10": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0
+    },
+    "factuelle_simple": {
+      "hit_rate@1": 1.0,
+      "hit_rate@10": 1.0,
+      "hit_rate@3": 1.0,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0,
+      "ndcg@1": 1.0,
+      "ndcg@10": 1.0,
+      "ndcg@3": 1.0,
+      "ndcg@5": 1.0,
+      "precision@1": 1.0,
+      "precision@10": 0.1,
+      "precision@3": 0.3333333333333333,
+      "precision@5": 0.2,
+      "recall@1": 1.0,
+      "recall@10": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0
+    },
+    "multi_passage": {
+      "hit_rate@1": 1.0,
+      "hit_rate@10": 1.0,
+      "hit_rate@3": 1.0,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0,
+      "ndcg@1": 1.0,
+      "ndcg@10": 0.6131471927654584,
+      "ndcg@3": 0.6131471927654584,
+      "ndcg@5": 0.6131471927654584,
+      "precision@1": 1.0,
+      "precision@10": 0.1,
+      "precision@3": 0.3333333333333333,
+      "precision@5": 0.2,
+      "recall@1": 0.5,
+      "recall@10": 0.5,
+      "recall@3": 0.5,
+      "recall@5": 0.5
+    },
+    "non_repondable": {
+      "hit_rate@1": null,
+      "hit_rate@10": null,
+      "hit_rate@3": null,
+      "hit_rate@5": null,
+      "mrr": null,
+      "ndcg@1": null,
+      "ndcg@10": null,
+      "ndcg@3": null,
+      "ndcg@5": null,
+      "precision@1": null,
+      "precision@10": null,
+      "precision@3": null,
+      "precision@5": null,
+      "recall@1": null,
+      "recall@10": null,
+      "recall@3": null,
+      "recall@5": null
+    },
+    "non_repondable_distracteur": {
+      "hit_rate@1": null,
+      "hit_rate@10": null,
+      "hit_rate@3": null,
+      "hit_rate@5": null,
+      "mrr": null,
+      "ndcg@1": null,
+      "ndcg@10": null,
+      "ndcg@3": null,
+      "ndcg@5": null,
+      "precision@1": null,
+      "precision@10": null,
+      "precision@3": null,
+      "precision@5": null,
+      "recall@1": null,
+      "recall@10": null,
+      "recall@3": null,
+      "recall@5": null
+    },
+    "paraphrase": {
+      "hit_rate@1": 1.0,
+      "hit_rate@10": 1.0,
+      "hit_rate@3": 1.0,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0,
+      "ndcg@1": 1.0,
+      "ndcg@10": 1.0,
+      "ndcg@3": 1.0,
+      "ndcg@5": 1.0,
+      "precision@1": 1.0,
+      "precision@10": 0.1,
+      "precision@3": 0.3333333333333333,
+      "precision@5": 0.2,
+      "recall@1": 1.0,
+      "recall@10": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0
+    },
+    "procedurale": {
+      "hit_rate@1": 1.0,
+      "hit_rate@10": 1.0,
+      "hit_rate@3": 1.0,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0,
+      "ndcg@1": 1.0,
+      "ndcg@10": 1.0,
+      "ndcg@3": 1.0,
+      "ndcg@5": 1.0,
+      "precision@1": 1.0,
+      "precision@10": 0.1,
+      "precision@3": 0.3333333333333333,
+      "precision@5": 0.2,
+      "recall@1": 1.0,
+      "recall@10": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0
+    },
+    "synthese_courte": {
+      "hit_rate@1": 0.5,
+      "hit_rate@10": 1.0,
+      "hit_rate@3": 1.0,
+      "hit_rate@5": 1.0,
+      "mrr": 0.6666666666666666,
+      "ndcg@1": 0.5,
+      "ndcg@10": 0.75,
+      "ndcg@3": 0.75,
+      "ndcg@5": 0.75,
+      "precision@1": 0.5,
+      "precision@10": 0.1,
+      "precision@3": 0.3333333333333333,
+      "precision@5": 0.2,
+      "recall@1": 0.5,
+      "recall@10": 1.0,
+      "recall@3": 1.0,
+      "recall@5": 1.0
+    }
+  },
+  "results": [
+    {
+      "query_id": "pilot-api-limits",
+      "query": "Quelles sont les limites actuelles de requêtes API pour les offres Free, Pro et Enterprise ?",
+      "expected_answer": "Free : 100 requêtes par minute ; Pro : 500 requêtes par minute ; Enterprise : illimité.",
+      "question_type": "factuelle_simple",
+      "difficulty": "easy",
+      "answerable": true,
+      "relevant_document": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+      "relevant_chunk_ids": [
+        "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "Free = 100 requêtes/minute",
+        "Pro = 500 requêtes/minute",
+        "Enterprise = illimité"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 0.9912170171737671,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 0.0406530424952507,
+          "file": "2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 0.00032822141656652093,
+          "file": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 0.00026435451582074165,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 0.00019712206267286092,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::4",
+          "score": 0.00016007896920200437,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 4,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 9.590585978003219e-05,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 7.835864380467683e-05,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 4.4736800191458315e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 2.064668296952732e-05,
+          "file": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.8836739400285296e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 1.8087697753799148e-05,
+          "file": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 1.0,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 1.0,
+        "ndcg@5": 1.0,
+        "ndcg@10": 1.0
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2542.0940999993036,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-api-unlimited-symptom",
+      "query": "Quelle offre échappe au plafond par minute et quel symptôme client a motivé la vérification des quotas ?",
+      "expected_answer": "L'offre Enterprise est illimitée. La vérification a été motivée par des réponses HTTP 429 signalées par plusieurs clients.",
+      "question_type": "factuelle_multi_faits",
+      "difficulty": "medium",
+      "answerable": true,
+      "relevant_document": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+      "relevant_chunk_ids": [
+        "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "Enterprise sans plafond",
+        "réponses HTTP 429"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 0.0009426649776287377,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 5.7713921705726534e-05,
+          "file": "2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 4.684817395173013e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 4.0981831261888146e-05,
+          "file": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 2.7842574127134867e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 2.0359377231216058e-05,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 1.7421942175133154e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::2",
+          "score": 1.678717126196716e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 2,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 1.6731391951907426e-05,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.6473037248943e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 1.624049400561489e-05,
+          "file": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 1.6200770915020257e-05,
+          "file": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 1.0,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 1.0,
+        "ndcg@5": 1.0,
+        "ndcg@10": 1.0
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2342.2730999991472,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-kubernetes-postponement",
+      "query": "À quelle date la migration Kubernetes a-t-elle été reportée et pour quelle raison ?",
+      "expected_answer": "Elle a été reportée au 5 septembre pendant l'investigation de pics mémoire dépassant 5 Go par pod.",
+      "question_type": "factuelle_multi_faits",
+      "difficulty": "medium",
+      "answerable": true,
+      "relevant_document": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+      "relevant_chunk_ids": [
+        "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "5 septembre",
+        "pics mémoire dépassant 5 Go par pod"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 0.9479256272315979,
+          "file": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 0.7270668745040894,
+          "file": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::1",
+          "score": 0.648878812789917,
+          "file": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::1",
+          "score": 0.00010600579844322056,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 4.170115789747797e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 4.090534275746904e-05,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::4",
+          "score": 2.7448544642538764e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 4,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 2.0671939637395553e-05,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 1.913054074975662e-05,
+          "file": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 1.8475546312402003e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 1.6829922969918698e-05,
+          "file": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.63167806022102e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 1.0,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 1.0,
+        "ndcg@5": 1.0,
+        "ndcg@10": 1.0
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2472.5049000007857,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-kubernetes-schedule-change",
+      "query": "Quelle était la date initiale de bascule du service de reporting et quel nouveau calendrier a été décidé après les tests de charge ?",
+      "expected_answer": "La bascule était initialement prévue le 12 août, puis elle a été reportée au 5 septembre après les tests de charge.",
+      "question_type": "multi_passage",
+      "difficulty": "hard",
+      "answerable": true,
+      "relevant_document": null,
+      "relevant_chunk_ids": [
+        "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+        "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "date initiale : 12 août",
+        "date reportée : 5 septembre",
+        "tests de charge"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 0.0100721325725317,
+          "file": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 0.0002318329206900671,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 7.34259738237597e-05,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 3.363282303325832e-05,
+          "file": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 3.0254246667027473e-05,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 2.9278879082994536e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 2.8136828404967673e-05,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 2.0427798517630436e-05,
+          "file": "2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 1.9740262359846383e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 1.7629537978791632e-05,
+          "file": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 1.6918638721108437e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.6325559045071714e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 0.5,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 0.5,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 0.5,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 0.5,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 0.6131471927654584,
+        "ndcg@5": 0.6131471927654584,
+        "ndcg@10": 0.6131471927654584
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2241.509400000723,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-kubernetes-paraphrase",
+      "query": "Pourquoi la conteneurisation orchestrée du reporting n'a-t-elle pas été mise en production comme prévu ?",
+      "expected_answer": "Parce que les tests de charge ont révélé des pics mémoire supérieurs à 5 Go par pod, qui devaient être investigués.",
+      "question_type": "paraphrase",
+      "difficulty": "hard",
+      "answerable": true,
+      "relevant_document": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+      "relevant_chunk_ids": [
+        "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "tests de charge",
+        "pics mémoire > 5 Go par pod"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 0.004270494449883699,
+          "file": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 0.000669559754896909,
+          "file": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::1",
+          "score": 0.0003652747254818678,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 9.528743976261467e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 7.395526336040348e-05,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 2.4809181923046708e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 2.2401594833354466e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 1.823680941015482e-05,
+          "file": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 1.777958641469013e-05,
+          "file": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.736357262416277e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 1.7015983758028597e-05,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 1.628023892408237e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 1.0,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 1.0,
+        "ndcg@5": 1.0,
+        "ndcg@10": 1.0
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2511.080899999797,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-postgres-benchmark",
+      "query": "Quels résultats ont été observés pendant les tests de PostgreSQL 16 ?",
+      "expected_answer": "Les requêtes analytiques étaient 18 % plus rapides, l'utilisation CPU 11 % plus faible et aucun problème de compatibilité n'a été détecté.",
+      "question_type": "synthese_courte",
+      "difficulty": "medium",
+      "answerable": true,
+      "relevant_document": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+      "relevant_chunk_ids": [
+        "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "18 % plus rapide",
+        "11 % de CPU en moins",
+        "aucun problème de compatibilité"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 0.9856932163238525,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 0.13468097150325775,
+          "file": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::1",
+          "score": 0.0006803335272707045,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 0.0004218446265440434,
+          "file": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 5.6587385188322514e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 4.521726441453211e-05,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 2.648324334586505e-05,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 1.670698111411184e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 1.6618740119156428e-05,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.624717151571531e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 1.6245978258666582e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 1.6228821550612338e-05,
+          "file": "2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 1.0,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 1.0,
+        "ndcg@5": 1.0,
+        "ndcg@10": 1.0
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2402.421700000559,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-postgres-versions",
+      "query": "Quelle version de PostgreSQL est en production et quelle version est testée en staging ?",
+      "expected_answer": "PostgreSQL 14 est en production et PostgreSQL 16 est testé en staging.",
+      "question_type": "factuelle_simple",
+      "difficulty": "easy",
+      "answerable": true,
+      "relevant_document": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+      "relevant_chunk_ids": [
+        "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "production : PostgreSQL 14",
+        "staging : PostgreSQL 16"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 0.9966241121292114,
+          "file": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 0.9938890933990479,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 0.002895921468734741,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 0.0019292975775897503,
+          "file": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::1",
+          "score": 0.0011197254061698914,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 6.794937507947907e-05,
+          "file": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 4.27359773311764e-05,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::2",
+          "score": 2.9869808713556267e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 2,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 2.8089696570532396e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 2.6005969630205072e-05,
+          "file": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 2.0939758542226627e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 1.6734073142288253e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 1.0,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 1.0,
+        "ndcg@5": 1.0,
+        "ndcg@10": 1.0
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2288.2571999998618,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-redis-progression",
+      "query": "Retrace l'évolution de la mise à niveau Redis : version actuelle, version cible, période proposée puis fenêtre finale.",
+      "expected_answer": "La production utilise Redis 6.2. Une migration vers Redis 7.2 avait été proposée pour le quatrième trimestre ; après validation, la fenêtre finale a été fixée au 14 octobre.",
+      "question_type": "synthese_courte",
+      "difficulty": "medium",
+      "answerable": true,
+      "relevant_document": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+      "relevant_chunk_ids": [
+        "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "Redis 6.2 actuel",
+        "Redis 7.2 cible",
+        "proposition Q4",
+        "fenêtre finale le 14 octobre"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 0.113567054271698,
+          "file": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::1",
+          "score": 0.06962800025939941,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 0.023039989173412323,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::4",
+          "score": 0.0001881618081824854,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 4,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 0.00015499551955144852,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 0.00015016422548796982,
+          "file": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 9.770208271220326e-05,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 4.136950883548707e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 4.1357518057338893e-05,
+          "file": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 3.920098242815584e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 3.3027903555193916e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 2.6612842702888884e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 0.0,
+        "precision@1": 0.0,
+        "hit_rate@1": 0.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 0.3333333333333333,
+        "ndcg@1": 0.0,
+        "ndcg@3": 0.5,
+        "ndcg@5": 0.5,
+        "ndcg@10": 0.5
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2231.0395000004064,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-redis-blocker-resolution",
+      "query": "Quel obstacle empêchait le déploiement de Redis 7.2 et qu'est-ce qui a finalement permis son approbation ?",
+      "expected_answer": "Des services historiques dépendaient encore de commandes dépréciées. Les tests de compatibilité ont ensuite réussi, permettant l'approbation du déploiement en production.",
+      "question_type": "factuelle_multi_faits",
+      "difficulty": "medium",
+      "answerable": true,
+      "relevant_document": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+      "relevant_chunk_ids": [
+        "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "commandes dépréciées utilisées par des services historiques",
+        "tests de compatibilité réussis",
+        "approbation production"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 0.7123271226882935,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 0.019602051004767418,
+          "file": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::1",
+          "score": 0.01675274409353733,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::2",
+          "score": 9.239513019565493e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 2,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 4.416138835949823e-05,
+          "file": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 2.1709194697905332e-05,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 2.1313240722520277e-05,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 2.0500610844464973e-05,
+          "file": "2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 1.8505983462091535e-05,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 1.8209526388091035e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 1.784362393664196e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.6496303942403756e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 1.0,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 1.0,
+        "ndcg@5": 1.0,
+        "ndcg@10": 1.0
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 1991.6912999997294,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-datastores-comparison",
+      "query": "Compare les évolutions PostgreSQL et Redis : versions de départ et d'arrivée, ainsi que le résultat de validation disponible pour chacune.",
+      "expected_answer": "PostgreSQL passe de la version 14 à la version 16, avec des requêtes analytiques 18 % plus rapides, 11 % de CPU en moins et aucun problème de compatibilité. Redis passe de 6.2 à 7.2 ; les tests de compatibilité ont réussi et le déploiement a été approuvé.",
+      "question_type": "comparative_multi_documents",
+      "difficulty": "hard",
+      "answerable": true,
+      "relevant_document": null,
+      "relevant_chunk_ids": [
+        "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+        "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "PostgreSQL 14 vers 16",
+        "résultats PostgreSQL",
+        "Redis 6.2 vers 7.2",
+        "validation Redis"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 0.016747882589697838,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 0.0031745564192533493,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::1",
+          "score": 0.0030056932009756565,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 0.0016789886867627501,
+          "file": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 0.0015389022883027792,
+          "file": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::4",
+          "score": 9.025491453940049e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 4,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 6.43069070065394e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 4.196289228275418e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 3.163883593515493e-05,
+          "file": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 3.1136842153500766e-05,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.8543363694334403e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 1.7252636098419316e-05,
+          "file": "2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 0.5,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.6666666666666666,
+        "hit_rate@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.4,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.2,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 1.0,
+        "ndcg@5": 1.0,
+        "ndcg@10": 1.0
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2432.0440999999846,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-dashboard-investigation",
+      "query": "Pour les lenteurs du dashboard, combien de lignes étaient concernées, quelle cause a été confirmée et quel résultat a été mesuré après correction en staging ?",
+      "expected_answer": "La table customer_events contenait environ 42 millions de lignes. La requête effectuait un scan séquentiel faute d'index composite ; après ajout de l'index, le temps moyen est passé de 8,3 s à 740 ms.",
+      "question_type": "multi_passage",
+      "difficulty": "hard",
+      "answerable": true,
+      "relevant_document": null,
+      "relevant_chunk_ids": [
+        "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+        "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "environ 42 millions de lignes",
+        "scan séquentiel",
+        "index composite",
+        "8,3 s à 740 ms"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 0.005071690771728754,
+          "file": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 0.003909672610461712,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 0.002210583770647645,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 0.0005002228426747024,
+          "file": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 5.946764940745197e-05,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 5.3585885325446725e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 3.469994408078492e-05,
+          "file": "2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 1.769560003594961e-05,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 1.7122376448241994e-05,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.6531534129171632e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 1.644511394260917e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 1.6405623682658188e-05,
+          "file": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 0.5,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 0.5,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 0.5,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 0.5,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 0.6131471927654584,
+        "ndcg@5": 0.6131471927654584,
+        "ndcg@10": 0.6131471927654584
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2724.099399998522,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-dashboard-index-deployment",
+      "query": "Quelles colonnes composent l'index proposé pour customer_events et à quelle date son déploiement en production est-il prévu ?",
+      "expected_answer": "L'index composite porte sur (customer_id, event_timestamp) et son déploiement en production est prévu le 18 septembre.",
+      "question_type": "distracteurs_semantiques",
+      "difficulty": "medium",
+      "answerable": true,
+      "relevant_document": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+      "relevant_chunk_ids": [
+        "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "customer_id",
+        "event_timestamp",
+        "18 septembre"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 0.8250698447227478,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 0.016629429534077644,
+          "file": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 0.014098361134529114,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 0.00028764884336851537,
+          "file": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 0.0002458349918015301,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 6.811669300077483e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 6.658476922893897e-05,
+          "file": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 6.43197272438556e-05,
+          "file": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::0",
+          "score": 2.605166628200095e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 2.1886638933210634e-05,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 1.9705241356859915e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.8791524780681357e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 1.0,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 1.0,
+        "ndcg@5": 1.0,
+        "ndcg@10": 1.0
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2618.7157000003936,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-security-investigation",
+      "query": "L'alerte de connexion suspecte correspondait-elle à une compromission et quelle en était la cause réelle ?",
+      "expected_answer": "Non. Aucune compromission n'a été identifiée ; l'activité provenait d'un employé en déplacement à Singapour.",
+      "question_type": "factuelle_multi_faits",
+      "difficulty": "easy",
+      "answerable": true,
+      "relevant_document": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+      "relevant_chunk_ids": [
+        "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "aucune compromission",
+        "employé en déplacement à Singapour"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 0.210513174533844,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 0.00196171086281538,
+          "file": "2026-06-01__Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::1",
+          "score": 0.0007424686336889863,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 0.0001638424873817712,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 0.00010872218263102695,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 8.105825691018254e-05,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 3.769463728531264e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 3.636124893091619e-05,
+          "file": "2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 2.6922582037514076e-05,
+          "file": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 1.97857225430198e-05,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 1.6329016943927854e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.625005461391993e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 1.0,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 1.0,
+        "ndcg@5": 1.0,
+        "ndcg@10": 1.0
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2800.7010000001173,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-connected-app-action",
+      "query": "Quelle application a obtenu un accès au compte Microsoft et quelle action est recommandée si cet accès n'a pas été autorisé ?",
+      "expected_answer": "L'application MailRAG-Dev a obtenu l'accès. Si celui-ci n'a pas été autorisé, il faut supprimer l'application du compte.",
+      "question_type": "procedurale",
+      "difficulty": "easy",
+      "answerable": true,
+      "relevant_document": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+      "relevant_chunk_ids": [
+        "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "MailRAG-Dev",
+        "supprimer l'application si accès non autorisé"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 0.9274595379829407,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::3",
+          "score": 0.08992888778448105,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 3,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::4",
+          "score": 0.021617652848362923,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 4,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::0",
+          "score": 0.004325899761170149,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 0.0002088749170070514,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 0.0001470500137656927,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 0.00010695179662434384,
+          "file": "2026-06-01__Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 2.6417634217068553e-05,
+          "file": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 2.0789928385056555e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 1.9570290533010848e-05,
+          "file": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 1.7445299818064086e-05,
+          "file": "2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.6351814338122495e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 1.0,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 1.0,
+        "ndcg@5": 1.0,
+        "ndcg@10": 1.0
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2057.966700000179,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-microsoft-benefits-exhaustive",
+      "query": "Énumère tous les avantages et limites du compte Microsoft mentionnés dans le message de bienvenue.",
+      "expected_answer": "Le message cite un accès centralisé, la synchronisation du profil entre appareils et via le cloud, les réglages de confidentialité et sécurité, la gestion des paiements, des applications gratuites et Microsoft Rewards. Il précise que toutes les capacités de gain Rewards ne sont pas disponibles sur tous les marchés.",
+      "question_type": "exhaustive",
+      "difficulty": "hard",
+      "answerable": true,
+      "relevant_document": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+      "relevant_chunk_ids": [
+        "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::3",
+        "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::4",
+        "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5"
+      ],
+      "required_facts": [
+        "accès centralisé",
+        "synchronisation appareils et cloud",
+        "confidentialité et sécurité",
+        "gestion des paiements",
+        "applications gratuites",
+        "Rewards",
+        "limite selon les marchés"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::4",
+          "score": 0.15940333902835846,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 4,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::0",
+          "score": 0.10895773768424988,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::3",
+          "score": 0.06637992709875107,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 3,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::2",
+          "score": 0.023692097514867783,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 2,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 0.0057118539698421955,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 0.0008336639148183167,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 2.8200091037433594e-05,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 2.3411383153870702e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::1",
+          "score": 1.9281187633168884e-05,
+          "file": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 1.7516753359814174e-05,
+          "file": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.6852231055963784e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 1.6328969650203362e-05,
+          "file": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 0.3333333333333333,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 0.6666666666666666,
+        "precision@3": 0.6666666666666666,
+        "hit_rate@3": 1.0,
+        "recall@5": 0.6666666666666666,
+        "precision@5": 0.4,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.3,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 0.8129131942200405,
+        "ndcg@5": 0.8129131942200405,
+        "ndcg@10": 0.8956462005846456
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2030.014799998753,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-deployments-exhaustive",
+      "query": "Quelles sont toutes les interventions techniques datées après validation ou report dans les échanges, avec leur système et leur date ?",
+      "expected_answer": "La migration Kubernetes du reporting est reportée au 5 septembre ; le déploiement de l'index du dashboard est planifié le 18 septembre ; le déploiement Redis 7.2 est prévu le 14 octobre.",
+      "question_type": "exhaustive_multi_documents",
+      "difficulty": "hard",
+      "answerable": true,
+      "relevant_document": null,
+      "relevant_chunk_ids": [
+        "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+        "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+        "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "Kubernetes : 5 septembre",
+        "index dashboard : 18 septembre",
+        "Redis 7.2 : 14 octobre"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 6.400694110197946e-05,
+          "file": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::4",
+          "score": 6.375127122737467e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 4,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 6.2624501879327e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 3.7343637814046815e-05,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 3.640621798695065e-05,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 3.2889292924664915e-05,
+          "file": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 3.248874782002531e-05,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 2.47569041675888e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 2.461337498971261e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 2.0104351278860122e-05,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 1.8626506061991677e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.633692954783328e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 0.3333333333333333,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 0.3333333333333333,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 0.3333333333333333,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.3,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 0.4692787260227565,
+        "ndcg@5": 0.4692787260227565,
+        "ndcg@10": 0.7461976723150333
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2578.058900000542,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-connected-app-metadata",
+      "query": "Qui a envoyé l'alerte concernant la nouvelle application connectée et à quel horodatage ?",
+      "expected_answer": "L'alerte a été envoyée par l'Équipe des comptes Microsoft le 1er juin 2026 à 17:39:05 UTC.",
+      "question_type": "email_metadata",
+      "difficulty": "medium",
+      "answerable": true,
+      "relevant_document": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+      "relevant_chunk_ids": [
+        "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0"
+      ],
+      "required_facts": [
+        "Équipe des comptes Microsoft",
+        "2026-06-01T17:39:05Z"
+      ],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 0.21961219608783722,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::1",
+          "score": 0.00018481892766430974,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::1",
+          "score": 0.0001376144791720435,
+          "file": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 9.946979116648436e-05,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 8.929252362577245e-05,
+          "file": "2026-06-01__Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 7.374118285952136e-05,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 5.855277777300216e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::3",
+          "score": 4.6830220526317134e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 3,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 4.412745693116449e-05,
+          "file": "2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::4",
+          "score": 4.325571717345156e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 4,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 1.6598372894804925e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.657984648772981e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": 1.0,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "mrr": 1.0,
+        "ndcg@1": 1.0,
+        "ndcg@3": 1.0,
+        "ndcg@5": 1.0,
+        "ndcg@10": 1.0
+      },
+      "retrieval_evaluated": true,
+      "latency_ms": 2701.2314000003244,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-unanswerable-budget",
+      "query": "Quel est le budget marketing annuel approuvé pour 2027 ?",
+      "expected_answer": null,
+      "question_type": "non_repondable",
+      "difficulty": "easy",
+      "answerable": false,
+      "relevant_document": null,
+      "relevant_chunk_ids": [],
+      "required_facts": [],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::1",
+          "score": 0.0014090683544054627,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 3.568261308828369e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::4",
+          "score": 2.8651267712120898e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 4,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 2.719046278798487e-05,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 2.6670006263884716e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 2.2613357941736467e-05,
+          "file": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 1.964261355169583e-05,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 1.9019231331185438e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 1.8532580725150183e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 1.6469299225718714e-05,
+          "file": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 1.6357600543415174e-05,
+          "file": "2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 1.624981996428687e-05,
+          "file": "2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": null,
+        "recall@3": null,
+        "recall@5": null,
+        "recall@10": null,
+        "precision@1": null,
+        "precision@3": null,
+        "precision@5": null,
+        "precision@10": null,
+        "hit_rate@1": null,
+        "hit_rate@3": null,
+        "hit_rate@5": null,
+        "hit_rate@10": null,
+        "mrr": null,
+        "ndcg@1": null,
+        "ndcg@3": null,
+        "ndcg@5": null,
+        "ndcg@10": null
+      },
+      "retrieval_evaluated": false,
+      "latency_ms": 2709.335600000486,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-unanswerable-api-monthly",
+      "query": "Quel volume mensuel de requêtes API est inclus dans l'offre Pro ?",
+      "expected_answer": null,
+      "question_type": "non_repondable_distracteur",
+      "difficulty": "medium",
+      "answerable": false,
+      "relevant_document": null,
+      "relevant_chunk_ids": [],
+      "required_facts": [],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 0.42052415013313293,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 0.0005312845460139215,
+          "file": "2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 0.00021250831196084619,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::4",
+          "score": 0.00020543111895676702,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 4,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 0.00014745946100447327,
+          "file": "2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::0",
+          "score": 5.971889549982734e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt::0",
+          "score": 3.918696893379092e-05,
+          "file": "2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Nouvelle_s_application_s_connectée_s_à_votre_compte_Microsoft__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 3.821744758170098e-05,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 2.448330633342266e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 1.9611543393693864e-05,
+          "file": "2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 1.74493598024128e-05,
+          "file": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 1.671155587246176e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": null,
+        "recall@3": null,
+        "recall@5": null,
+        "recall@10": null,
+        "precision@1": null,
+        "precision@3": null,
+        "precision@5": null,
+        "precision@10": null,
+        "hit_rate@1": null,
+        "hit_rate@3": null,
+        "hit_rate@5": null,
+        "hit_rate@10": null,
+        "mrr": null,
+        "ndcg@1": null,
+        "ndcg@3": null,
+        "ndcg@5": null,
+        "ndcg@10": null
+      },
+      "retrieval_evaluated": false,
+      "latency_ms": 2514.174699999785,
+      "retrieval_trace": null,
+      "error": null
+    },
+    {
+      "query_id": "pilot-unanswerable-kubernetes-approver",
+      "query": "Qui a donné l'approbation finale de la migration Kubernetes en production ?",
+      "expected_answer": null,
+      "question_type": "non_repondable_distracteur",
+      "difficulty": "medium",
+      "answerable": false,
+      "relevant_document": null,
+      "relevant_chunk_ids": [],
+      "required_facts": [],
+      "retrieved": [
+        {
+          "rank": 1,
+          "chunk_uid": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 0.040932755917310715,
+          "file": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 2,
+          "chunk_uid": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::0",
+          "score": 0.012396843172609806,
+          "file": "2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 3,
+          "chunk_uid": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt::1",
+          "score": 0.006538762710988522,
+          "file": "2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Migration_of_reporting_service_to_Kubernetes__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 4,
+          "chunk_uid": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt::0",
+          "score": 0.0005789119168184698,
+          "file": "2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Redis_version_upgrade_proposal__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 5,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::1",
+          "score": 0.0001321616437053308,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 6,
+          "chunk_uid": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt::0",
+          "score": 6.052030948922038e-05,
+          "file": "2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_PostgreSQL_16_testing__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 7,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::1",
+          "score": 2.936735654657241e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 8,
+          "chunk_uid": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt::0",
+          "score": 1.940244692377746e-05,
+          "file": "2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_API_throttling_complaints__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        },
+        {
+          "rank": 9,
+          "chunk_uid": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt::1",
+          "score": 1.6931098798522726e-05,
+          "file": "2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Slow_queries_on_customer_dashboard__AQMkADAw.txt",
+          "chunk_id": 1,
+          "source": "email"
+        },
+        {
+          "rank": 10,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::5",
+          "score": 1.646432065172121e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 5,
+          "source": "email"
+        },
+        {
+          "rank": 11,
+          "chunk_uid": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt::3",
+          "score": 1.633917236176785e-05,
+          "file": "2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__Bienvenue_Votre_compte_Microsoft_est_accessible_ici___AQMkADAw.txt",
+          "chunk_id": 3,
+          "source": "email"
+        },
+        {
+          "rank": 12,
+          "chunk_uid": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt::0",
+          "score": 1.619721660972573e-05,
+          "file": "2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "path": "C:\\Users\\aejau\\OneDrive\\Desktop\\Auxilium\\Auxilium\\Back\\data\\emails_flattened\\2026-06-01__RE_Suspicious_login_detected__AQMkADAw.txt",
+          "chunk_id": 0,
+          "source": "email"
+        }
+      ],
+      "metrics": {
+        "recall@1": null,
+        "recall@3": null,
+        "recall@5": null,
+        "recall@10": null,
+        "precision@1": null,
+        "precision@3": null,
+        "precision@5": null,
+        "precision@10": null,
+        "hit_rate@1": null,
+        "hit_rate@3": null,
+        "hit_rate@5": null,
+        "hit_rate@10": null,
+        "mrr": null,
+        "ndcg@1": null,
+        "ndcg@3": null,
+        "ndcg@5": null,
+        "ndcg@10": null
+      },
+      "retrieval_evaluated": false,
+      "latency_ms": 2734.4450000000506,
+      "retrieval_trace": null,
+      "error": null
+    }
+  ]
+}

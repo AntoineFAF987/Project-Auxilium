@@ -39,13 +39,14 @@ def _load_ablation_config(path: Path) -> Dict[str, Any]:
 
 def _warm_up(variant: str, query: str) -> None:
     from api.index_singleton import idx
-    from rag_core.constants import HYBRID_ALPHA, RETRIEVE_K, TOP_K_FAISS
+    from runtime_settings import get_runtime_settings
 
+    settings = get_runtime_settings()
     kwargs = {
-        "retrieve_k": RETRIEVE_K,
-        "top_k_faiss": TOP_K_FAISS,
-        "hybrid_alpha": HYBRID_ALPHA,
-        "use_rerank": True,
+        "retrieve_k": settings.retrieval.retrieve_k,
+        "top_k_faiss": settings.retrieval.top_k_faiss,
+        "hybrid_alpha": settings.retrieval.hybrid_alpha,
+        "use_rerank": settings.features.enable_reranker,
     }
     if variant == "hybrid_current":
         idx.search(query, **kwargs)

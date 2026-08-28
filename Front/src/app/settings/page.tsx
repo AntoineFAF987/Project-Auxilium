@@ -23,14 +23,11 @@ import {
   saveSelectedDirectories,
 } from "../lib/configApi";
 
-type Provider = "mistral" | "openai" | "azure_openai" | "ollama";
+type Provider = "mistral";
 type SettingsTab = "language" | "llm" | "dirs" | "emails";
 
 const PROVIDER_MODELS: Record<Provider, string[]> = {
-  mistral: ["mistral-small", "mistral-medium", "mistral-large"],
-  openai: ["gpt-4o", "gpt-4.1", "gpt-5"],
-  azure_openai: ["gpt-4o-azure", "gpt-4o-mini-azure"],
-  ollama: ["llama3", "qwen2", "mistral"],
+  mistral: ["mistral-small-latest"],
 };
 
 export default function SettingsPage() {
@@ -66,13 +63,11 @@ export default function SettingsPage() {
         if (!c.llm) {
           c.llm = {
             provider: "mistral",
-            model: "mistral-small",
-            temperature: 0.2,
-            max_tokens: 2000,
-            stream: true,
+            model: "mistral-small-latest",
+            temperature: 0.6,
+            max_tokens: 1200,
           };
         }
-        if (!c.directories) c.directories = [];
         setCfg(c);
       } catch (e: any) {
         setMsg(`Load failed: ${String(e?.message || e)}`);
@@ -345,26 +340,11 @@ export default function SettingsPage() {
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-center">
                     <label className="text-sm opacity-80">{t("provider")}</label>
-                    <select
+                    <input
                       value={provider}
-                      onChange={(e) =>
-                        setCfg({
-                          ...cfg,
-                          llm: {
-                            ...llm,
-                            provider: e.target.value as Provider,
-                            model:
-                              PROVIDER_MODELS[e.target.value as Provider]?.[0] ?? "",
-                          },
-                        })
-                      }
-                      className="px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] cursor-pointer"
-                    >
-                      <option value="mistral">Mistral</option>
-                      <option value="openai">OpenAI</option>
-                      <option value="azure_openai">Azure OpenAI</option>
-                      <option value="ollama">Ollama</option>
-                    </select>
+                      readOnly
+                      className="px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--muted)]"
+                    />
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-center">
@@ -392,7 +372,7 @@ export default function SettingsPage() {
                       min={0}
                       max={1}
                       step={0.05}
-                      value={llm.temperature ?? 0.2}
+                      value={llm.temperature ?? 0.6}
                       onChange={(e) =>
                         setCfg({
                           ...cfg,
@@ -409,7 +389,7 @@ export default function SettingsPage() {
                       type="number"
                       min={128}
                       max={32000}
-                      value={llm.max_tokens ?? 2000}
+                      value={llm.max_tokens ?? 1200}
                       onChange={(e) =>
                         setCfg({
                           ...cfg,
@@ -417,18 +397,6 @@ export default function SettingsPage() {
                         })
                       }
                       className="px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--surface)]"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-center">
-                    <label className="text-sm opacity-80">{t("streaming")}</label>
-                    <input
-                      type="checkbox"
-                      checked={!!llm.stream}
-                      onChange={(e) =>
-                        setCfg({ ...cfg, llm: { ...llm, stream: e.target.checked } })
-                      }
-                      className="cursor-pointer"
                     />
                   </div>
 

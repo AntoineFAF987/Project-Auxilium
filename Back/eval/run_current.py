@@ -14,9 +14,24 @@ from .dataset import load_jsonl, validate_relevant_chunk_ids
 from .metrics_retrieval import DEFAULT_KS, average_metrics, compute_query_metrics
 from .report import aggregate_by_question_type, write_report
 from .schemas import BenchmarkReport, QueryEvaluation, RetrievedChunk
+from runtime_settings import RuntimeSettings, get_runtime_settings
 
 
 BACK_DIR = Path(__file__).resolve().parent.parent
+
+
+def effective_runtime_configuration(
+    settings: RuntimeSettings,
+    *,
+    device: str,
+) -> Dict[str, Any]:
+    """Configuration canonique enregistrée par tous les benchmarks."""
+
+    return {
+        "configuration_hash": settings.config_hash(),
+        "runtime": settings.effective_dict(),
+        "resolved_device": device,
+    }
 
 
 def _load_config(path: Path) -> Dict[str, Any]:
@@ -97,20 +112,12 @@ def run(
 
     # Importing the existing singleton is intentional: this is the exact
     # production retrieval object and production search method, unchanged.
-    from api.config import rag_params
     from api.index_singleton import idx
-    from rag_core.constants import (
-        DEVICE,
-        EMBED_MODEL_NAME,
-        FINAL_K,
-        FUSE_ADJACENT_GAP,
-        HYBRID_ALPHA,
-        MAX_CONTEXT_CHARS,
-        RETRIEVE_K,
-        TOP_K_BM25,
-        TOP_K_FAISS,
-    )
+    from rag_core.constants import DEVICE
     from rag_core.contracts import RETRIEVAL_VARIANTS
+
+    runtime_settings = get_runtime_settings()
+    retrieval_settings = runtime_settings.retrieval
 
     if variant not in RETRIEVAL_VARIANTS:
         choices = ", ".join(sorted(RETRIEVAL_VARIANTS))
@@ -126,10 +133,10 @@ def run(
         error = None
         try:
             search_kwargs = {
-                "retrieve_k": RETRIEVE_K,
-                "top_k_faiss": TOP_K_FAISS,
-                "hybrid_alpha": HYBRID_ALPHA,
-                "use_rerank": True,
+                "retrieve_k": retrieval_settings.retrieve_k,
+                "top_k_faiss": retrieval_settings.top_k_faiss,
+                "hybrid_alpha": retrieval_settings.hybrid_alpha,
+                "use_rerank": runtime_settings.features.enable_reranker,
             }
             if variant == "hybrid_current" and not record_trace:
                 # Preserve the original P0-A benchmark path exactly when no
@@ -196,22 +203,12 @@ def run(
         "faiss_sha256": _sha256(Path(idx.faiss_path)),
     }
     effective_configuration = {
+        **effective_runtime_configuration(runtime_settings, device=DEVICE),
         "pipeline": "current",
         "retrieval_variant": variant,
         "record_trace": record_trace,
         "dataset": str(dataset_path),
         "dataset_sha256": _sha256(dataset_path),
-        "device": DEVICE,
-        "retrieve_k": RETRIEVE_K,
-        "top_k_faiss": TOP_K_FAISS,
-        "top_k_bm25": TOP_K_BM25,
-        "hybrid_alpha": HYBRID_ALPHA,
-        "mmr_lambda": 0.7,
-        "use_rerank": True,
-        "final_k": FINAL_K,
-        "max_context_chars": MAX_CONTEXT_CHARS,
-        "fuse_adjacent_gap": FUSE_ADJACENT_GAP,
-        "answerability_threshold": rag_params.get("answerability_threshold"),
         "index_chunks": len(getattr(idx, "metas", []) or []),
         **index_files,
     }
@@ -220,7 +217,7 @@ def run(
         commit_git=_git_commit(),
         timestamp_utc=datetime.now(timezone.utc).isoformat(),
         configuration=effective_configuration,
-        embedding_model=EMBED_MODEL_NAME,
+        embedding_model=retrieval_settings.embedding_model,
         reranker=getattr(idx, "rerank_model_used", None),
         query_count=len(results),
         retrieval_evaluated_queries=sum(item.retrieval_evaluated for item in results),

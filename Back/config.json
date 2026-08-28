@@ -1,5 +1,4 @@
 {
-  "roots": [],
   "index_dir": "./data/index_rag",
   "exclude_globs": [
     "*/data/index_rag/*",
@@ -7,6 +6,24 @@
     "*/data/email_attachments/*"
   ],
   "follow_symlinks": false,
+  "retrieval": {
+    "embedding_model": "paraphrase-multilingual-mpnet-base-v2",
+    "reranker_model": "BAAI/bge-reranker-v2-m3",
+    "reranker_fallback": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    "device": "auto",
+    "retrieve_k": 12,
+    "top_k_faiss": 100,
+    "top_k_bm25": 100,
+    "final_k": 10,
+    "hybrid_alpha": 0.8,
+    "exact_match_bonus": 0.15,
+    "exact_match_min_chars": 6,
+    "mmr_lambda": 0.7,
+    "preliminary_pool_multiplier": 2,
+    "normalize_embeddings": true,
+    "max_context_chars": 12000,
+    "fuse_adjacent_gap": 1
+  },
   "graph": {
     "client_id": "9f9d4471-a297-4095-86ff-8af1173f700d",
     "authority": "https://login.microsoftonline.com/consumers",
@@ -28,15 +45,19 @@
   },
   "rag_params": {
     "answerability_threshold": -0.5,
-    "final_k": 12,
-    "max_context_chars": 7000,
     "overlap_min": 1,
     "context_relevance_threshold": 0.3,
+    "enable_reranker": true,
+    "enable_web_search": true,
     "enable_query_condensation": true,
     "enable_query_expansion": true,
     "enable_faithfulness_check": true,
     "faithfulness_threshold": 0.4,
     "faithfulness_strict_only": true,
+    "history_max_turns": 6,
+    "reply_history_max_turns": 12,
+    "web_max_chars": 4000,
+    "web_result_k": 5,
     "fresh_news_keywords": [
       "aujourd'hui",
       "dernière",
@@ -57,6 +78,7 @@
   "timeouts": {
     "llm_sec": 18,
     "web_sec": 8,
+    "web_http_sec": 30,
     "math_sec": 8
   },
   "rate_limit": {
@@ -65,10 +87,16 @@
   },
   "llm": {
     "provider": "mistral",
-    "model": "mistral-small",
-    "temperature": 0.2,
-    "max_tokens": 2000,
-    "stream": true
-  },
-  "directories": []
+    "model": "mistral-small-latest",
+    "temperature": 0.6,
+    "strict_temperature": 0.45,
+    "top_p": 0.9,
+    "strict_top_p": 1.0,
+    "max_tokens": 1200,
+    "roleplay_temperature": 0.9,
+    "roleplay_max_tokens": 220,
+    "smalltalk_temperature": 0.65,
+    "smalltalk_max_tokens": 200,
+    "http_timeout_sec": 60
+  }
 }

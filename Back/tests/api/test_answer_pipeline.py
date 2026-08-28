@@ -1,0 +1,552 @@
+import asyncio
+import json
+import sys
+import types
+import unittest
+import uuid
+from contextlib import ExitStack
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+from fastapi import HTTPException, Request
+
+
+# Les tests unitaires ne doivent ni charger le singleton d'index ni télécharger
+# un modèle d'embedding. On expose uniquement le contrat utilisé par le pipeline.
+_BACK_ROOT = Path(__file__).resolve().parents[2]
+if "api" not in sys.modules:
+    api_package = types.ModuleType("api")
+    api_package.__path__ = [str(_BACK_ROOT / "api")]
+    sys.modules["api"] = api_package
+
+index_singleton_stub = types.ModuleType("api.index_singleton")
+index_singleton_stub.idx = object()
+index_singleton_stub.format_context_for_llm = Mock()
+index_singleton_stub.fuse_contiguous_passages = Mock()
+index_singleton_stub.clip_context_blocks = Mock()
+index_singleton_stub.ask_mistral_with_context = Mock()
+index_singleton_stub.answerability_guard = Mock()
+index_singleton_stub.keyword_overlap_count = Mock()
+index_singleton_stub.trim_history = lambda rows, max_turns: list(rows)
+index_singleton_stub.classify_smalltalk_semantic = Mock(return_value="")
+index_singleton_stub.web_search_context = Mock()
+index_singleton_stub.RETRIEVE_K = 12
+index_singleton_stub.TOP_K_FAISS = 24
+index_singleton_stub.HYBRID_ALPHA = 0.65
+index_singleton_stub.FUSE_ADJACENT_GAP = 1
+index_singleton_stub.MAX_CONTEXT_CHARS = 12000
+index_singleton_stub.FINAL_K = 6
+sys.modules.setdefault("api.index_singleton", index_singleton_stub)
+
+from api.answer_pipeline import AnswerPipelineResult, run_answer_pipeline
+from api.schemas import AskIn
+
+
+class _Cache:
+    def __init__(self):
+        self.values = {}
+
+    def get(self, key):
+        value = self.values.get(key)
+        return dict(value) if value else None
+
+    def set(self, key, value):
+        self.values[key] = dict(value)
+
+
+class _Index:
+    embed_model = object()
+
+    def __init__(self, results=None, scores=None):
+        self.results = results or []
+        self.scores = scores or []
+        self.search_calls = []
+
+    def search(self, query, **kwargs):
+        self.search_calls.append((query, kwargs))
+        return list(self.results), list(self.scores)
+
+
+def _request(path="/ask"):
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": path,
+            "headers": [],
+            "query_string": b"",
+            "server": ("test", 80),
+            "client": ("test", 1),
+            "scheme": "http",
+        }
+    )
+
+
+class AnswerPipelineTests(unittest.TestCase):
+    def setUp(self):
+        self.chunk = (
+            0.9,
+            {
+                "idx": 7,
+                "path": "C:/docs/policy.txt",
+                "chunk_id": 2,
+                "text": "La politique prévoit une conservation de trente jours.",
+            },
+        )
+        self.index = _Index([self.chunk], [0.9])
+        self.cache = _Cache()
+
+    def _patch_pipeline(
+        self,
+        *,
+        index=None,
+        route_mode="strict_local",
+        relevance=True,
+        faithfulness=None,
+        llm=None,
+        fresh=False,
+    ):
+        from api import answer_pipeline as pipeline
+
+        chosen_index = index or self.index
+        llm_impl = llm or self._llm
+        stack = ExitStack()
+        stack.enter_context(patch.object(pipeline, "idx", chosen_index))
+        stack.enter_context(patch.object(pipeline, "response_cache", self.cache))
+        stack.enter_context(patch.object(pipeline, "_touch_session", Mock()))
+        stack.enter_context(patch.object(pipeline, "_get_roleplay", return_value=False))
+        stack.enter_context(patch.object(pipeline, "_set_roleplay", Mock()))
+        stack.enter_context(patch.object(pipeline, "detect_roleplay_trigger", return_value=None))
+        stack.enter_context(patch.object(pipeline, "classify_smalltalk_semantic", return_value=""))
+        stack.enter_context(patch.object(pipeline, "_looks_like_equation", return_value=False))
+        stack.enter_context(patch.object(pipeline, "_is_explain_followup", return_value=False))
+        stack.enter_context(patch.object(pipeline, "_local_index_ready", return_value=True))
+        stack.enter_context(patch.object(pipeline, "fuse_contiguous_passages", side_effect=lambda rows, gap: rows))
+        stack.enter_context(patch.object(pipeline, "clip_context_blocks", side_effect=lambda rows, **kwargs: rows))
+        stack.enter_context(
+            patch.object(
+                pipeline,
+                "format_context_for_llm",
+                return_value="[1] La politique prévoit une conservation de trente jours.",
+            )
+        )
+        stack.enter_context(patch.object(pipeline, "answerability_guard", return_value=True))
+        stack.enter_context(patch.object(pipeline, "keyword_overlap_count", return_value=3))
+        stack.enter_context(patch.object(pipeline, "_check_context_relevance", return_value=relevance))
+        stack.enter_context(patch.object(pipeline, "_llm_route", return_value=route_mode))
+        stack.enter_context(patch.object(pipeline, "ENABLE_EXPANSION", False))
+        stack.enter_context(patch.object(pipeline, "ENABLE_CONDENSATION", False))
+        stack.enter_context(patch.object(pipeline, "ENABLE_FAITHFULNESS_CHECK", True))
+        stack.enter_context(patch.object(pipeline, "_safe_llm", side_effect=llm_impl))
+        stack.enter_context(
+            patch.object(
+                pipeline,
+                "check_faithfulness",
+                return_value=faithfulness
+                or {"faithful": True, "score": 0.95, "label": "entailment"},
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                pipeline,
+                "should_fallback_to_general",
+                side_effect=lambda result, strict_mode: not result["faithful"],
+            )
+        )
+        stack.enter_context(patch.object(pipeline, "_try_get_auth_ids", return_value=(None, None)))
+        stack.enter_context(patch.object(pipeline, "_looks_fresh_news", return_value=fresh))
+        return stack
+
+    @staticmethod
+    def _llm(_fn, question, context_text="", **kwargs):
+        if str(question).startswith("VERIFIEUR JSON:"):
+            return '{"ok":true,"action":"none"}'
+        if context_text:
+            return "La conservation est de **trente jours**. <CITATIONS>[1]</CITATIONS>"
+        return "Réponse générale contrôlée."
+
+    def test_local_answerable_with_citation_and_validation(self):
+        body = AskIn(
+            q="Quelle est la durée de conservation de la politique ?",
+            source_mode="local",
+            thread_id=str(uuid.uuid4()),
+        )
+        with self._patch_pipeline():
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.answer, "La conservation est de **trente jours**.")
+        self.assertEqual(result.mode, "STRICT(local)")
+        self.assertEqual(result.status, "answered")
+        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assertTrue(result.validation_performed)
+        self.assertTrue(result.validations["faithfulness"]["faithful"])
+
+    def test_local_unanswerable_abstains_without_generation(self):
+        empty_index = _Index([], [])
+        llm = Mock(side_effect=AssertionError("generation must not run"))
+        body = AskIn(q="Information absente du corpus", source_mode="local")
+        with self._patch_pipeline(index=empty_index, relevance=False, llm=llm):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.status, "abstained")
+        self.assertEqual(result.mode, "STRICT(local)")
+        self.assertEqual(result.sources, [])
+        self.assertIsNotNone(result.abstention_reason)
+
+    def test_general_mode_skips_retrieval(self):
+        body = AskIn(q="Explique le principe général", source_mode="general")
+        with self._patch_pipeline():
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.answer, "Réponse générale contrôlée.")
+        self.assertEqual(result.mode, "GENERAL(no-context)")
+        self.assertEqual(self.index.search_calls, [])
+
+    def test_auto_mode_uses_shared_routing(self):
+        body = AskIn(
+            q="Quelle est la durée de conservation de la politique ?",
+            source_mode="auto",
+        )
+        with self._patch_pipeline(route_mode="strict_local"):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.mode, "STRICT(local)")
+        self.assertEqual(result.status, "answered")
+
+    def test_condensation_query_is_the_one_retrieved(self):
+        from api import answer_pipeline as pipeline
+
+        body = AskIn(
+            q="Et sa durée ?",
+            source_mode="local",
+            history=[
+                {"role": "user", "content": "Parle-moi de la politique."},
+                {"role": "assistant", "content": "D'accord."},
+                {"role": "user", "content": "Quels délais prévoit-elle ?"},
+            ],
+        )
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ENABLE_CONDENSATION", True),
+            patch.object(
+                pipeline,
+                "_condense_question",
+                return_value="durée de conservation de la politique",
+            ) as condense,
+        ):
+            run_answer_pipeline(body, _request())
+
+        condense.assert_called_once()
+        self.assertEqual(
+            self.index.search_calls[0][0],
+            "durée de conservation de la politique",
+        )
+
+    def test_retrieval_parameters_and_order_are_preserved(self):
+        from api import answer_pipeline as pipeline
+
+        body = AskIn(q="Durée de conservation ?", source_mode="local")
+        with self._patch_pipeline():
+            run_answer_pipeline(body, _request())
+
+        self.assertEqual(len(self.index.search_calls), 1)
+        _query, kwargs = self.index.search_calls[0]
+        self.assertEqual(
+            kwargs,
+            {
+                "retrieve_k": pipeline.RETRIEVE_K,
+                "top_k_faiss": pipeline.TOP_K_FAISS,
+                "hybrid_alpha": pipeline.HYBRID_ALPHA,
+                "use_rerank": True,
+                "allowed_sources": {"email", "pdf", "file"},
+            },
+        )
+
+    def test_expansion_reuses_the_same_retrieval_parameters(self):
+        from api import answer_pipeline as pipeline
+
+        expanding_index = _Index()
+        expanding_index.search = Mock(
+            side_effect=[
+                ([], []),
+                ([self.chunk], [0.9]),
+                ([self.chunk], [0.9]),
+            ]
+        )
+        body = AskIn(q="Formulation éloignée", source_mode="local")
+        with (
+            self._patch_pipeline(index=expanding_index),
+            patch.object(pipeline, "ENABLE_EXPANSION", True),
+            patch.object(
+                pipeline,
+                "_multi_query_expand",
+                return_value=["Formulation éloignée", "variante A", "variante B"],
+            ),
+            patch.object(
+                pipeline,
+                "_check_context_relevance",
+                side_effect=[False, True],
+            ),
+        ):
+            run_answer_pipeline(body, _request())
+
+        self.assertEqual(
+            [call.args[0] for call in expanding_index.search.call_args_list],
+            ["Formulation éloignée", "variante A", "variante B"],
+        )
+        kwargs = [call.kwargs for call in expanding_index.search.call_args_list]
+        self.assertTrue(all(item == kwargs[0] for item in kwargs))
+
+    def test_web_live_mode_uses_web_context_and_sources(self):
+        from api import answer_pipeline as pipeline
+
+        web_context = "[WEB] Source officielle\nhttps://example.test/news\nInformation récente."
+        body = AskIn(q="Quelle est l'information récente ?", source_mode="web_live")
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "_with_timeout", return_value=web_context),
+        ):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.mode, "STRICT(web_live)")
+        self.assertEqual(
+            result.sources,
+            [{"path": "https://example.test/news", "chunk": -1}],
+        )
+        self.assertTrue(result.validations["faithfulness"]["faithful"])
+
+    def test_faithfulness_fallback_replaces_unvalidated_draft(self):
+        calls = {"strict": 0}
+
+        def llm(_fn, question, context_text="", **kwargs):
+            if str(question).startswith("VERIFIEUR JSON:"):
+                return '{"ok":true,"action":"none"}'
+            if context_text:
+                calls["strict"] += 1
+                return "Brouillon non fidèle. <CITATIONS>[1]</CITATIONS>"
+            return "Réponse de fallback validée."
+
+        body = AskIn(q="Question avec fallback", source_mode="local")
+        with self._patch_pipeline(
+            faithfulness={"faithful": False, "score": 0.1, "label": "contradiction"},
+            llm=llm,
+        ):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(calls["strict"], 1)
+        self.assertEqual(result.answer, "Réponse de fallback validée.")
+        self.assertEqual(result.mode, "FALLBACK(faithfulness)")
+        self.assertEqual(result.status, "fallback")
+        self.assertEqual(result.sources, [])
+        self.assertEqual(result.fallback_reason, "faithfulness")
+
+    def test_english_tropicalization_keeps_sourced_local_answer_when_verifier_asks_web(self):
+        def llm(_fn, question, context_text="", **kwargs):
+            if str(question).startswith("VERIFIEUR JSON:"):
+                return '{"ok":false,"action":"ask_web"}'
+            return "No. Tropicalization is no longer possible. <CITATIONS>[1]</CITATIONS>"
+
+        body = AskIn(
+            q="Is it possible to tropicalize a 3730 positionner?",
+            source_mode="local",
+        )
+        with self._patch_pipeline(llm=llm):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.answer, "No. Tropicalization is no longer possible.")
+        self.assertEqual(result.mode, "STRICT(local)")
+        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assertEqual(result.validations["post_answer"]["action"], "ask_web")
+        self.assertFalse(result.validations["post_answer"]["confirmed_web_need"])
+
+    def test_french_tropicalization_keeps_existing_local_behavior(self):
+        def llm(_fn, question, context_text="", **kwargs):
+            if str(question).startswith("VERIFIEUR JSON:"):
+                return '{"ok":true,"action":"none"}'
+            return "Non. La tropicalisation n'est plus possible. <CITATIONS>[1]</CITATIONS>"
+
+        body = AskIn(
+            q="C'est possible de tropicaliser un 3730 ?",
+            source_mode="local",
+        )
+        with self._patch_pipeline(llm=llm):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.answer, "Non. La tropicalisation n'est plus possible.")
+        self.assertEqual(result.mode, "STRICT(local)")
+        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assertEqual(result.validations["post_answer"]["action"], "none")
+
+    def test_fresh_question_with_insufficient_local_context_can_still_ask_web(self):
+        def llm(_fn, question, context_text="", **kwargs):
+            if str(question).startswith("VERIFIEUR JSON:"):
+                return '{"ok":false,"action":"ask_web"}'
+            return "Réponse générale sans source locale."
+
+        body = AskIn(q="Quel est le score du match aujourd'hui ?", source_mode="auto")
+        with self._patch_pipeline(relevance=False, llm=llm, fresh=True):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(
+            result.answer,
+            "Je préfère vérifier sur des sources à jour. Je lance une recherche web ?",
+        )
+        self.assertEqual(result.status, "abstained")
+        self.assertEqual(result.validations["post_answer"]["action"], "ask_web")
+        self.assertTrue(result.validations["post_answer"]["confirmed_web_need"])
+
+    def test_strict_answer_without_returnable_source_can_still_ask_web(self):
+        sourceless_chunk = (
+            0.9,
+            {
+                "idx": 8,
+                "path": "",
+                "chunk_id": 3,
+                "text": "Contexte strict sans chemin de source exploitable.",
+            },
+        )
+
+        def llm(_fn, question, context_text="", **kwargs):
+            if str(question).startswith("VERIFIEUR JSON:"):
+                return '{"ok":false,"action":"ask_web"}'
+            return "Brouillon strict sans source retournable. <CITATIONS>[1]</CITATIONS>"
+
+        body = AskIn(q="Question stable sans source retournable", source_mode="local")
+        with self._patch_pipeline(
+            index=_Index([sourceless_chunk], [0.9]),
+            llm=llm,
+        ):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(
+            result.answer,
+            "Je préfère vérifier sur des sources à jour. Je lance une recherche web ?",
+        )
+        self.assertEqual(result.sources, [])
+        self.assertTrue(result.validations["post_answer"]["confirmed_web_need"])
+
+    def test_sourced_local_answer_ignores_spurious_ask_web_action(self):
+        def llm(_fn, question, context_text="", **kwargs):
+            if str(question).startswith("VERIFIEUR JSON:"):
+                return '{"ok":false,"action":"ask_web"}'
+            return "Réponse locale validée. <CITATIONS>[1]</CITATIONS>"
+
+        body = AskIn(q="Question locale stable", source_mode="local")
+        with self._patch_pipeline(llm=llm):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.answer, "Réponse locale validée.")
+        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assertEqual(result.validations["post_answer"]["action"], "ask_web")
+        self.assertFalse(result.validations["post_answer"]["confirmed_web_need"])
+
+    def test_post_verifier_none_action_remains_unchanged(self):
+        def llm(_fn, question, context_text="", **kwargs):
+            if str(question).startswith("VERIFIEUR JSON:"):
+                return '{"ok":true,"action":"none"}'
+            return "Réponse locale inchangée. <CITATIONS>[1]</CITATIONS>"
+
+        body = AskIn(q="Question locale stable", source_mode="local")
+        with self._patch_pipeline(llm=llm):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.answer, "Réponse locale inchangée.")
+        self.assertEqual(result.validations["post_answer"]["action"], "none")
+        self.assertFalse(result.validations["post_answer"]["confirmed_web_need"])
+
+    def test_persistence_is_executed_once_by_the_shared_pipeline(self):
+        from api import answer_pipeline as pipeline
+
+        body = AskIn(
+            q="Durée de conservation ?",
+            source_mode="local",
+            thread_id="chat-1",
+        )
+        with (
+            self._patch_pipeline(),
+            patch.object(
+                pipeline,
+                "_try_get_auth_ids",
+                return_value=("tenant-1", "user-1"),
+            ),
+            patch.object(pipeline, "create_chat") as create,
+            patch.object(pipeline, "append_message") as append,
+        ):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.chat_id, "chat-1")
+        create.assert_called_once()
+        self.assertEqual(append.call_count, 2)
+
+    def test_cached_response_keeps_the_same_public_result(self):
+        llm = Mock(side_effect=self._llm)
+        body = AskIn(q="Durée mise en cache ?", source_mode="local")
+        with self._patch_pipeline(llm=llm):
+            first = run_answer_pipeline(body, _request())
+            second = run_answer_pipeline(body, _request())
+
+        self.assertEqual(first.answer, second.answer)
+        self.assertEqual(first.sources, second.sources)
+        self.assertEqual(first.mode, second.mode)
+        self.assertEqual(first.context_length, second.context_length)
+        self.assertEqual(len(self.index.search_calls), 2)
+        self.assertEqual(llm.call_count, 2)
+        self.assertFalse(second.validation_performed)
+
+
+class TransportParityTests(unittest.TestCase):
+    @staticmethod
+    async def _collect(response):
+        chunks = []
+        async for item in response.body_iterator:
+            chunks.append(item.decode() if isinstance(item, bytes) else item)
+        return "".join(chunks)
+
+    def test_json_and_sse_reconstruct_the_same_validated_answer(self):
+        from api import routes_ask
+
+        result = AnswerPipelineResult(
+            answer="Réponse finale validée.",
+            sources=[{"path": "C:/docs/policy.txt", "chunk": -1}],
+            mode="STRICT(local)",
+            status="answered",
+            context_length=42,
+            request_id="request-1",
+            validations={"faithfulness": {"faithful": True}},
+        )
+        body = AskIn(q="Question", source_mode="local")
+        with patch.object(routes_ask, "run_answer_pipeline", return_value=result) as shared:
+            json_response = routes_ask.ask(body, _request("/ask"))
+            stream_response = asyncio.run(
+                routes_ask.ask_stream(body, _request("/ask/stream"))
+            )
+            stream = asyncio.run(self._collect(stream_response))
+
+        events = [
+            json.loads(line[6:])
+            for line in stream.splitlines()
+            if line.startswith("data: ")
+        ]
+        reconstructed = "".join(
+            event.get("content", "") for event in events if event["type"] == "content"
+        )
+        done = next(event for event in events if event["type"] == "done")
+
+        self.assertEqual(reconstructed, json_response.answer)
+        self.assertEqual(done["sources"], json_response.sources)
+        self.assertEqual(done["mode"], json_response.mode)
+        self.assertEqual(done["status"], result.status)
+        self.assertEqual(shared.call_count, 2)
+
+    def test_json_and_sse_keep_the_same_empty_question_http_error(self):
+        from api import routes_ask
+
+        body = AskIn(q="   ")
+        with self.assertRaisesRegex(HTTPException, "Champ 'q' vide"):
+            routes_ask.ask(body, _request("/ask"))
+        with self.assertRaisesRegex(HTTPException, "Champ 'q' vide"):
+            asyncio.run(routes_ask.ask_stream(body, _request("/ask/stream")))
+
+
+if __name__ == "__main__":
+    unittest.main()
