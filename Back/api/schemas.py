@@ -32,6 +32,23 @@ class AskIn(BaseModel):
         description="Cible à laquelle l'utilisateur répond (id, role, extrait)."
     )
 
+class PostGenerationReviewOut(BaseModel):
+    status: Literal["OK", "CAVEAT"] = "OK"
+    caveat_type: Optional[
+        Literal[
+            "STALE_SOURCE",
+            "INDIRECT_EVIDENCE",
+            "PARTIAL_EVIDENCE",
+            "CONFLICTING_EVIDENCE",
+            "INFERENCE",
+            "WEB_RECOMMENDED",
+        ]
+    ] = None
+    message: Optional[str] = None
+    severity: Literal["info", "warning"] = "info"
+    suggest_web: bool = False
+
+
 class AskOut(BaseModel):
     answer: str
     sources: List[dict] = Field(default_factory=list)
@@ -39,3 +56,4 @@ class AskOut(BaseModel):
     ctx_len: Optional[int] = None
     request_id: Optional[str] = None
     chat_id: Optional[str] = None
+    review: Optional[PostGenerationReviewOut] = None

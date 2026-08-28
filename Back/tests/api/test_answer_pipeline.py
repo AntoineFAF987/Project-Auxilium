@@ -38,7 +38,7 @@ index_singleton_stub.MAX_CONTEXT_CHARS = 12000
 index_singleton_stub.FINAL_K = 6
 sys.modules.setdefault("api.index_singleton", index_singleton_stub)
 
-from api.answer_pipeline import AnswerPipelineResult, run_answer_pipeline
+from api.answer_pipeline import AnswerPipelineResult, PostGenerationReview, run_answer_pipeline
 from api.schemas import AskIn
 
 
@@ -105,6 +105,7 @@ class AnswerPipelineTests(unittest.TestCase):
         faithfulness=None,
         llm=None,
         fresh=False,
+        context_text="[1] La politique prévoit une conservation de trente jours.",
     ):
         from api import answer_pipeline as pipeline
 
@@ -127,7 +128,7 @@ class AnswerPipelineTests(unittest.TestCase):
             patch.object(
                 pipeline,
                 "format_context_for_llm",
-                return_value="[1] La politique prévoit une conservation de trente jours.",
+                return_value=context_text,
             )
         )
         stack.enter_context(patch.object(pipeline, "answerability_guard", return_value=True))
@@ -180,6 +181,31 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
         self.assertTrue(result.validation_performed)
         self.assertTrue(result.validations["faithfulness"]["faithful"])
+
+    def test_local_reliable_answer_streams_generation_fragments_without_caveat(self):
+        from api import answer_pipeline as pipeline
+
+        streamed = []
+        body = AskIn(q="Quelle est la durée de conservation ?", source_mode="local")
+        with (
+            self._patch_pipeline(),
+            patch.object(
+                pipeline,
+                "_safe_llm_stream",
+                return_value=iter([
+                    "La conservation est de ",
+                    "trente jours. <CITATIONS>[1]</CITATIONS>",
+                ]),
+            ),
+        ):
+            result = run_answer_pipeline(body, _request(), token_sink=streamed.append)
+
+        self.assertEqual(streamed, [
+            "La conservation est de ",
+            "trente jours. <CITATIONS>[1]</CITATIONS>",
+        ])
+        self.assertEqual(result.answer, "La conservation est de trente jours.")
+        self.assertEqual(result.review.status, "OK")
 
     def test_local_unanswerable_abstains_without_generation(self):
         empty_index = _Index([], [])
@@ -315,7 +341,7 @@ class AnswerPipelineTests(unittest.TestCase):
         )
         self.assertTrue(result.validations["faithfulness"]["faithful"])
 
-    def test_faithfulness_fallback_replaces_unvalidated_draft(self):
+    def test_faithfulness_review_preserves_draft_and_adds_inference_caveat(self):
         calls = {"strict": 0}
 
         def llm(_fn, question, context_text="", **kwargs):
@@ -334,11 +360,11 @@ class AnswerPipelineTests(unittest.TestCase):
             result = run_answer_pipeline(body, _request())
 
         self.assertEqual(calls["strict"], 1)
-        self.assertEqual(result.answer, "Réponse de fallback validée.")
-        self.assertEqual(result.mode, "FALLBACK(faithfulness)")
-        self.assertEqual(result.status, "fallback")
-        self.assertEqual(result.sources, [])
-        self.assertEqual(result.fallback_reason, "faithfulness")
+        self.assertEqual(result.answer, "Brouillon non fidèle.")
+        self.assertEqual(result.mode, "STRICT(local)")
+        self.assertEqual(result.status, "answered")
+        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assertEqual(result.review.caveat_type, "INFERENCE")
 
     def test_english_tropicalization_keeps_sourced_local_answer_when_verifier_asks_web(self):
         def llm(_fn, question, context_text="", **kwargs):
@@ -356,8 +382,8 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(result.answer, "No. Tropicalization is no longer possible.")
         self.assertEqual(result.mode, "STRICT(local)")
         self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
-        self.assertEqual(result.validations["post_answer"]["action"], "ask_web")
-        self.assertFalse(result.validations["post_answer"]["confirmed_web_need"])
+        self.assertEqual(result.review.caveat_type, "WEB_RECOMMENDED")
+        self.assertTrue(result.review.suggest_web)
 
     def test_french_tropicalization_keeps_existing_local_behavior(self):
         def llm(_fn, question, context_text="", **kwargs):
@@ -375,7 +401,7 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(result.answer, "Non. La tropicalisation n'est plus possible.")
         self.assertEqual(result.mode, "STRICT(local)")
         self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
-        self.assertEqual(result.validations["post_answer"]["action"], "none")
+        self.assertEqual(result.review.status, "OK")
 
     def test_fresh_question_with_insufficient_local_context_can_still_ask_web(self):
         def llm(_fn, question, context_text="", **kwargs):
@@ -387,13 +413,10 @@ class AnswerPipelineTests(unittest.TestCase):
         with self._patch_pipeline(relevance=False, llm=llm, fresh=True):
             result = run_answer_pipeline(body, _request())
 
-        self.assertEqual(
-            result.answer,
-            "Je préfère vérifier sur des sources à jour. Je lance une recherche web ?",
-        )
-        self.assertEqual(result.status, "abstained")
-        self.assertEqual(result.validations["post_answer"]["action"], "ask_web")
-        self.assertTrue(result.validations["post_answer"]["confirmed_web_need"])
+        self.assertEqual(result.answer, "Réponse générale sans source locale.")
+        self.assertEqual(result.status, "answered")
+        self.assertEqual(result.review.caveat_type, "WEB_RECOMMENDED")
+        self.assertTrue(result.review.suggest_web)
 
     def test_strict_answer_without_returnable_source_can_still_ask_web(self):
         sourceless_chunk = (
@@ -418,12 +441,9 @@ class AnswerPipelineTests(unittest.TestCase):
         ):
             result = run_answer_pipeline(body, _request())
 
-        self.assertEqual(
-            result.answer,
-            "Je préfère vérifier sur des sources à jour. Je lance une recherche web ?",
-        )
+        self.assertEqual(result.answer, "Brouillon strict sans source retournable.")
         self.assertEqual(result.sources, [])
-        self.assertTrue(result.validations["post_answer"]["confirmed_web_need"])
+        self.assertEqual(result.review.caveat_type, "WEB_RECOMMENDED")
 
     def test_sourced_local_answer_ignores_spurious_ask_web_action(self):
         def llm(_fn, question, context_text="", **kwargs):
@@ -437,8 +457,7 @@ class AnswerPipelineTests(unittest.TestCase):
 
         self.assertEqual(result.answer, "Réponse locale validée.")
         self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
-        self.assertEqual(result.validations["post_answer"]["action"], "ask_web")
-        self.assertFalse(result.validations["post_answer"]["confirmed_web_need"])
+        self.assertEqual(result.review.caveat_type, "WEB_RECOMMENDED")
 
     def test_post_verifier_none_action_remains_unchanged(self):
         def llm(_fn, question, context_text="", **kwargs):
@@ -451,8 +470,50 @@ class AnswerPipelineTests(unittest.TestCase):
             result = run_answer_pipeline(body, _request())
 
         self.assertEqual(result.answer, "Réponse locale inchangée.")
-        self.assertEqual(result.validations["post_answer"]["action"], "none")
-        self.assertFalse(result.validations["post_answer"]["confirmed_web_need"])
+        self.assertEqual(result.review.status, "OK")
+
+    def test_old_source_adds_specific_stale_source_caveat(self):
+        body = AskIn(q="Cette politique est-elle applicable ?", source_mode="local")
+        with self._patch_pipeline(
+            context_text="[1] Politique publiée en 2021 et toujours applicable à cette date.",
+        ):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.answer, "La conservation est de **trente jours**.")
+        self.assertEqual(result.review.caveat_type, "STALE_SOURCE")
+        self.assertIn("2021", result.review.message or "")
+        self.assertTrue(result.review.suggest_web)
+
+    def test_nearby_product_only_adds_indirect_evidence_caveat(self):
+        body = AskIn(q="Peut-on tropicaliser un 3725 ?", source_mode="local")
+        with self._patch_pipeline(
+            context_text="[1] La tropicalisation du positionneur 3730 n'est plus proposée.",
+        ):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.review.caveat_type, "INDIRECT_EVIDENCE")
+        self.assertIn("3730", result.review.message or "")
+        self.assertIn("3725", result.review.message or "")
+
+    def test_conflicting_sources_add_typed_caveat(self):
+        def llm(_fn, question, context_text="", **kwargs):
+            if str(question).startswith("VERIFIEUR JSON:"):
+                return json.dumps({
+                    "status": "CAVEAT",
+                    "caveat_type": "CONFLICTING_EVIDENCE",
+                    "message": "Une source autorise l'opération, tandis qu'une autre l'interdit.",
+                    "severity": "warning",
+                    "suggest_web": False,
+                })
+            return "Les documents ne concordent pas. <CITATIONS>[1]</CITATIONS>"
+
+        body = AskIn(q="Cette opération est-elle autorisée ?", source_mode="local")
+        with self._patch_pipeline(llm=llm):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.answer, "Les documents ne concordent pas.")
+        self.assertEqual(result.review.caveat_type, "CONFLICTING_EVIDENCE")
+        self.assertIn("interdit", result.review.message or "")
 
     def test_persistence_is_executed_once_by_the_shared_pipeline(self):
         from api import answer_pipeline as pipeline
@@ -513,6 +574,12 @@ class TransportParityTests(unittest.TestCase):
             context_length=42,
             request_id="request-1",
             validations={"faithfulness": {"faithful": True}},
+            review=PostGenerationReview(
+                status="CAVEAT",
+                caveat_type="PARTIAL_EVIDENCE",
+                message="Les sources couvrent uniquement la première partie.",
+                severity="warning",
+            ),
         )
         body = AskIn(q="Question", source_mode="local")
         with patch.object(routes_ask, "run_answer_pipeline", return_value=result) as shared:
@@ -536,7 +603,95 @@ class TransportParityTests(unittest.TestCase):
         self.assertEqual(done["sources"], json_response.sources)
         self.assertEqual(done["mode"], json_response.mode)
         self.assertEqual(done["status"], result.status)
+        self.assertEqual(json_response.review.caveat_type, "PARTIAL_EVIDENCE")
+        self.assertEqual(done["review"]["caveat_type"], "PARTIAL_EVIDENCE")
+        self.assertIn("event: caveat", stream)
         self.assertEqual(shared.call_count, 2)
+
+    def test_sse_emits_generation_fragments_before_post_generation_caveat(self):
+        from api import routes_ask
+
+        result = AnswerPipelineResult(
+            answer="Réponse locale fiable, immédiatement diffusée.",
+            sources=[{"path": "C:/docs/policy.txt", "chunk": -1}],
+            mode="STRICT(local)",
+            review=PostGenerationReview(
+                status="CAVEAT",
+                caveat_type="WEB_RECOMMENDED",
+                message="La source date de 2021 ; une vérification web peut confirmer l'état actuel.",
+                severity="warning",
+                suggest_web=True,
+            ),
+        )
+
+        def pipeline(_body, _request, *, token_sink=None):
+            self.assertIsNotNone(token_sink)
+            token_sink("Réponse locale fiable, ")
+            token_sink("immédiatement diffusée.")
+            return result
+
+        with patch.object(routes_ask, "run_answer_pipeline", side_effect=pipeline):
+            response = asyncio.run(routes_ask.ask_stream(AskIn(q="Question"), _request("/ask/stream")))
+            stream = asyncio.run(self._collect(response))
+
+        frames = [frame for frame in stream.split("\n\n") if frame]
+        content_positions = [i for i, frame in enumerate(frames) if '"type": "content"' in frame]
+        caveat_position = next(i for i, frame in enumerate(frames) if "event: caveat" in frame)
+        done_position = next(i for i, frame in enumerate(frames) if '"type": "done"' in frame)
+        self.assertGreaterEqual(len(content_positions), 2)
+        self.assertLess(max(content_positions), caveat_position)
+        self.assertLess(caveat_position, done_position)
+        events = [
+            json.loads(line[6:])
+            for line in stream.splitlines()
+            if line.startswith("data: ")
+        ]
+        reconstructed = "".join(
+            event.get("content", "") for event in events if event["type"] == "content"
+        )
+        self.assertEqual(reconstructed, result.answer)
+
+    def test_sse_reliable_answer_has_no_caveat_event(self):
+        from api import routes_ask
+
+        result = AnswerPipelineResult(answer="Réponse fiable.", review=PostGenerationReview())
+
+        def pipeline(_body, _request, *, token_sink=None):
+            token_sink("Réponse ")
+            token_sink("fiable.")
+            return result
+
+        with patch.object(routes_ask, "run_answer_pipeline", side_effect=pipeline):
+            response = asyncio.run(routes_ask.ask_stream(AskIn(q="Question"), _request("/ask/stream")))
+            stream = asyncio.run(self._collect(response))
+
+        self.assertNotIn("event: caveat", stream)
+        self.assertIn('"type": "done"', stream)
+
+    def test_sse_upstream_abstention_does_not_invent_generation_or_caveat(self):
+        from api import routes_ask
+
+        result = AnswerPipelineResult(
+            answer="Je n'ai rien trouvé de pertinent dans les sources autorisées.",
+            status="abstained",
+            abstention_reason="contexte insuffisant",
+            review=PostGenerationReview(),
+        )
+
+        def pipeline(_body, _request, *, token_sink=None):
+            # Aucun appel au sink : les contrôles amont ont arrêté le pipeline.
+            return result
+
+        with patch.object(routes_ask, "run_answer_pipeline", side_effect=pipeline):
+            response = asyncio.run(routes_ask.ask_stream(AskIn(q="Question"), _request("/ask/stream")))
+            stream = asyncio.run(self._collect(response))
+
+        events = [json.loads(line[6:]) for line in stream.splitlines() if line.startswith("data: ")]
+        contents = [event for event in events if event["type"] == "content"]
+        self.assertEqual(len(contents), 1)
+        self.assertEqual(contents[0]["content"], result.answer)
+        self.assertNotIn("event: caveat", stream)
+        self.assertEqual(events[-1]["status"], "abstained")
 
     def test_json_and_sse_keep_the_same_empty_question_http_error(self):
         from api import routes_ask

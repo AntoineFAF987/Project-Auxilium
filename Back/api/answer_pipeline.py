@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 import re, json, uuid, hashlib
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Dict, Literal, Optional, Tuple
+from typing import Any, Callable, List, Dict, Literal, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from fastapi import HTTPException, Request
 
@@ -18,6 +19,7 @@ from .sessions import _touch_session, _get_roleplay, _set_roleplay, SESSIONS, re
 from .roleplay import detect_roleplay_trigger, looks_factual
 from .math_tools import _is_explain_followup, _looks_like_equation, _solve_math
 from rag_core.faithfulness import check_faithfulness, should_fallback_to_general
+from rag_core.llm_stream import ask_mistral_with_context_stream
 from runtime_settings import get_runtime_settings
 from .chats_db import create_chat, append_message
 from auth_ms import verify_ms_token
@@ -27,6 +29,48 @@ import threading, random, time
 
 
 AnswerStatus = Literal["answered", "abstained", "fallback"]
+ReviewStatus = Literal["OK", "CAVEAT"]
+CaveatType = Literal[
+    "STALE_SOURCE",
+    "INDIRECT_EVIDENCE",
+    "PARTIAL_EVIDENCE",
+    "CONFLICTING_EVIDENCE",
+    "INFERENCE",
+    "WEB_RECOMMENDED",
+]
+
+_CAVEAT_TYPES = {
+    "STALE_SOURCE",
+    "INDIRECT_EVIDENCE",
+    "PARTIAL_EVIDENCE",
+    "CONFLICTING_EVIDENCE",
+    "INFERENCE",
+    "WEB_RECOMMENDED",
+}
+
+
+@dataclass(frozen=True)
+class PostGenerationReview:
+    """Revue informative ajoutée après génération, jamais destructive."""
+
+    status: ReviewStatus = "OK"
+    caveat_type: Optional[CaveatType] = None
+    message: Optional[str] = None
+    severity: Literal["info", "warning"] = "info"
+    suggest_web: bool = False
+
+    @property
+    def has_caveat(self) -> bool:
+        return self.status == "CAVEAT" and bool(self.caveat_type and self.message)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "caveat_type": self.caveat_type,
+            "message": self.message,
+            "severity": self.severity,
+            "suggest_web": self.suggest_web,
+        }
 
 
 @dataclass(frozen=True)
@@ -44,6 +88,7 @@ class AnswerPipelineResult:
     abstention_reason: Optional[str] = None
     fallback_reason: Optional[str] = None
     validations: Dict[str, Any] = field(default_factory=dict)
+    review: PostGenerationReview = field(default_factory=PostGenerationReview)
 
     @property
     def validation_performed(self) -> bool:
@@ -57,6 +102,7 @@ class AnswerPipelineResult:
             ctx_len=self.context_length,
             request_id=self.request_id,
             chat_id=self.chat_id,
+            review=self.review.to_dict(),
         )
 
 
@@ -97,8 +143,11 @@ def _result(
     abstention_reason: Optional[str] = None,
     fallback_reason: Optional[str] = None,
     validations: Optional[Dict[str, Any]] = None,
+    review: Optional[PostGenerationReview | Dict[str, Any]] = None,
 ) -> AnswerPipelineResult:
     inferred_status, inferred_abstention, inferred_fallback = _infer_result_status(answer, mode)
+    if isinstance(review, dict):
+        review = PostGenerationReview(**review)
     return AnswerPipelineResult(
         answer=answer,
         sources=list(sources or []),
@@ -111,6 +160,7 @@ def _result(
         abstention_reason=abstention_reason or inferred_abstention,
         fallback_reason=fallback_reason or inferred_fallback,
         validations=dict(validations or {}),
+        review=review or PostGenerationReview(),
     )
 
 
@@ -168,6 +218,53 @@ def _safe_llm(fn, *args, **kwargs):
         return _call_llm_with_retries(fn, *args, **kwargs)
     finally:
         LLM_SEM.release()
+
+
+def _safe_llm_stream(fn, *args, **kwargs):
+    """Itere un flux LLM sous le meme garde-fou de concurrence que les appels sync."""
+
+    kwargs.pop("timeout", None)
+    if not LLM_SEM.acquire(timeout=5):
+        raise HTTPException(status_code=429, detail="Serveur occupe, reessaie dans 1-2 secondes.")
+    try:
+        yield from fn(*args, **kwargs)
+    finally:
+        LLM_SEM.release()
+
+
+def _generate_answer(
+    question: str,
+    context_text: str,
+    *,
+    history: List[Dict],
+    token_sink: Optional[Callable[[str], None]] = None,
+    **kwargs,
+) -> str:
+    """Genere en sync ou transmet chaque fragment au transport SSE."""
+
+    if token_sink is None:
+        return _safe_llm(
+            ask_mistral_with_context,
+            question,
+            context_text=context_text,
+            history=history,
+            timeout=LLM_TIMEOUT_SEC,
+            **kwargs,
+        )
+
+    parts: List[str] = []
+    for chunk in _safe_llm_stream(
+        ask_mistral_with_context_stream,
+        question,
+        context_text=context_text,
+        history=history,
+        **kwargs,
+    ):
+        text = str(chunk or "")
+        if text:
+            parts.append(text)
+            token_sink(text)
+    return "".join(parts)
 
 def _local_index_ready() -> bool:
     try:
@@ -430,7 +527,146 @@ def _llm_route(q: str, signals: dict, history: List[Dict]) -> str:
         return "general"
     return "general"
 
-def run_answer_pipeline(body: AskIn, request: Request) -> AnswerPipelineResult:
+
+def _product_ids(text: str) -> set[str]:
+    """Extrait les references produit numeriques en ignorant les annees."""
+
+    return {
+        token
+        for token in re.findall(r"\b\d{3,6}\b", text or "")
+        if not (1900 <= int(token) <= 2099)
+    }
+
+
+def _source_years(text: str) -> List[int]:
+    current_year = datetime.now(timezone.utc).year
+    return [
+        int(year)
+        for year in re.findall(r"\b(?:19|20)\d{2}\b", text or "")
+        if 1900 <= int(year) <= current_year
+    ]
+
+
+def _post_generation_review(
+    question: str,
+    answer: str,
+    context: str,
+    sources: List[Dict[str, Any]],
+    faithfulness: Optional[Dict[str, Any]] = None,
+) -> PostGenerationReview:
+    """Produit un commentaire additif. Cette fonction ne modifie jamais la reponse."""
+
+    prompt = (
+        "VERIFIEUR JSON:\n"
+        "Evalue la prudence utile apres generation. Ne reecris pas la reponse. "
+        "Rends uniquement un JSON compact avec status, caveat_type, message, severity, suggest_web.\n"
+        "caveat_type vaut null ou STALE_SOURCE, INDIRECT_EVIDENCE, PARTIAL_EVIDENCE, "
+        "CONFLICTING_EVIDENCE, INFERENCE, WEB_RECOMMENDED.\n"
+        "Le message doit citer la reserve concrete (date, modele, partie manquante ou contradiction). "
+        "N'ajoute rien si les preuves repondent directement et completement.\n"
+        f"QUESTION:{question}\nANSWER:{answer}\nSOURCES_COUNT:{len(sources)}\n"
+        f"CONTEXT:\n{(context or '')[:7000]}"
+    )
+    data: Dict[str, Any] = {}
+    try:
+        raw = _safe_llm(
+            ask_mistral_with_context,
+            prompt,
+            context_text="",
+            history=[],
+            timeout=min(LLM_TIMEOUT_SEC, 8),
+        )
+        parsed = json.loads((raw or "{}").strip())
+        if isinstance(parsed, dict):
+            data = parsed
+    except Exception:
+        data = {}
+
+    requested_type = str(data.get("caveat_type") or "").strip().upper()
+    action = str(data.get("action") or "none").strip().lower()
+    requested_message = str(data.get("message") or "").strip()
+    severity = "warning" if str(data.get("severity") or "").lower() == "warning" else "info"
+    suggest_web = bool(data.get("suggest_web")) or action == "ask_web"
+
+    if requested_type in _CAVEAT_TYPES and requested_type != "WEB_RECOMMENDED":
+        fallback_messages = {
+            "STALE_SOURCE": "Les sources disponibles sont anciennes ; l'information peut avoir evolue depuis.",
+            "INDIRECT_EVIDENCE": "Les sources portent sur une reference proche, pas directement sur celle demandee.",
+            "PARTIAL_EVIDENCE": "Les sources disponibles ne couvrent qu'une partie de la question.",
+            "CONFLICTING_EVIDENCE": "Les sources disponibles donnent des informations contradictoires sur ce point.",
+            "INFERENCE": "Cette conclusion repose en partie sur une deduction qui n'est pas formulee explicitement dans les sources.",
+        }
+        return PostGenerationReview(
+            status="CAVEAT",
+            caveat_type=requested_type,  # type: ignore[arg-type]
+            message=requested_message or fallback_messages[requested_type],
+            severity=severity,
+            suggest_web=suggest_web,
+        )
+
+    question_products = _product_ids(question)
+    context_products = _product_ids(context)
+    missing_products = sorted(question_products - context_products)
+    if missing_products and context_products:
+        requested = ", ".join(missing_products)
+        available = ", ".join(sorted(context_products))
+        return PostGenerationReview(
+            status="CAVEAT",
+            caveat_type="INDIRECT_EVIDENCE",
+            message=(
+                f"Les sources disponibles concernent {available}, pas directement {requested}. "
+                "La conclusion est donc indirecte."
+            ),
+            severity="warning",
+        )
+
+    years = _source_years(context)
+    current_year = datetime.now(timezone.utc).year
+    if years and max(years) <= current_year - 2:
+        latest_year = max(years)
+        return PostGenerationReview(
+            status="CAVEAT",
+            caveat_type="STALE_SOURCE",
+            message=(
+                f"La source la plus recente retrouvee date de {latest_year} ; "
+                "cette information peut avoir evolue depuis."
+            ),
+            severity="warning",
+            suggest_web=True,
+        )
+
+    if faithfulness and should_fallback_to_general(faithfulness, strict_mode=True):
+        return PostGenerationReview(
+            status="CAVEAT",
+            caveat_type="INFERENCE",
+            message=(
+                "Une partie de la reponse n'est pas explicitement confirmee par les sources fournies ; "
+                "elle doit etre lue comme une inference."
+            ),
+            severity="warning",
+        )
+
+    if requested_type == "WEB_RECOMMENDED" or action == "ask_web":
+        return PostGenerationReview(
+            status="CAVEAT",
+            caveat_type="WEB_RECOMMENDED",
+            message=requested_message or (
+                "Une verification web peut etre utile pour confirmer l'etat actuel, "
+                "sans remettre en cause la reponse locale affichee."
+            ),
+            severity=severity,
+            suggest_web=True,
+        )
+
+    return PostGenerationReview()
+
+
+def run_answer_pipeline(
+    body: AskIn,
+    request: Request,
+    *,
+    token_sink: Optional[Callable[[str], None]] = None,
+) -> AnswerPipelineResult:
     request_id = str(uuid.uuid4())
     validations: Dict[str, Any] = {}
     q = validate_answer_request(body)
@@ -481,10 +717,9 @@ def run_answer_pipeline(body: AskIn, request: Request) -> AnswerPipelineResult:
     # Roleplay actif (et pas factuel) -> réponse courte roleplay
     if roleplay_active and (not looks_factual(q)):
         try:
-            ans = _safe_llm(
-                ask_mistral_with_context,
-                q, context_text="", history=hist, roleplay_mode=True, max_tokens=220,
-                timeout=LLM_TIMEOUT_SEC,
+            ans = _generate_answer(
+                q, "", history=hist, token_sink=token_sink,
+                roleplay_mode=True, max_tokens=220,
             )
             return _result(answer=ans, sources=[], request_id=request_id)
         except FuturesTimeout:
@@ -499,11 +734,9 @@ def run_answer_pipeline(body: AskIn, request: Request) -> AnswerPipelineResult:
         skind = ""
     if skind:
         try:
-            ans = _safe_llm(
-                ask_mistral_with_context,
-                q, context_text=reply_preamble, history=hist,
+            ans = _generate_answer(
+                q, reply_preamble, history=hist, token_sink=token_sink,
                 smalltalk_mode=True, smalltalk_kind=skind, max_tokens=200,
-                timeout=LLM_TIMEOUT_SEC,
             )
             return _result(answer=ans, sources=[], request_id=request_id)
         except FuturesTimeout:
@@ -531,7 +764,7 @@ def run_answer_pipeline(body: AskIn, request: Request) -> AnswerPipelineResult:
     # --- Mode "general" forcé par l'utilisateur ---
     if mode_in == "general":
         try:
-            ans = _safe_llm(ask_mistral_with_context, q, context_text=reply_preamble, history=hist, timeout=LLM_TIMEOUT_SEC)
+            ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink)
             return _result(answer=ans, sources=[], mode="GENERAL(no-context)", ctx_len=len(reply_preamble), request_id=request_id)
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
@@ -558,7 +791,7 @@ def run_answer_pipeline(body: AskIn, request: Request) -> AnswerPipelineResult:
         # Pas assez de contexte conversationnel pour ancrer la recherche => GENERAL direct
         _log_event(request_id, {"event": "vague_question_fallback", "q": q, "user_msg_count": user_msg_count})
         try:
-            ans = _safe_llm(ask_mistral_with_context, q, context_text=reply_preamble, history=hist, timeout=LLM_TIMEOUT_SEC)
+            ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink)
             return _result(answer=ans, sources=[], mode="GENERAL(vague-no-history)", ctx_len=len(reply_preamble), request_id=request_id)
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
@@ -575,13 +808,7 @@ def run_answer_pipeline(body: AskIn, request: Request) -> AnswerPipelineResult:
                 request_id=request_id,
             )
         try:
-            ans = _safe_llm(
-                ask_mistral_with_context,
-                q,
-                context_text=reply_preamble,
-                history=hist,
-                timeout=LLM_TIMEOUT_SEC,
-            )
+            ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink)
             return _result(answer=ans, sources=[], mode="GENERAL(no-index)", ctx_len=len(reply_preamble), request_id=request_id)
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
@@ -761,10 +988,8 @@ def run_answer_pipeline(body: AskIn, request: Request) -> AnswerPipelineResult:
 
     # ===================== Appel LLM principal =====================
     try:
-        answer = _safe_llm(
-            ask_mistral_with_context,
-            q, context_for_llm, history=hist,
-            timeout=LLM_TIMEOUT_SEC
+        answer = _generate_answer(
+            q, context_for_llm, history=hist, token_sink=token_sink
         )
         # Parse des citations éventuelles
         citations_idx = []
@@ -781,11 +1006,12 @@ def run_answer_pipeline(body: AskIn, request: Request) -> AnswerPipelineResult:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM error: {e}")
 
-    # ---------- NLI Faithfulness check (optionnel) ----------
+    # ---------- NLI Faithfulness check (optionnel et non destructif) ----------
+    faithfulness_result: Optional[Dict[str, Any]] = None
+    context_for_check = ""
     if ENABLE_FAITHFULNESS_CHECK:
         try:
             # Déterminer le contexte pour la vérification (local strict ou web strict)
-            context_for_check = ""
             if route_mode == "strict_local":
                 context_for_check = context_local or ""
             elif route_mode == "web_live":
@@ -796,67 +1022,10 @@ def run_answer_pipeline(body: AskIn, request: Request) -> AnswerPipelineResult:
             should_check_here = (not FAITHFULNESS_STRICT_ONLY) or (route_mode in {"strict_local", "web_live"})
             if should_check_here and (context_for_check.strip()):
                 fchk = check_faithfulness(answer, context_for_check, threshold=FAITHFULNESS_THRESHOLD)
-                validations["faithfulness"] = {"performed": True, **dict(fchk)}
-                if should_fallback_to_general(fchk, strict_mode=True) and mode_in != "general":
-                    _log_event(request_id, {
-                        "event": "faithfulness_fallback",
-                        "label": fchk.get("label"),
-                        "score": fchk.get("score")
-                    })
-                    try:
-                        alt = _safe_llm(
-                            ask_mistral_with_context,
-                            q, context_text=reply_preamble, history=hist,
-                            timeout=LLM_TIMEOUT_SEC
-                        )
-                        if alt and alt.strip():
-                            answer = alt
-                            mode_label = "FALLBACK(faithfulness)"
-                            use_strict = False
-                            blocks = []
-                            web_sources_list = []
-                    except Exception:
-                        pass
+                faithfulness_result = dict(fchk)
+                validations["faithfulness"] = {"performed": True, **faithfulness_result}
         except Exception:
             # Si le check échoue, on n'empêche pas la réponse
-            pass
-
-    # ---------- Filet "je ne sais pas" ⇒ tenter web si question d'actu ----------
-    if _looks_fresh_news(q) and ("je ne sais pas" in answer.lower()):
-        try:
-            web_text = _with_timeout(
-                web_search_context,
-                q,
-                max_chars=WEB_MAX_CHARS,
-                k=WEB_RESULT_K,
-                timeout=WEB_TIMEOUT_SEC,
-            ) or ""
-            web_sources_list = _parse_web_links(web_text)
-            if web_text.strip():
-                context_for_llm = f"{reply_preamble}{web_text}"
-                use_strict = True
-                answer = _safe_llm(ask_mistral_with_context, q, context_for_llm, history=hist, timeout=LLM_TIMEOUT_SEC)
-                mode_label = "STRICT(web_live)"
-                blocks = []
-        except Exception:
-            pass  # on laisse la réponse telle quelle si le web échoue
-
-    # ---------- NOUVEAU: Filet "je ne sais pas" en mode AUTO ⇒ retenter GENERAL ----------
-    if (mode_in == "auto") and ("je ne sais pas" in (answer or "").lower()):
-        try:
-            alt = _safe_llm(
-                ask_mistral_with_context,
-                q, context_text=reply_preamble, history=hist,
-                timeout=LLM_TIMEOUT_SEC
-            )
-            if alt and alt.strip():
-                answer = alt
-                mode_label = "FALLBACK(general)"
-                use_strict = False
-                blocks = []
-                web_sources_list = []
-        except Exception:
-            # si l'appel échoue, on garde la réponse initiale
             pass
 
     # ===================== Sources à renvoyer =====================
@@ -884,40 +1053,15 @@ def run_answer_pipeline(body: AskIn, request: Request) -> AnswerPipelineResult:
     else:
         sources = []
 
-    # ------------------- Vérification post-réponse (léger) -------------------
-    def _verify_answer(q: str, answer: str, strict: bool, sources_count: int) -> str:
-        prompt = (
-            "VERIFIEUR JSON:\n"
-            "Réponds seulement JSON {\"ok\":true|false,\"action\":\"none|ask_web\"}.\n"
-            "- Si strict=true et sources_count==0 => ask_web.\n"
-            "- Si la question implique de l'actualité (aujourd'hui, en ce moment, 2024+) sans sources récentes => ask_web.\n"
-            "- Sinon ok=true."
-            f"\nQ:{q}\nstrict:{strict}\nsources_count:{sources_count}\nANSWER:\n{answer}"
-        )
-        try:
-            raw = _safe_llm(ask_mistral_with_context, prompt, context_text="", history=[], timeout=min(LLM_TIMEOUT_SEC, 8))
-            data = json.loads(raw.strip())
-            return data.get("action", "none") or "none"
-        except Exception:
-            return "none"
-
-    action = _verify_answer(q, answer, use_strict, len(sources))
-    confirmed_web_need = _looks_fresh_news(q) or (use_strict and not sources)
-    validations["post_answer"] = {
-        "performed": True,
-        "action": action,
-        "confirmed_web_need": bool(confirmed_web_need),
-    }
-    if action == "ask_web" and confirmed_web_need and route_mode != "web_live":
-        return _result(
-            answer="Je préfère vérifier sur des sources à jour. Je lance une recherche web ?",
-            sources=[],
-            mode=mode_label,
-            ctx_len=len(context_for_llm or ""),
-            request_id=request_id,
-            route_mode=route_mode,
-            validations=validations,
-        )
+    # La revue arrive apres la generation et ne peut plus remplacer la reponse.
+    review = _post_generation_review(
+        q,
+        answer,
+        context_for_check or (context_for_llm if use_strict else ""),
+        sources,
+        faithfulness_result,
+    )
+    validations["post_answer"] = {"performed": True, **review.to_dict()}
 
     # Logs structurés
     _log_event(request_id, {
@@ -938,7 +1082,8 @@ def run_answer_pipeline(body: AskIn, request: Request) -> AnswerPipelineResult:
         "answer": answer,
         "sources": sources,
         "mode": mode_label,
-        "ctx_len": len(context_for_llm or "")
+        "ctx_len": len(context_for_llm or ""),
+        "review": review.to_dict(),
     }
     if not body.reply_to:
         response_cache.set(ck, out)
@@ -953,7 +1098,14 @@ def run_answer_pipeline(body: AskIn, request: Request) -> AnswerPipelineResult:
             create_chat(tenant_id, user_id, title=title or "Nouveau chat", chat_id=chat_id)
             # Ajoute les messages (user puis assistant)
             append_message(tenant_id, user_id, chat_id, "user", q, meta={"request_id": request_id})
-            append_message(tenant_id, user_id, chat_id, "assistant", answer, meta={"mode": mode_label})
+            append_message(
+                tenant_id,
+                user_id,
+                chat_id,
+                "assistant",
+                answer,
+                meta={"mode": mode_label, "review": review.to_dict()},
+            )
         except Exception:
             # Ne bloque pas la réponse si la persistance échoue
             pass

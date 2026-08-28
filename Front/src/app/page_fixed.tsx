@@ -12,6 +12,13 @@ import "katex/dist/katex.min.css";
 
 /* ---------------- Types & Constantes --------------- */
 type Source = { path: string; chunk: number };
+type PostGenerationReview = {
+  status: "OK" | "CAVEAT";
+  caveat_type?: "STALE_SOURCE" | "INDIRECT_EVIDENCE" | "PARTIAL_EVIDENCE" | "CONFLICTING_EVIDENCE" | "INFERENCE" | "WEB_RECOMMENDED" | null;
+  message?: string | null;
+  severity: "info" | "warning";
+  suggest_web: boolean;
+};
 
 // --- Reply threading ---
 type ReplyMeta = {
@@ -27,6 +34,7 @@ type Message = {
   sources?: Source[];
   replyTo?: ReplyMeta;
   mode?: string;            // +++ nouveau
+  caveat?: PostGenerationReview;
 };
 
 type StoredChat = { id: string; createdAt: string; title: string; messages: Message[] };
@@ -999,7 +1007,9 @@ export default function Page() {
   let accumulatedContent = "";
       let finalSources: Source[] = [];
       let finalMode: string | undefined = undefined;
+      let finalCaveat: PostGenerationReview | undefined = undefined;
   let finalChatId: string | null = null;
+      let sseBuffer = "";
 
       // Ajouter le message temporaire
       setMessages([...nextUser, tempAssistant]);
@@ -1008,13 +1018,14 @@ export default function Page() {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
+        sseBuffer += decoder.decode(value, { stream: true });
+        const frames = sseBuffer.split(/\r?\n\r?\n/);
+        sseBuffer = frames.pop() ?? "";
 
-        for (const line of lines) {
-          if (!line.trim() || !line.startsWith('data: ')) continue;
-          
-          const data = line.slice(6); // Enlever "data: "
+        for (const frame of frames) {
+          const line = frame.split(/\r?\n/).find((item) => item.startsWith('data: '));
+          if (!line) continue;
+          const data = line.slice(6);
           try {
             const parsed = JSON.parse(data);
             
@@ -1038,9 +1049,17 @@ export default function Page() {
               requestAnimationFrame(() => {
                 try { bottomRef.current?.scrollIntoView(); } catch {}
               });
+            } else if (parsed.type === 'caveat') {
+              finalCaveat = parsed as PostGenerationReview;
+              setMessages((prev) => prev.map((message) =>
+                message.id === tempAssistantId ? { ...message, caveat: finalCaveat } : message
+              ));
             } else if (parsed.type === 'done') {
               finalSources = Array.isArray(parsed.sources) ? parsed.sources : [];
               finalMode = typeof parsed.mode === 'string' ? parsed.mode : undefined;
+              if (!finalCaveat && parsed.review?.status === 'CAVEAT') {
+                finalCaveat = parsed.review as PostGenerationReview;
+              }
               if (parsed.chat_id && !chatId) {
                 finalChatId = String(parsed.chat_id);
               }
@@ -1078,6 +1097,7 @@ export default function Page() {
         role: "assistant",
         content: accumulatedContent,
         sources: finalSources,
+        caveat: finalCaveat,
         // Ne pas inclure le mode si c'est smalltalk pour éviter tout re-render
         mode: finalMode === "smalltalk" ? undefined : finalMode,
       };
@@ -1830,6 +1850,19 @@ export default function Page() {
                                   <MathRenderer text={m.content} />
                                 )}
                               </div>
+
+                              {m.caveat?.status === "CAVEAT" && m.caveat.message && (
+                                <div
+                                  className="mx-4 mt-3 rounded-xl border border-amber-400/50 bg-amber-400/10 px-4 py-3 text-sm"
+                                  role="note"
+                                  aria-label="Réserve sur la réponse"
+                                >
+                                  <div className="mb-1 font-semibold text-amber-700 dark:text-amber-300">
+                                    À noter · {(m.caveat.caveat_type || "REVIEW").replaceAll("_", " ")}
+                                  </div>
+                                  <div className="text-[var(--text)]">{m.caveat.message}</div>
+                                </div>
+                              )}
 
                               {(() => {
                                 // Ne rien afficher si: pas de mode OU encore en loading
