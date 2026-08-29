@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "benchmark_name": "auxilium-adaptive-context-v2-pilot",
+  "base_config": "eval/configs/current.yaml",
+  "output_dir": "eval/reports",
+  "warmup": true,
+  "annotation_policy": "Stable v2 documentary golds; identical index, dataset and retrieval parameters for all variants.",
+  "variants": [
+    "hybrid_current",
+    "anchor_scope_adaptive",
+    "anchor_scope_adaptive_k"
+  ]
+}

@@ -28,3 +28,16 @@ and manually adjudicated material containing at least:
 
 Keep development and held-out test questions separate. At least two annotators
 should adjudicate relevance grades and evidence spans for the held-out set.
+
+## Stable gold references across rechunking
+
+Legacy rows may keep `relevant_chunk_ids` while they still exist. For datasets
+that must survive a rechunk, annotate `relevant_document`/`relevant_documents`
+and, when possible, `evidence_spans` with `document`, `page`, `section`, and a
+short evidence `text`. The runner resolves page/section/text locators against
+the current index. If only a document is known, it deliberately evaluates at
+document granularity and records `gold_reference_mode="document"`; it does not
+pretend that a newly generated chunk ID is the old gold chunk.
+
+Reports also include mean-able `retrieved_candidates` and `useful_candidates`
+metrics, alongside Recall@k, Hit@k, MRR, NDCG, and latency.

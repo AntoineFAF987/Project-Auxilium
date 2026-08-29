@@ -10,6 +10,9 @@ RetrievalVariant = Literal[
     "hybrid_current",
     "hybrid_no_mmr",
     "hybrid_no_reranker",
+    "anchor_scope",
+    "anchor_scope_adaptive",
+    "anchor_scope_adaptive_k",
 ]
 
 RETRIEVAL_VARIANTS = {
@@ -18,6 +21,9 @@ RETRIEVAL_VARIANTS = {
     "hybrid_current",
     "hybrid_no_mmr",
     "hybrid_no_reranker",
+    "anchor_scope",
+    "anchor_scope_adaptive",
+    "anchor_scope_adaptive_k",
 }
 
 
@@ -63,6 +69,8 @@ class RetrievalTrace:
     mmr_selected_ids: List[int] = field(default_factory=list)
     reranked_candidate_ids: List[int] = field(default_factory=list)
     final_candidate_ids: List[int] = field(default_factory=list)
+    anchor_scope: Optional[Dict[str, Any]] = None
+    sufficiency: Optional[Dict[str, Any]] = None
     errors: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:

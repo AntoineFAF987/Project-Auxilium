@@ -29,11 +29,13 @@ def _load_ablation_config(path: Path) -> Dict[str, Any]:
     except Exception as exc:
         raise ValueError(f"Invalid JSON-compatible YAML config {path}: {exc}") from exc
     variants = payload.get("variants", DEFAULT_VARIANTS)
-    if variants != DEFAULT_VARIANTS:
-        raise ValueError(
-            "This P0 ablation runner requires the five variants in their fixed order: "
-            + ", ".join(DEFAULT_VARIANTS)
-        )
+    from rag_core.contracts import RETRIEVAL_VARIANTS
+    if not variants or any(variant not in RETRIEVAL_VARIANTS for variant in variants):
+        raise ValueError("Ablation variants must be non-empty known retrieval variants")
+    if len(variants) != len(set(variants)):
+        raise ValueError("Ablation variants must not contain duplicates")
+    if "hybrid_current" not in variants:
+        raise ValueError("Ablation variants must include hybrid_current as baseline")
     return payload
 
 
@@ -123,7 +125,7 @@ def run(config_path: Path, output_override: Path | None = None) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Compare Auxilium's five current retrieval variants."
+        description="Compare Auxilium retrieval variants on one active index."
     )
     parser.add_argument(
         "--config",

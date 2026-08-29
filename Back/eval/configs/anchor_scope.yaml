@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "benchmark_name": "auxilium-anchor-scope-v2-pilot",
+  "base_config": "eval/configs/current.yaml",
+  "output_dir": "eval/reports",
+  "warmup": true,
+  "annotation_policy": "Stable document/page/section evidence locators; identical v2 index and corpus for both variants.",
+  "variants": [
+    "hybrid_current",
+    "anchor_scope",
+    "anchor_scope_adaptive"
+  ]
+}

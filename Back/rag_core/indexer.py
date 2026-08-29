@@ -8,6 +8,9 @@ Indexer RAG : ajout d'un mode de réindexation incrémentale et robustesse index
 
 import os
 import json
+import uuid
+from collections import Counter
+from datetime import datetime, timezone
 from typing import List, Dict, Tuple, Iterable, Optional
 from pathlib import Path
 import numpy as np
@@ -21,10 +24,16 @@ from .constants import (
     TOP_K_FAISS, TOP_K_BM25, RETRIEVE_K, HYBRID_ALPHA, NORMALIZE_EMBED,
     EXACT_MATCH_BONUS, EXACT_MATCH_MIN_CHARS, MMR_LAMBDA,
     PRELIMINARY_POOL_MULTIPLIER,
+    FINAL_K, MAX_CONTEXT_CHARS,
 )
+from .anchor_scope import select_anchor_scope, select_anchor_scope_adaptive
+from .context_sufficiency import select_adaptive_context
 from .utils import (
     ensure_dir, file_fingerprint, _is_under, _safe_walk, tokenize_for_bm25, SUPPORTED_EXTS, read_supported_text,
 )
+from .document_model import DOCUMENT_SCHEMA_VERSION
+from .document_parsing import parse_document
+from .structure_chunking import chunk_document
 
 # ----- PDF utils -----
 from ingest_pdfs import (
@@ -99,6 +108,12 @@ class RAGIndexer:
         self.corpus_path = os.path.join(self.index_dir, "corpus.jsonl")
         self.emb_path = os.path.join(self.index_dir, "embeddings.npy")
         self.faiss_path = os.path.join(self.index_dir, "faiss.index")
+        self.manifest_path = os.path.join(self.index_dir, "manifest.json")
+        self.legacy_corpus_path = self.corpus_path
+        self.legacy_emb_path = self.emb_path
+        self.legacy_faiss_path = self.faiss_path
+        self.loaded_schema_version = 1
+        self.index_manifest: Dict = {}
 
         # En mémoire
         self.corpus: List[Dict] = []
@@ -148,6 +163,8 @@ class RAGIndexer:
             return False
         if not self.metas:
             return True
+        if self.loaded_schema_version != DOCUMENT_SCHEMA_VERSION:
+            return True
         curr = self._current_doc_fingerprints()
         indexed = {m["path"]: m["fingerprint"] for m in self.metas}
         for p in curr:
@@ -160,9 +177,37 @@ class RAGIndexer:
 
     # --- persistance ---
     def _load_existing(self) -> bool:
+        self.corpus_path = self.legacy_corpus_path
+        self.emb_path = self.legacy_emb_path
+        self.faiss_path = self.legacy_faiss_path
+        manifest = {}
+        try:
+            manifest = json.loads(Path(self.manifest_path).read_text(encoding="utf-8"))
+            artifacts = manifest.get("artifacts") or {}
+            if int(manifest.get("schema_version", 1)) >= 2 and artifacts:
+                resolved = {
+                    name: (Path(self.index_dir) / relative).resolve()
+                    for name, relative in artifacts.items()
+                }
+                root = Path(self.index_dir).resolve()
+                if not all(path == root or root in path.parents for path in resolved.values()):
+                    raise ValueError("Index manifest references an artifact outside index_dir")
+                self.corpus_path = str(resolved["corpus"])
+                self.emb_path = str(resolved["embeddings"])
+                self.faiss_path = str(resolved["faiss"])
+        except Exception:
+            manifest = {}
         ok = all(os.path.exists(p) for p in [self.corpus_path, self.emb_path, self.faiss_path])
         if not ok:
             return False
+        self.loaded_schema_version = 1
+        try:
+            self.loaded_schema_version = int(manifest.get("schema_version", 1))
+        except Exception:
+            # A v1 index stays readable until an explicit reindex. It is never
+            # incrementally mixed with v2 rows.
+            pass
+        self.index_manifest = manifest
         self.corpus = [json.loads(l) for l in open(self.corpus_path, "r", encoding="utf-8")]
         self.metas = [{k: v for k, v in c.items() if k != "text"} for c in self.corpus]
         self.texts = [c["text"] for c in self.corpus]
@@ -182,20 +227,144 @@ class RAGIndexer:
         except Exception:
             pass
         import gc; gc.collect()
-        for p in [self.corpus_path, self.emb_path, self.faiss_path]:
-            try:
-                if os.path.exists(p): os.remove(p)
-            except PermissionError:
-                try: os.replace(p, p + ".old")
-                except Exception: pass
+        # Active and legacy artifacts are intentionally left untouched. A new
+        # generation is activated only after all files have been validated.
 
     def _save_all(self, corpus_rows, embs, faiss_index):
-        with open(self.corpus_path, "w", encoding="utf-8") as f:
+        generations = Path(self.index_dir) / "generations"
+        generations.mkdir(parents=True, exist_ok=True)
+        generation_name = (
+            f"v{DOCUMENT_SCHEMA_VERSION}-"
+            f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}-"
+            f"{uuid.uuid4().hex[:8]}"
+        )
+        staging = generations / f".{generation_name}.staging"
+        final_generation = generations / generation_name
+        staging.mkdir(parents=False, exist_ok=False)
+        corpus_path = staging / "corpus.jsonl"
+        emb_path = staging / "embeddings.npy"
+        faiss_path = staging / "faiss.index"
+        with corpus_path.open("w", encoding="utf-8") as f:
             for row in corpus_rows:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        np.save(self.emb_path, embs.astype("float32"))
-        faiss.write_index(faiss_index, self.faiss_path)
+        np.save(emb_path, embs.astype("float32"))
+        faiss.write_index(faiss_index, str(faiss_path))
+        self._validate_generation(corpus_rows, embs, faiss_index)
+        persisted_rows = [
+            json.loads(line) for line in corpus_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        persisted_embs = np.load(emb_path, mmap_mode="r")
+        persisted_faiss = faiss.read_index(str(faiss_path))
+        self._validate_generation(persisted_rows, persisted_embs, persisted_faiss)
+        del persisted_embs
+        os.replace(staging, final_generation)
+
+        relative_root = final_generation.relative_to(Path(self.index_dir))
+        summary = self._index_summary(corpus_rows)
+        manifest = {
+            "schema_version": DOCUMENT_SCHEMA_VERSION,
+            "chunking": "structure-aware",
+            "chunk_max_chars": CHUNK_CHARS,
+            "oversized_unit_overlap": CHUNK_OVERLAP,
+            "chunk_count": len(corpus_rows),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "generation": generation_name,
+            "artifacts": {
+                "corpus": str(relative_root / "corpus.jsonl").replace("\\", "/"),
+                "embeddings": str(relative_root / "embeddings.npy").replace("\\", "/"),
+                "faiss": str(relative_root / "faiss.index").replace("\\", "/"),
+            },
+            "legacy_v1_retained": all(Path(path).exists() for path in (
+                self.legacy_corpus_path, self.legacy_emb_path, self.legacy_faiss_path
+            )),
+            "summary": summary,
+        }
+        manifest_tmp = Path(self.index_dir) / f".manifest-{uuid.uuid4().hex}.tmp"
+        manifest_tmp.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        os.replace(manifest_tmp, self.manifest_path)
+        self.corpus_path = str(final_generation / "corpus.jsonl")
+        self.emb_path = str(final_generation / "embeddings.npy")
+        self.faiss_path = str(final_generation / "faiss.index")
+        self.index_manifest = manifest
+        self.loaded_schema_version = DOCUMENT_SCHEMA_VERSION
         print("💾 Index sauvegardé.")
+
+    @staticmethod
+    def _validate_generation(corpus_rows, embs, faiss_index) -> None:
+        if len(corpus_rows) != int(embs.shape[0]) or len(corpus_rows) != int(faiss_index.ntotal):
+            raise RuntimeError("Index generation count mismatch between corpus, embeddings and FAISS")
+        required = {
+            "schema_version", "document_id", "chunk_uid", "chunk_id", "order",
+            "block_ids", "previous_chunk_uid", "next_chunk_uid", "source", "path", "text",
+        }
+        seen = set()
+        by_document: Dict[str, List[Dict]] = {}
+        for row in corpus_rows:
+            missing = required - set(row)
+            if missing:
+                raise RuntimeError(f"Invalid v2 chunk metadata; missing {sorted(missing)}")
+            if int(row["schema_version"]) != DOCUMENT_SCHEMA_VERSION:
+                raise RuntimeError("Mixed index schemas are forbidden")
+            uid = str(row["chunk_uid"])
+            if uid in seen:
+                raise RuntimeError(f"Duplicate chunk_uid: {uid}")
+            seen.add(uid)
+            by_document.setdefault(str(row["document_id"]), []).append(row)
+        for rows in by_document.values():
+            rows.sort(key=lambda item: int(item["order"]))
+            for index, row in enumerate(rows):
+                expected_previous = rows[index - 1]["chunk_uid"] if index else None
+                expected_next = rows[index + 1]["chunk_uid"] if index + 1 < len(rows) else None
+                if row.get("previous_chunk_uid") != expected_previous or row.get("next_chunk_uid") != expected_next:
+                    raise RuntimeError(f"Broken chunk neighbor chain for {row['chunk_uid']}")
+
+    @staticmethod
+    def _index_summary(corpus_rows) -> Dict:
+        documents = {str(row.get("document_id")) for row in corpus_rows}
+        sources = Counter(str(row.get("source") or "unknown") for row in corpus_rows)
+        first_chunks = [row for row in corpus_rows if int(row.get("order", 0)) == 0]
+        last_uids = {
+            row.get("chunk_uid") for row in corpus_rows if row.get("next_chunk_uid") is None
+        }
+        return {
+            "documents": len(documents),
+            "chunks": len(corpus_rows),
+            "chunks_by_source": dict(sorted(sources.items())),
+            "chunks_without_section_id": sum(not row.get("section_id") for row in corpus_rows),
+            "pdf_chunks_without_page": sum(
+                row.get("source") == "pdf" and row.get("page") is None for row in corpus_rows
+            ),
+            "chunks_without_previous": sum(not row.get("previous_chunk_uid") for row in corpus_rows),
+            "chunks_without_next": sum(not row.get("next_chunk_uid") for row in corpus_rows),
+            "expected_first_chunks": len(first_chunks),
+            "expected_last_chunks": len(last_uids),
+        }
+
+    def _rows_for_path(self, path: str) -> Tuple[List[Dict], List[str]]:
+        document = parse_document(path)
+        fp = file_fingerprint(path)
+        rows, texts = [], []
+        for chunk in chunk_document(document):
+            row = {
+                "schema_version": DOCUMENT_SCHEMA_VERSION,
+                "file": document.file,
+                "path": document.path,
+                "fingerprint": fp,
+                "source": document.source,
+                "title": document.title,
+                "document_id": document.document_id,
+                "parent_document_id": document.parent_document_id,
+                "relation_type": document.relation_type,
+                "document_metadata": document.source_metadata,
+                **chunk.to_dict(),
+                "text_len": len(chunk.text),
+            }
+            rows.append(row)
+            texts.append(chunk.text)
+        return rows, texts
 
     # --- encode ---
     def _batched_encode(self, texts: List[str], bs: int = 64) -> np.ndarray:
@@ -235,34 +404,12 @@ class RAGIndexer:
                     else:
                         print(f"[{pi}/{len(docs)}] Lecture TXT/MD: {path} ({size_mb:.1f} Mo)")
 
-                if ext == ".pdf":
-                    raw = read_pdf(path)
-                else:
-                    raw = read_supported_text(path)
-
-                if not raw or not raw.strip():
+                rows, document_texts = self._rows_for_path(path)
+                if not document_texts:
                     print(f"⚠️  Vide ou illisible: {path}")
                     continue
-
-                if ext == ".pdf" and MAX_TEXT_CHARS_PER_PDF > 0 and len(raw) > MAX_TEXT_CHARS_PER_PDF:
-                    print(f"⚠️  Texte volumineux ({len(raw):,}) → tronqué à {MAX_TEXT_CHARS_PER_PDF:,}")
-                    raw = raw[:MAX_TEXT_CHARS_PER_PDF]
-
-                chunks = split_text_fast(raw)
-                src = "email" if (ext in {".txt", ".md"} and raw.lstrip().startswith("Subject:")) else ("pdf" if ext == ".pdf" else "file")
-                fp = file_fingerprint(path)
-
-                for i, ch in enumerate(chunks):
-                    row = {
-                        "file": os.path.basename(path),
-                        "path": path,
-                        "fingerprint": fp,
-                        "chunk_id": i,
-                        "text_len": len(ch),
-                        "source": src,
-                        "text": ch,
-                    }
-                    corpus_rows.append(row); texts.append(ch)
+                corpus_rows.extend(rows)
+                texts.extend(document_texts)
             except Exception as e:
                 print(f"❌ Erreur fichier {path}: {e}")
 
@@ -334,6 +481,13 @@ class RAGIndexer:
                 print("ℹ️  Aucun index existant → construction complète.")
                 return self.build_or_update()
 
+        if self.loaded_schema_version != DOCUMENT_SCHEMA_VERSION and self.roots:
+            print(
+                f"ℹ️  Index schema v{self.loaded_schema_version} détecté → "
+                f"reconstruction propre en v{DOCUMENT_SCHEMA_VERSION}."
+            )
+            return self.build_or_update()
+
         # 1) On part d'un index existant, on scanne l'état actuel
         print("🔍 Scan fichiers (fingerprints)…")
         curr = self._current_doc_fingerprints()
@@ -373,31 +527,13 @@ class RAGIndexer:
             if VERBOSE_PDF:
                 print(f"↻ Lecture {'PDF' if ext=='.pdf' else 'TXT/MD'}: {pth} ({size_mb:.1f} Mo)")
             try:
-                raw = read_pdf(pth) if ext == ".pdf" else read_supported_text(pth)
+                rows, texts = self._rows_for_path(pth)
             except Exception as e:
                 print(f"❌ Erreur lecture fichier {pth}: {e}")
                 return [], [], np.zeros((0, self.embeddings.shape[1]), dtype="float32")
-            if not raw or not raw.strip():
+            if not texts:
                 print(f"⚠️  Vide ou illisible: {pth}")
                 return [], [], np.zeros((0, self.embeddings.shape[1]), dtype="float32")
-            if ext == ".pdf" and MAX_TEXT_CHARS_PER_PDF > 0 and len(raw) > MAX_TEXT_CHARS_PER_PDF:
-                print(f"⚠️  Texte volumineux ({len(raw):,}) → tronqué à {MAX_TEXT_CHARS_PER_PDF:,}")
-                raw = raw[:MAX_TEXT_CHARS_PER_PDF]
-            chunks = split_text_fast(raw)
-            src = "email" if (ext in {".txt", ".md"} and raw.lstrip().startswith("Subject:")) else ("pdf" if ext == ".pdf" else "file")
-            fp = file_fingerprint(pth)
-            rows, texts = [], []
-            for i, ch in enumerate(chunks):
-                rows.append({
-                    "file": os.path.basename(pth),
-                    "path": pth,
-                    "fingerprint": fp,
-                    "chunk_id": i,
-                    "text_len": len(ch),
-                    "source": src,
-                    "text": ch,
-                })
-                texts.append(ch)
             embs = self._batched_encode(texts, bs=64) if texts else np.zeros((0, self.embeddings.shape[1]), dtype="float32")
             return rows, texts, embs
 
@@ -770,6 +906,59 @@ class RAGIndexer:
                 reranked_ids = [idx_id for _, idx_id in chosen]
                 for rank, idx_id in enumerate(reranked_ids, start=1):
                     candidate(idx_id).reranker_rank = rank
+                if variant in {"anchor_scope", "anchor_scope_adaptive", "anchor_scope_adaptive_k"}:
+                    scope_selector = (
+                        select_anchor_scope_adaptive
+                        if variant in {"anchor_scope_adaptive", "anchor_scope_adaptive_k"}
+                        else select_anchor_scope
+                    )
+                    scoped, anchor_scope_trace = scope_selector(
+                        query=query,
+                        query_vec=q_np[0],
+                        metas=self.metas,
+                        texts=self.texts,
+                        embeddings=self.embeddings,
+                        bm25_scores=bm25_scores_full,
+                        baseline_ids=reranked_ids,
+                        candidate_signals={
+                            idx_id: item.to_dict() for idx_id, item in candidate_map.items()
+                        },
+                        cross_encoder=self.cross_encoder if use_rerank else None,
+                        max_context_chars=MAX_CONTEXT_CHARS,
+                        final_k=FINAL_K,
+                    )
+                    sufficiency_trace = None
+                    if variant == "anchor_scope_adaptive_k":
+                        protected_ids = (
+                            list(anchor_scope_trace.get("selected_anchor_ids") or [])
+                            + list(anchor_scope_trace.get("selected_scope_ids") or [])
+                        )
+                        scoped, sufficiency_trace = select_adaptive_context(
+                            query=query,
+                            candidates=scoped,
+                            metas=self.metas,
+                            texts=self.texts,
+                            candidate_signals={
+                                idx_id: item.to_dict() for idx_id, item in candidate_map.items()
+                            },
+                            protected_candidate_ids=protected_ids,
+                            final_k=FINAL_K,
+                        )
+                    final_ids = [idx_id for _, idx_id in scoped]
+                    for idx_id in final_ids:
+                        candidate(idx_id)
+                    items = [
+                        (float(score), self._meta_with_text(idx_id))
+                        for score, idx_id in scoped
+                    ]
+                    trace = self._build_trace(
+                        query, variant, parameters, candidate_map, dense_ids, bm25_ids,
+                        union_ids, fusion_ids, top_pool_ids, mmr_ids, reranked_ids, final_ids,
+                    ) if include_trace else None
+                    if trace is not None:
+                        trace.anchor_scope = anchor_scope_trace
+                        trace.sufficiency = sufficiency_trace
+                    return RetrievalResult(items=items, ce_scores=ce_scores_list, trace=trace)
                 items = [
                     (float(score), self._meta_with_text(idx_id))
                     for score, idx_id in chosen
@@ -785,13 +974,61 @@ class RAGIndexer:
             trace_error = None
 
         final_ids = stage_ids
-        items = [(0.0, self._meta_with_text(idx_id)) for idx_id in final_ids]
+        anchor_scope_trace = None
+        if variant in {"anchor_scope", "anchor_scope_adaptive", "anchor_scope_adaptive_k"}:
+            scope_selector = (
+                select_anchor_scope_adaptive
+                if variant in {"anchor_scope_adaptive", "anchor_scope_adaptive_k"}
+                else select_anchor_scope
+            )
+            scoped, anchor_scope_trace = scope_selector(
+                query=query,
+                query_vec=q_np[0],
+                metas=self.metas,
+                texts=self.texts,
+                embeddings=self.embeddings,
+                bm25_scores=bm25_scores_full,
+                baseline_ids=final_ids,
+                candidate_signals={
+                    idx_id: item.to_dict() for idx_id, item in candidate_map.items()
+                },
+                cross_encoder=None,
+                max_context_chars=MAX_CONTEXT_CHARS,
+                final_k=FINAL_K,
+            )
+            sufficiency_trace = None
+            if variant == "anchor_scope_adaptive_k":
+                protected_ids = (
+                    list(anchor_scope_trace.get("selected_anchor_ids") or [])
+                    + list(anchor_scope_trace.get("selected_scope_ids") or [])
+                )
+                scoped, sufficiency_trace = select_adaptive_context(
+                    query=query,
+                    candidates=scoped,
+                    metas=self.metas,
+                    texts=self.texts,
+                    candidate_signals={
+                        idx_id: item.to_dict() for idx_id, item in candidate_map.items()
+                    },
+                    protected_candidate_ids=protected_ids,
+                    final_k=FINAL_K,
+                )
+            final_ids = [idx_id for _, idx_id in scoped]
+            for idx_id in final_ids:
+                candidate(idx_id)
+            items = [(float(score), self._meta_with_text(idx_id)) for score, idx_id in scoped]
+        else:
+            items = [(0.0, self._meta_with_text(idx_id)) for idx_id in final_ids]
         trace = self._build_trace(
             query, variant, parameters, candidate_map, dense_ids, bm25_ids,
             union_ids, fusion_ids, top_pool_ids, mmr_ids, reranked_ids, final_ids,
         ) if include_trace else None
         if trace is not None and trace_error:
             trace.errors.append(trace_error)
+        if trace is not None and anchor_scope_trace is not None:
+            trace.anchor_scope = anchor_scope_trace
+        if trace is not None and variant == "anchor_scope_adaptive_k":
+            trace.sufficiency = sufficiency_trace
         return RetrievalResult(items=items, ce_scores=ce_scores_list, trace=trace)
 
     @staticmethod

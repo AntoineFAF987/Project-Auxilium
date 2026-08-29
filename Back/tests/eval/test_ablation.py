@@ -9,6 +9,7 @@ from eval.ablation import (
     latency_summary,
     metric_deltas,
     percentile,
+    context_summary,
 )
 from eval.dataset import DatasetError, load_jsonl, validate_relevant_chunk_ids
 from eval.schemas import BenchmarkQuery, BenchmarkReport, QueryEvaluation, RetrievedChunk
@@ -71,6 +72,16 @@ class AblationAggregationTests(unittest.TestCase):
         self.assertEqual(summary["sample_count"], 2)
         self.assertEqual(summary["mean_ms"], 2.0)
         self.assertEqual(summary["p50_ms"], 2.0)
+
+    def test_context_summary_counts_sent_blocks_not_fused_source_chunks(self):
+        result = _query_result("q1", ["gold::0"], {"recall@1": 1.0})
+        result.context_chunk_uids = ["source::0", "source::1"]
+        result.context_block_count = 1
+        result.context_chars = 400
+        summary = context_summary([result])
+        self.assertEqual(summary["chunks_mean"], 1.0)
+        self.assertEqual(summary["source_chunks_mean"], 2.0)
+        self.assertEqual(summary["tokens_estimated_mean"], 100.0)
 
     def test_metric_deltas_preserve_unavailable_metrics(self):
         deltas = metric_deltas(
@@ -140,6 +151,19 @@ class DatasetQualityTests(unittest.TestCase):
         )
         with self.assertRaises(DatasetError):
             validate_relevant_chunk_ids([row], {"other::0"})
+
+    def test_stable_document_reference_survives_missing_legacy_chunk(self):
+        row = BenchmarkQuery(
+            query_id="q1",
+            query="Question",
+            expected_answer="Answer",
+            relevant_document="policy.pdf",
+            relevant_chunk_ids=["policy.pdf::old-7"],
+            answerable=True,
+            question_type="factuelle_simple",
+        )
+
+        validate_relevant_chunk_ids([row], {"policy.pdf::new-2"})
 
     def test_pilot_is_valid_and_covers_required_categories(self):
         pilot_path = Path(__file__).resolve().parents[2] / "eval" / "data" / "pilot.jsonl"

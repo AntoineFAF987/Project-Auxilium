@@ -34,6 +34,35 @@ def latency_summary(results: Iterable[QueryEvaluation]) -> Dict[str, Optional[fl
     }
 
 
+def context_summary(
+    results: Iterable[QueryEvaluation], *, final_k: int = 10
+) -> Dict[str, Any]:
+    materialized = [result for result in results if result.error is None]
+    chunk_counts = [float(result.context_block_count) for result in materialized]
+    source_chunk_counts = [float(len(result.context_chunk_uids)) for result in materialized]
+    char_counts = [float(result.context_chars) for result in materialized]
+    distribution: Dict[str, int] = {}
+    for value in chunk_counts:
+        key = str(int(value))
+        distribution[key] = distribution.get(key, 0) + 1
+    count = len(chunk_counts)
+    return {
+        "sample_count": count,
+        "chunks_mean": mean(chunk_counts) if chunk_counts else None,
+        "chunks_median": percentile(chunk_counts, 50),
+        "chunks_p95": percentile(chunk_counts, 95),
+        "source_chunks_mean": mean(source_chunk_counts) if source_chunk_counts else None,
+        "k_distribution": dict(sorted(distribution.items(), key=lambda item: int(item[0]))),
+        "percent_k_1": 100.0 * sum(value == 1 for value in chunk_counts) / count if count else None,
+        "percent_k_lte_3": 100.0 * sum(value <= 3 for value in chunk_counts) / count if count else None,
+        "percent_final_k": 100.0 * sum(value >= final_k for value in chunk_counts) / count if count else None,
+        "chars_mean": mean(char_counts) if char_counts else None,
+        "chars_median": percentile(char_counts, 50),
+        "chars_p95": percentile(char_counts, 95),
+        "tokens_estimated_mean": mean(char_counts) / 4.0 if char_counts else None,
+    }
+
+
 def metric_deltas(
     metrics: Mapping[str, Optional[float]],
     baseline: Mapping[str, Optional[float]],
@@ -52,7 +81,11 @@ def metric_deltas(
 def first_relevant_rank(result: QueryEvaluation) -> Optional[int]:
     relevant = set(result.relevant_chunk_ids)
     for retrieved in result.retrieved:
-        if retrieved.chunk_uid in relevant:
+        identity = (
+            f"document::{retrieved.file}"
+            if result.gold_reference_mode == "document" else retrieved.chunk_uid
+        )
+        if identity in relevant:
             return retrieved.rank
     return None
 
@@ -84,9 +117,17 @@ def build_comparative_report(
         raise ValueError(f"Missing baseline variant: {baseline_variant}")
 
     baseline = reports[baseline_variant]
+    baseline_context = context_summary(baseline.results)
     baseline_by_query = {result.query_id: result for result in baseline.results}
     variant_summaries: Dict[str, Any] = {}
     for variant, report in reports.items():
+        variant_context = context_summary(report.results)
+        baseline_chars = baseline_context.get("chars_mean")
+        variant_chars = variant_context.get("chars_mean")
+        variant_context["mean_context_reduction_percent_vs_hybrid_current"] = (
+            100.0 * (float(baseline_chars) - float(variant_chars)) / float(baseline_chars)
+            if baseline_chars and variant_chars is not None else None
+        )
         variant_summaries[variant] = {
             "query_count": report.query_count,
             "retrieval_evaluated_queries": report.retrieval_evaluated_queries,
@@ -97,6 +138,7 @@ def build_comparative_report(
             ),
             "metrics_by_question_type": report.metrics_by_question_type,
             "latency": latency_summary(report.results),
+            "context": variant_context,
             "abstention": abstention_metrics(report.results),
         }
 
@@ -126,6 +168,13 @@ def build_comparative_report(
                     result.metrics, baseline_result.metrics
                 ),
                 "latency_ms": result.latency_ms,
+                "context_chunk_uids": result.context_chunk_uids,
+                "context_block_count": result.context_block_count,
+                "context_chars": result.context_chars,
+                "candidate_pool_chunk_uids": result.candidate_pool_chunk_uids,
+                "sufficiency_decision": result.sufficiency_decision,
+                "anchor_count": result.anchor_count,
+                "scope_chunk_count": result.scope_chunk_count,
                 "error": result.error,
             }
         query_comparisons.append(

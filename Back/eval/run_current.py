@@ -83,6 +83,59 @@ def _chunk_uid(meta: Dict[str, Any]) -> str:
     return f"{filename}::{meta.get('chunk_id', 'unknown')}"
 
 
+def _document_uid(meta: Dict[str, Any]) -> str:
+    filename = str(meta.get("file") or Path(str(meta.get("path") or "unknown")).name)
+    return f"document::{filename}"
+
+
+def _document_gold_ids(row) -> List[str]:
+    documents = list(row.relevant_documents)
+    if row.relevant_document:
+        documents.append(row.relevant_document)
+    documents.extend(span.document for span in row.evidence_spans if span.document)
+    return [f"document::{value}" for value in dict.fromkeys(documents)]
+
+
+def _resolved_locator_gold_ids(row, metas: List[Dict[str, Any]]) -> List[str]:
+    """Resolve stable page/section/text locators against the current chunking."""
+    documents = {
+        value for value in [row.relevant_document, *row.relevant_documents] if value
+    }
+    matched: List[str] = []
+    for meta in metas:
+        filename = str(meta.get("file") or Path(str(meta.get("path") or "")).name)
+        if documents and filename not in documents:
+            continue
+        page_match = not row.relevant_pages or meta.get("page") in row.relevant_pages
+        section_match = not row.relevant_sections or meta.get("section") in row.relevant_sections
+        span_match = not row.evidence_spans
+        for span in row.evidence_spans:
+            if span.document and span.document != filename:
+                continue
+            if span.page is not None and span.page != meta.get("page"):
+                continue
+            if span.section and span.section not in {
+                meta.get("section"), *(meta.get("heading_path") or [])
+            }:
+                continue
+            if span.text and span.text.casefold() not in str(meta.get("text") or "").casefold():
+                continue
+            span_match = True
+            break
+        if page_match and section_match and span_match:
+            matched.append(_chunk_uid(meta))
+    return list(dict.fromkeys(matched))
+
+
+def is_premature_stop(
+    *, selected_ids: List[str], available_ids: List[str], gold_ids: List[str]
+) -> tuple[bool, bool]:
+    """Return ``(premature, eligible)`` under the v2 documentary gold rule."""
+    available_gold = set(available_ids) & set(gold_ids)
+    eligible = bool(available_gold)
+    return bool(eligible and not available_gold.issubset(set(selected_ids))), eligible
+
+
 def run(
     config_path: Path,
     output_override: Path | None = None,
@@ -115,6 +168,8 @@ def run(
     from api.index_singleton import idx
     from rag_core.constants import DEVICE
     from rag_core.contracts import RETRIEVAL_VARIANTS
+    from rag_core.constants import FINAL_K, MAX_CONTEXT_CHARS
+    from rag_core.retrieval import clip_context_blocks, fuse_contiguous_passages
 
     runtime_settings = get_runtime_settings()
     retrieval_settings = runtime_settings.retrieval
@@ -123,14 +178,32 @@ def run(
         choices = ", ".join(sorted(RETRIEVAL_VARIANTS))
         raise ValueError(f"Unknown retrieval variant {variant!r}; choose one of: {choices}")
 
-    validate_relevant_chunk_ids(rows, (_chunk_uid(meta) for meta in idx.metas))
+    available_chunk_ids = {_chunk_uid(meta) for meta in idx.metas}
+    validate_relevant_chunk_ids(rows, available_chunk_ids)
 
     results: List[QueryEvaluation] = []
     for row in rows:
         started = time.perf_counter()
         retrieved_chunks: List[RetrievedChunk] = []
+        retrieved_metas: List[Dict[str, Any]] = []
         retrieval_trace = None
         error = None
+        use_chunk_gold = bool(row.relevant_chunk_ids) and all(
+            value in available_chunk_ids for value in row.relevant_chunk_ids
+        )
+        resolved_locator_ids = _resolved_locator_gold_ids(row, idx.corpus) if (
+            row.evidence_spans or row.relevant_pages or row.relevant_sections
+        ) else []
+        use_locator_gold = not use_chunk_gold and bool(resolved_locator_ids)
+        evaluation_gold_ids = (
+            row.relevant_chunk_ids if use_chunk_gold
+            else resolved_locator_ids if use_locator_gold
+            else _document_gold_ids(row)
+        )
+        gold_reference_mode = (
+            "chunk" if use_chunk_gold else "locator" if use_locator_gold else "document"
+        )
+        retrieved_evaluation_ids: List[str] = []
         try:
             search_kwargs = {
                 "retrieve_k": retrieval_settings.retrieve_k,
@@ -146,13 +219,19 @@ def run(
                 instrumented = idx.search_instrumented(
                     row.query,
                     variant=variant,
-                    include_trace=record_trace,
+                    include_trace=(record_trace or variant in {
+                        "anchor_scope", "anchor_scope_adaptive", "anchor_scope_adaptive_k"
+                    }),
                     **search_kwargs,
                 )
                 retrieved, _ce_scores = instrumented.as_legacy()
                 if instrumented.trace is not None:
                     retrieval_trace = instrumented.trace.to_dict()
             for rank, (score, meta) in enumerate(retrieved, start=1):
+                retrieved_metas.append(meta)
+                retrieved_evaluation_ids.append(
+                    _chunk_uid(meta) if (use_chunk_gold or use_locator_gold) else _document_uid(meta)
+                )
                 retrieved_chunks.append(
                     RetrievedChunk(
                         rank=rank,
@@ -162,21 +241,103 @@ def run(
                         path=meta.get("path"),
                         chunk_id=meta.get("chunk_id"),
                         source=meta.get("source"),
+                        document_id=meta.get("document_id"),
+                        page=meta.get("page"),
+                        section=meta.get("section"),
                     )
                 )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
 
         latency_ms = (time.perf_counter() - started) * 1000.0
-        retrieved_ids = [item.chunk_uid for item in retrieved_chunks]
+        retrieved_ids = retrieved_evaluation_ids
         retrieval_evaluated = row.answerable and error is None
         metrics = compute_query_metrics(
             retrieved_ids,
-            row.relevant_chunk_ids,
+            evaluation_gold_ids,
             answerable=retrieval_evaluated,
-            relevance_grades=row.relevance_grades,
+            # Stable document/locator gold has no legacy graded chunk labels.
+            # Use transparent binary relevance so NDCG remains measurable after
+            # rechunking, without inventing different grades for the v2 chunks.
+            relevance_grades=(
+                row.relevance_grades
+                if use_chunk_gold
+                else {gold_id: 1.0 for gold_id in evaluation_gold_ids}
+            ),
             ks=ks,
         )
+        deduplicated_retrieved = list(dict.fromkeys(retrieved_ids))
+        metrics["retrieved_candidates"] = float(len(retrieved_chunks))
+        metrics["useful_candidates"] = float(
+            len(set(deduplicated_retrieved) & set(evaluation_gold_ids))
+        )
+        metrics["latency_ms"] = float(latency_ms)
+        context_blocks = clip_context_blocks(
+            fuse_contiguous_passages([
+                (retrieved_chunks[index].score, meta)
+                for index, meta in enumerate(retrieved_metas)
+            ]),
+            max_chars=MAX_CONTEXT_CHARS,
+            keep=FINAL_K,
+        ) if retrieved_metas else []
+        uid_to_meta = {_chunk_uid(meta): meta for meta in retrieved_metas}
+        context_chunk_uids: List[str] = []
+        for _, meta in context_blocks:
+            fused_uids = meta.get("fused_chunk_uids") or [_chunk_uid(meta)]
+            context_chunk_uids.extend(str(uid) for uid in fused_uids)
+        context_chunk_uids = list(dict.fromkeys(context_chunk_uids))
+        context_chars = sum(len(str(meta.get("text") or "")) for _, meta in context_blocks)
+        context_evaluation_ids = [
+            uid if (use_chunk_gold or use_locator_gold)
+            else _document_uid(uid_to_meta.get(uid, {}))
+            for uid in context_chunk_uids
+        ]
+        metrics["context_evidence_coverage"] = (
+            float(len(set(context_evaluation_ids) & set(evaluation_gold_ids)))
+            / len(set(evaluation_gold_ids))
+            if evaluation_gold_ids else 0.0
+        )
+        metrics["context_chunks"] = float(len(context_chunk_uids))
+        metrics["context_blocks"] = float(len(context_blocks))
+        metrics["context_chars"] = float(context_chars)
+        metrics["context_tokens_estimated"] = float(context_chars / 4.0)
+        anchor_scope_data = (retrieval_trace or {}).get("anchor_scope") or {}
+        sufficiency_data = (retrieval_trace or {}).get("sufficiency") or {}
+        candidate_pool_ids = list(sufficiency_data.get("candidate_pool_ids") or [])
+        candidate_pool_metas = [
+            idx.metas[candidate_id]
+            for candidate_id in candidate_pool_ids
+            if isinstance(candidate_id, int) and 0 <= candidate_id < len(idx.metas)
+        ]
+        candidate_pool_chunk_uids = [_chunk_uid(meta) for meta in candidate_pool_metas]
+        pool_evaluation_ids = [
+            _chunk_uid(meta) if (use_chunk_gold or use_locator_gold) else _document_uid(meta)
+            for meta in candidate_pool_metas
+        ]
+        premature_stop, premature_stop_eligible = is_premature_stop(
+            selected_ids=context_evaluation_ids,
+            available_ids=pool_evaluation_ids,
+            gold_ids=evaluation_gold_ids,
+        )
+        premature_stop_eligible = bool(row.answerable and premature_stop_eligible)
+        premature_stop = bool(premature_stop_eligible and premature_stop)
+        metrics["premature_stop"] = float(premature_stop)
+        metrics["premature_stop_eligible"] = float(premature_stop_eligible)
+        metrics["sufficiency_ms"] = float(sufficiency_data.get("timing_ms") or 0.0)
+        anchor_count = len(anchor_scope_data.get("selected_anchor_ids") or [])
+        scope_chunk_count = len(anchor_scope_data.get("selected_scope_ids") or [])
+        metrics["multiple_anchors"] = float(anchor_count > 1)
+        metrics["multi_chunk_scope"] = float(scope_chunk_count > 0)
+        metrics["scope_triggered"] = float(bool(anchor_scope_data.get("scope_triggered")))
+        metrics["rescored_candidates"] = float(
+            anchor_scope_data.get("rescored_candidates") or 0
+        )
+        scope_timings = anchor_scope_data.get("timings_ms") or {}
+        for timing_name in (
+            "anchor_selection", "structural_collection", "expansion_scoring",
+            "scope_reranking", "total",
+        ):
+            metrics[f"scope_{timing_name}_ms"] = float(scope_timings.get(timing_name) or 0.0)
         results.append(
             QueryEvaluation(
                 query_id=row.query_id,
@@ -186,13 +347,21 @@ def run(
                 difficulty=row.difficulty,
                 answerable=row.answerable,
                 relevant_document=row.relevant_document,
-                relevant_chunk_ids=row.relevant_chunk_ids,
+                relevant_chunk_ids=evaluation_gold_ids,
+                gold_reference_mode=gold_reference_mode,
                 required_facts=row.required_facts,
                 retrieved=retrieved_chunks,
                 metrics=metrics,
                 retrieval_evaluated=retrieval_evaluated,
                 latency_ms=latency_ms,
                 retrieval_trace=retrieval_trace,
+                context_chunk_uids=context_chunk_uids,
+                context_block_count=len(context_blocks),
+                context_chars=context_chars,
+                candidate_pool_chunk_uids=candidate_pool_chunk_uids,
+                sufficiency_decision=sufficiency_data.get("final_decision"),
+                anchor_count=anchor_count,
+                scope_chunk_count=scope_chunk_count,
                 error=error,
             )
         )
@@ -212,6 +381,16 @@ def run(
         "index_chunks": len(getattr(idx, "metas", []) or []),
         **index_files,
     }
+    metrics_global = average_metrics(
+        item.metrics for item in results if item.retrieval_evaluated
+    )
+    eligible_stops = sum(
+        item.metrics.get("premature_stop_eligible", 0.0) for item in results
+    )
+    metrics_global["premature_stop_rate"] = (
+        sum(item.metrics.get("premature_stop", 0.0) for item in results) / eligible_stops
+        if eligible_stops else 0.0
+    )
     report = BenchmarkReport(
         benchmark_name=str(config.get("benchmark_name", "auxilium-current-baseline")),
         commit_git=_git_commit(),
@@ -223,9 +402,7 @@ def run(
         retrieval_evaluated_queries=sum(item.retrieval_evaluated for item in results),
         unanswerable_queries=sum(not item.answerable for item in results),
         failed_queries=sum(item.error is not None for item in results),
-        metrics_global=average_metrics(
-            item.metrics for item in results if item.retrieval_evaluated
-        ),
+        metrics_global=metrics_global,
         metrics_by_question_type=aggregate_by_question_type(results),
         results=results,
     )
@@ -257,6 +434,9 @@ def main() -> int:
             "hybrid_current",
             "hybrid_no_mmr",
             "hybrid_no_reranker",
+            "anchor_scope",
+            "anchor_scope_adaptive",
+            "anchor_scope_adaptive_k",
         ),
         help="Benchmark-only retrieval variant (defaults to the config value).",
     )

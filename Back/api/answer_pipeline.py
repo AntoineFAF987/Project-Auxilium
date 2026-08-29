@@ -18,7 +18,12 @@ from .index_singleton import (
 from .sessions import _touch_session, _get_roleplay, _set_roleplay, SESSIONS, response_cache
 from .roleplay import detect_roleplay_trigger, looks_factual
 from .math_tools import _is_explain_followup, _looks_like_equation, _solve_math
-from rag_core.faithfulness import check_faithfulness, should_fallback_to_general
+from rag_core.faithfulness import (
+    ClaimStatus,
+    FaithfulnessReview,
+    should_fallback_to_general,
+    verify_answer_claims,
+)
 from rag_core.llm_stream import ask_mistral_with_context_stream
 from runtime_settings import get_runtime_settings
 from .chats_db import create_chat, append_message
@@ -36,6 +41,8 @@ CaveatType = Literal[
     "PARTIAL_EVIDENCE",
     "CONFLICTING_EVIDENCE",
     "INFERENCE",
+    "UNSUPPORTED_CLAIM",
+    "CONTRADICTED_CLAIM",
     "WEB_RECOMMENDED",
 ]
 
@@ -45,6 +52,8 @@ _CAVEAT_TYPES = {
     "PARTIAL_EVIDENCE",
     "CONFLICTING_EVIDENCE",
     "INFERENCE",
+    "UNSUPPORTED_CLAIM",
+    "CONTRADICTED_CLAIM",
     "WEB_RECOMMENDED",
 }
 
@@ -89,6 +98,7 @@ class AnswerPipelineResult:
     fallback_reason: Optional[str] = None
     validations: Dict[str, Any] = field(default_factory=dict)
     review: PostGenerationReview = field(default_factory=PostGenerationReview)
+    faithfulness_review: Optional[Dict[str, Any]] = None
 
     @property
     def validation_performed(self) -> bool:
@@ -103,6 +113,7 @@ class AnswerPipelineResult:
             request_id=self.request_id,
             chat_id=self.chat_id,
             review=self.review.to_dict(),
+            faithfulness_review=self.faithfulness_review,
         )
 
 
@@ -144,6 +155,7 @@ def _result(
     fallback_reason: Optional[str] = None,
     validations: Optional[Dict[str, Any]] = None,
     review: Optional[PostGenerationReview | Dict[str, Any]] = None,
+    faithfulness_review: Optional[Dict[str, Any]] = None,
 ) -> AnswerPipelineResult:
     inferred_status, inferred_abstention, inferred_fallback = _infer_result_status(answer, mode)
     if isinstance(review, dict):
@@ -161,6 +173,7 @@ def _result(
         fallback_reason=fallback_reason or inferred_fallback,
         validations=dict(validations or {}),
         review=review or PostGenerationReview(),
+        faithfulness_review=faithfulness_review,
     )
 
 
@@ -553,8 +566,63 @@ def _post_generation_review(
     context: str,
     sources: List[Dict[str, Any]],
     faithfulness: Optional[Dict[str, Any]] = None,
+    claim_review: Optional[FaithfulnessReview] = None,
 ) -> PostGenerationReview:
     """Produit un commentaire additif. Cette fonction ne modifie jamais la reponse."""
+
+    if claim_review and claim_review.caveat_required:
+        problems = [
+            item for item in claim_review.claims
+            if item.status != ClaimStatus.SUPPORTED or item.citation_correct is False
+        ]
+        priority = {
+            ClaimStatus.CONTRADICTED: 0,
+            ClaimStatus.UNSUPPORTED: 1,
+            ClaimStatus.PARTIALLY_SUPPORTED: 2,
+            ClaimStatus.INFERRED: 3,
+            ClaimStatus.SUPPORTED: 4,
+        }
+        problem = min(problems, key=lambda item: (
+            0 if item.citation_correct is False else priority[item.status]
+        ))
+        claim_text = problem.claim.text.strip().rstrip(".!?")
+        if len(claim_text) > 160:
+            claim_text = claim_text[:157].rstrip() + "..."
+        if problem.citation_correct is False:
+            return PostGenerationReview(
+                status="CAVEAT",
+                caveat_type="PARTIAL_EVIDENCE",
+                message=f"L'affirmation « {claim_text} » est soutenue par le contexte, mais pas par la source citée.",
+                severity="warning",
+            )
+        if problem.status == ClaimStatus.CONTRADICTED:
+            evidence = problem.evidence[0].text if problem.evidence else "une source disponible"
+            return PostGenerationReview(
+                status="CAVEAT",
+                caveat_type="CONTRADICTED_CLAIM",
+                message=f"L'affirmation « {claim_text} » semble contredite par la source : « {evidence[:180]} »",
+                severity="warning",
+            )
+        if problem.status == ClaimStatus.UNSUPPORTED:
+            return PostGenerationReview(
+                status="CAVEAT",
+                caveat_type="UNSUPPORTED_CLAIM",
+                message=f"L'affirmation « {claim_text} » n'est pas directement soutenue par les documents retrouvés.",
+                severity="warning",
+            )
+        if problem.status == ClaimStatus.PARTIALLY_SUPPORTED:
+            return PostGenerationReview(
+                status="CAVEAT",
+                caveat_type="PARTIAL_EVIDENCE",
+                message=f"Les sources ne confirment qu'une partie de l'affirmation « {claim_text} ».",
+                severity="warning",
+            )
+        return PostGenerationReview(
+            status="CAVEAT",
+            caveat_type="INFERENCE",
+            message=f"L'affirmation « {claim_text} » est déduite des sources sans y être formulée explicitement.",
+            severity="info",
+        )
 
     prompt = (
         "VERIFIEUR JSON:\n"
@@ -1006,8 +1074,9 @@ def run_answer_pipeline(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM error: {e}")
 
-    # ---------- NLI Faithfulness check (optionnel et non destructif) ----------
+    # ---------- Claim-level faithfulness (post-generation, non destructif) ----------
     faithfulness_result: Optional[Dict[str, Any]] = None
+    claim_review: Optional[FaithfulnessReview] = None
     context_for_check = ""
     if ENABLE_FAITHFULNESS_CHECK:
         try:
@@ -1021,9 +1090,26 @@ def run_answer_pipeline(
             # Si demandé en strict only, ne vérifier que quand on a un contexte strict
             should_check_here = (not FAITHFULNESS_STRICT_ONLY) or (route_mode in {"strict_local", "web_live"})
             if should_check_here and (context_for_check.strip()):
-                fchk = check_faithfulness(answer, context_for_check, threshold=FAITHFULNESS_THRESHOLD)
-                faithfulness_result = dict(fchk)
+                if route_mode == "strict_local":
+                    evidence_blocks = [dict(block[1]) for block in blocks]
+                else:
+                    evidence_blocks = [{
+                        "text": context_for_check,
+                        "chunk_uid": "web-live-context",
+                        "path": web_sources_list[0]["url"] if web_sources_list else None,
+                    }]
+                claim_review = verify_answer_claims(
+                    answer,
+                    evidence_blocks,
+                    cited_source_indices=citations_idx,
+                    use_nli=True,
+                )
+                faithfulness_result = claim_review.legacy_summary()
                 validations["faithfulness"] = {"performed": True, **faithfulness_result}
+                validations["claim_faithfulness"] = {
+                    "performed": True,
+                    **claim_review.to_dict(),
+                }
         except Exception:
             # Si le check échoue, on n'empêche pas la réponse
             pass
@@ -1060,6 +1146,7 @@ def run_answer_pipeline(
         context_for_check or (context_for_llm if use_strict else ""),
         sources,
         faithfulness_result,
+        claim_review,
     )
     validations["post_answer"] = {"performed": True, **review.to_dict()}
 
@@ -1084,6 +1171,7 @@ def run_answer_pipeline(
         "mode": mode_label,
         "ctx_len": len(context_for_llm or ""),
         "review": review.to_dict(),
+        "faithfulness_review": claim_review.to_dict() if claim_review else None,
     }
     if not body.reply_to:
         response_cache.set(ck, out)

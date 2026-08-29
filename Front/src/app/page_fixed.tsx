@@ -14,7 +14,7 @@ import "katex/dist/katex.min.css";
 type Source = { path: string; chunk: number };
 type PostGenerationReview = {
   status: "OK" | "CAVEAT";
-  caveat_type?: "STALE_SOURCE" | "INDIRECT_EVIDENCE" | "PARTIAL_EVIDENCE" | "CONFLICTING_EVIDENCE" | "INFERENCE" | "WEB_RECOMMENDED" | null;
+  caveat_type?: "STALE_SOURCE" | "INDIRECT_EVIDENCE" | "PARTIAL_EVIDENCE" | "CONFLICTING_EVIDENCE" | "INFERENCE" | "UNSUPPORTED_CLAIM" | "CONTRADICTED_CLAIM" | "WEB_RECOMMENDED" | null;
   message?: string | null;
   severity: "info" | "warning";
   suggest_web: boolean;
@@ -1163,8 +1163,12 @@ export default function Page() {
 
   async function reindex() {
     try {
+      const { accessToken } = await getTokens();
       const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/reindex`, {
         method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data?.detail || r.statusText || "Erreur reindex");

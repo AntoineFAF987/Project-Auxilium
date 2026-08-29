@@ -41,6 +41,8 @@ class PostGenerationReviewOut(BaseModel):
             "PARTIAL_EVIDENCE",
             "CONFLICTING_EVIDENCE",
             "INFERENCE",
+            "UNSUPPORTED_CLAIM",
+            "CONTRADICTED_CLAIM",
             "WEB_RECOMMENDED",
         ]
     ] = None
@@ -57,3 +59,4 @@ class AskOut(BaseModel):
     request_id: Optional[str] = None
     chat_id: Optional[str] = None
     review: Optional[PostGenerationReviewOut] = None
+    faithfulness_review: Optional[dict] = None

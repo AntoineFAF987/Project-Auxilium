@@ -50,6 +50,21 @@ def _write_json(path: str, obj: Any):
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
+def _resolve_config_path(config_path: str, configured_path: str) -> str:
+    """Resolve an ingestion path relative to config.json, never to process CWD."""
+    if os.path.isabs(configured_path):
+        return os.path.normpath(configured_path)
+    config_dir = os.path.dirname(os.path.abspath(config_path))
+    return os.path.normpath(os.path.join(config_dir, configured_path))
+
+def _resolved_email_config(config_path: str, email_config: Dict[str, Any]) -> Dict[str, Any]:
+    resolved = dict(email_config)
+    for key in ("output_dir", "attachments_dir", "flatten_for_rag_dir"):
+        value = resolved.get(key)
+        if value:
+            resolved[key] = _resolve_config_path(config_path, value)
+    return resolved
+
 def _utc_now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -106,18 +121,38 @@ def _graph_paged(url: str, headers: Dict[str, str], timeout: int = 30):
 # Auth MSAL (device flow, pour fallback)
 # =========================
 def _get_headers_delegated(authority: str, client_id: str, scopes: List[str], cache_path: str) -> Dict[str, str]:
-    import msal
+    cache_path = os.path.abspath(cache_path)
+    _ensure_dir(os.path.dirname(cache_path))
     cache = msal.SerializableTokenCache()
     if os.path.exists(cache_path):
         try:
-            cache.deserialize(open(cache_path, "r", encoding="utf-8").read())
-        except Exception:
-            pass
+            with open(cache_path, "r", encoding="utf-8") as cache_file:
+                cache.deserialize(cache_file.read())
+        except Exception as exc:
+            raise RuntimeError(f"Cache MSAL illisible: {cache_path}") from exc
     app = msal.PublicClientApplication(client_id=client_id, authority=authority, token_cache=cache)
 
-    accounts = app.get_accounts()
-    if accounts:
-        res = app.acquire_token_silent(scopes, account=accounts[0])
+    def persist_cache_if_changed() -> None:
+        if not cache.has_state_changed:
+            return
+        tmp_path = cache_path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as cache_file:
+                cache_file.write(cache.serialize())
+            os.replace(tmp_path, cache_path)
+        except Exception as exc:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            raise RuntimeError(f"Impossible de persister le cache MSAL: {cache_path}") from exc
+
+    # Try every cached account before deciding that interactive auth is needed.
+    for account in app.get_accounts():
+        res = app.acquire_token_silent(scopes, account=account)
+        # Silent renewal may rotate a refresh token and mutate the cache.
+        persist_cache_if_changed()
         if res and "access_token" in res:
             print("🔑 Token (silent) scopes:", res.get("scope") or res.get("scopes"))
             print("🔗 Authority:", authority)
@@ -131,10 +166,7 @@ def _get_headers_delegated(authority: str, client_id: str, scopes: List[str], ca
     res = app.acquire_token_by_device_flow(flow)
     if "access_token" not in res:
         raise RuntimeError(f"Échec token: {res.get('error_description')}")
-    try:
-        open(cache_path, "w", encoding="utf-8").write(app.token_cache.serialize())
-    except Exception:
-        pass
+    persist_cache_if_changed()
     print("🔑 Token scopes:", res.get("scope") or res.get("scopes"))
     print("🔗 Authority:", authority)
     return {"Authorization": f"Bearer {res['access_token']}"}
@@ -304,7 +336,7 @@ def flatten_email_for_rag(email_obj: Dict[str, Any]) -> str:
 def ingest_emails(config_path: str, override_folders: Optional[List[str]] = None):
     cfg = _read_json(config_path)
     graph = cfg["graph"]
-    E     = cfg["email_ingest"]
+    E = _resolved_email_config(config_path, cfg["email_ingest"])
 
     out_dir  = E["output_dir"]
     att_dir  = E["attachments_dir"]
@@ -489,7 +521,7 @@ def ingest_emails_with_access_token(
         raise RuntimeError("Access token manquant pour ingest_emails_with_access_token")
 
     cfg = _read_json(config_path)
-    E = cfg["email_ingest"]
+    E = _resolved_email_config(config_path, cfg["email_ingest"])
 
     out_dir  = E["output_dir"]
     att_dir  = E["attachments_dir"]

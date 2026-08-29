@@ -61,9 +61,10 @@ def validate_relevant_chunk_ids(
         for row in rows
         for chunk_id in row.relevant_chunk_ids
         if chunk_id not in available
+        and not (row.relevant_document or row.relevant_documents or row.evidence_spans)
     }
     if missing:
         raise DatasetError(
-            "Gold chunk IDs absent from the current index: "
+            "Gold chunk IDs absent from the current index and no stable fallback was annotated: "
             + ", ".join(sorted(missing))
         )

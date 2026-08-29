@@ -38,8 +38,19 @@ index_singleton_stub.MAX_CONTEXT_CHARS = 12000
 index_singleton_stub.FINAL_K = 6
 sys.modules.setdefault("api.index_singleton", index_singleton_stub)
 
-from api.answer_pipeline import AnswerPipelineResult, PostGenerationReview, run_answer_pipeline
+from api.answer_pipeline import (
+    AnswerPipelineResult,
+    PostGenerationReview,
+    _post_generation_review,
+    run_answer_pipeline,
+)
 from api.schemas import AskIn
+from rag_core.faithfulness import (
+    AnswerClaim,
+    ClaimStatus,
+    ClaimVerification,
+    FaithfulnessReview,
+)
 
 
 class _Cache:
@@ -139,14 +150,29 @@ class AnswerPipelineTests(unittest.TestCase):
         stack.enter_context(patch.object(pipeline, "ENABLE_CONDENSATION", False))
         stack.enter_context(patch.object(pipeline, "ENABLE_FAITHFULNESS_CHECK", True))
         stack.enter_context(patch.object(pipeline, "_safe_llm", side_effect=llm_impl))
-        stack.enter_context(
-            patch.object(
-                pipeline,
-                "check_faithfulness",
-                return_value=faithfulness
-                or {"faithful": True, "score": 0.95, "label": "entailment"},
-            )
+        legacy = faithfulness or {"faithful": True, "score": 0.95, "label": "entailment"}
+        status = (
+            ClaimStatus.SUPPORTED if legacy["faithful"]
+            else ClaimStatus.CONTRADICTED if legacy.get("label") == "contradiction"
+            else ClaimStatus.UNSUPPORTED
         )
+        claim_review = FaithfulnessReview(
+            status="OK" if legacy["faithful"] else "CAVEAT",
+            claims=(ClaimVerification(
+                claim=AnswerClaim("claim-test", "La conservation est de trente jours.", 0, 38),
+                status=status,
+                confidence=float(legacy.get("score", 0.0)),
+                reason=str(legacy.get("label", "test")),
+            ),),
+            extraction_ms=0.1,
+            verification_ms=0.2,
+            total_ms=0.3,
+            evidence_chunks_inspected=1,
+            model_calls=1,
+            model_name="test-nli",
+            caveat_required=not legacy["faithful"],
+        )
+        stack.enter_context(patch.object(pipeline, "verify_answer_claims", return_value=claim_review))
         stack.enter_context(
             patch.object(
                 pipeline,
@@ -364,7 +390,53 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(result.mode, "STRICT(local)")
         self.assertEqual(result.status, "answered")
         self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
-        self.assertEqual(result.review.caveat_type, "INFERENCE")
+        self.assertEqual(result.review.caveat_type, "CONTRADICTED_CLAIM")
+
+    def test_unsupported_claim_uses_existing_post_generation_caveat_channel(self):
+        body = AskIn(q="Question locale", source_mode="local")
+        with self._patch_pipeline(
+            faithfulness={"faithful": False, "score": 0.8, "label": "neutral"},
+        ):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertEqual(result.answer, "La conservation est de **trente jours**.")
+        self.assertEqual(result.review.caveat_type, "UNSUPPORTED_CLAIM")
+        self.assertIsNotNone(result.faithfulness_review)
+        self.assertEqual(
+            result.faithfulness_review["status_counts"]["UNSUPPORTED"], 1
+        )
+
+    def test_wrong_claim_citation_maps_to_one_existing_partial_evidence_caveat(self):
+        from api import answer_pipeline as pipeline
+
+        claim_review = FaithfulnessReview(
+            status="CAVEAT",
+            claims=(ClaimVerification(
+                claim=AnswerClaim("claim-citation", "Le 3730 possède un PCB verni.", 0, 31),
+                status=ClaimStatus.SUPPORTED,
+                confidence=0.95,
+                reason="Supported by another context block",
+                citation_correct=False,
+            ),),
+            extraction_ms=0.1,
+            verification_ms=0.2,
+            total_ms=0.3,
+            evidence_chunks_inspected=2,
+            model_calls=1,
+            model_name="test-nli",
+            caveat_required=True,
+        )
+        with patch.object(pipeline, "_safe_llm", side_effect=AssertionError("no duplicate review call")):
+            review = _post_generation_review(
+                "Le PCB est-il verni ?",
+                "Le 3730 possède un PCB verni.",
+                "Contexte",
+                [],
+                claim_review=claim_review,
+            )
+
+        self.assertEqual(review.caveat_type, "PARTIAL_EVIDENCE")
+        self.assertIn("source citée", review.message or "")
 
     def test_english_tropicalization_keeps_sourced_local_answer_when_verifier_asks_web(self):
         def llm(_fn, question, context_text="", **kwargs):

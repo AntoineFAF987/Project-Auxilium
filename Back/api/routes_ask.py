@@ -114,6 +114,7 @@ def _validated_sse(
                 "status": result.status,
                 "validation_performed": result.validation_performed,
                 "review": result.review.to_dict(),
+                "faithfulness_review": result.faithfulness_review,
             }
         )
         return

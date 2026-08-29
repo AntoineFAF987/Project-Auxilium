@@ -50,13 +50,19 @@ class BenchmarkQuery(BaseModel):
     def validate_relevance_grades(self) -> "BenchmarkQuery":
         if len(self.relevant_chunk_ids) != len(set(self.relevant_chunk_ids)):
             raise ValueError("relevant_chunk_ids must not contain duplicates")
-        if self.answerable and not self.relevant_chunk_ids:
-            raise ValueError("an answerable query needs at least one relevant chunk")
+        stable_reference = bool(
+            self.relevant_document or self.relevant_documents or self.evidence_spans
+            or self.relevant_pages or self.relevant_sections
+        )
+        if self.answerable and not self.relevant_chunk_ids and not stable_reference:
+            raise ValueError("an answerable query needs a chunk ID or stable document locator")
         if self.answerable and not self.expected_answer:
             raise ValueError("an answerable query needs an expected_answer")
         if not self.answerable and self.relevant_chunk_ids:
             raise ValueError("an unanswerable query cannot have relevant chunks")
         unknown = set(self.relevance_grades) - set(self.relevant_chunk_ids)
+        if stable_reference and not self.relevant_chunk_ids:
+            unknown = set()
         if unknown:
             raise ValueError(
                 "relevance_grades contains IDs absent from relevant_chunk_ids: "
@@ -75,6 +81,9 @@ class RetrievedChunk(BaseModel):
     path: Optional[str] = None
     chunk_id: Optional[int] = None
     source: Optional[str] = None
+    document_id: Optional[str] = None
+    page: Optional[int] = None
+    section: Optional[str] = None
 
 
 class QueryEvaluation(BaseModel):
@@ -86,12 +95,20 @@ class QueryEvaluation(BaseModel):
     answerable: bool
     relevant_document: Optional[str] = None
     relevant_chunk_ids: List[str]
+    gold_reference_mode: str = "chunk"
     required_facts: List[str]
     retrieved: List[RetrievedChunk]
     metrics: Dict[str, Optional[float]]
     retrieval_evaluated: bool
     latency_ms: float
     retrieval_trace: Optional[Dict[str, Any]] = None
+    context_chunk_uids: List[str] = Field(default_factory=list)
+    context_block_count: int = 0
+    context_chars: int = 0
+    candidate_pool_chunk_uids: List[str] = Field(default_factory=list)
+    sufficiency_decision: Optional[Dict[str, Any]] = None
+    anchor_count: int = 0
+    scope_chunk_count: int = 0
     error: Optional[str] = None
 
 
