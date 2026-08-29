@@ -92,13 +92,14 @@ class FeatureSettings(_FrozenSettings):
 
 
 class GenerationSettings(_FrozenSettings):
-    provider: Literal["mistral"] = "mistral"
+    provider: Literal["mistral", "openai"] = "mistral"
     model: str = "mistral-small-latest"
     temperature: float = Field(default=0.60, ge=0.0, le=2.0)
     strict_temperature: float = Field(default=0.45, ge=0.0, le=2.0)
     top_p: float = Field(default=0.90, gt=0.0, le=1.0)
     strict_top_p: float = Field(default=1.0, gt=0.0, le=1.0)
     max_tokens: int = Field(default=1200, ge=1)
+    reasoning_effort: Literal["none", "low", "medium", "high"] = "medium"
     roleplay_temperature: float = Field(default=0.90, ge=0.0, le=2.0)
     roleplay_max_tokens: int = Field(default=220, ge=1)
     smalltalk_temperature: float = Field(default=0.65, ge=0.0, le=2.0)
@@ -232,6 +233,7 @@ def _runtime_payload(config: Mapping[str, Any]) -> dict[str, Any]:
         "top_p",
         "strict_top_p",
         "max_tokens",
+        "reasoning_effort",
         "roleplay_temperature",
         "roleplay_max_tokens",
         "smalltalk_temperature",
@@ -299,6 +301,7 @@ def _runtime_payload(config: Mapping[str, Any]) -> dict[str, Any]:
                 "top_p": "top_p",
                 "strict_top_p": "strict_top_p",
                 "max_tokens": "max_tokens",
+                "reasoning_effort": "reasoning_effort",
                 "roleplay_temperature": "roleplay_temperature",
                 "roleplay_max_tokens": "roleplay_max_tokens",
                 "smalltalk_temperature": "smalltalk_temperature",
@@ -358,6 +361,7 @@ _ENV_PATHS: dict[str, tuple[str, str]] = {
     "AUXILIUM_LLM_TOP_P": ("generation", "top_p"),
     "AUXILIUM_LLM_STRICT_TOP_P": ("generation", "strict_top_p"),
     "AUXILIUM_LLM_MAX_TOKENS": ("generation", "max_tokens"),
+    "AUXILIUM_LLM_REASONING_EFFORT": ("generation", "reasoning_effort"),
     "AUXILIUM_LLM_HTTP_TIMEOUT_SEC": ("generation", "http_timeout_sec"),
     "AUXILIUM_LLM_TIMEOUT_SEC": ("timeouts", "llm_sec"),
     "AUXILIUM_WEB_TIMEOUT_SEC": ("timeouts", "web_sec"),

@@ -23,11 +23,18 @@ import {
   saveSelectedDirectories,
 } from "../lib/configApi";
 
-type Provider = "mistral";
+type Provider = "mistral" | "openai";
 type SettingsTab = "language" | "llm" | "dirs" | "emails";
 
 const PROVIDER_MODELS: Record<Provider, string[]> = {
   mistral: ["mistral-small-latest"],
+  openai: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+};
+
+const MODEL_LABELS: Record<string, string> = {
+  "gpt-5.6-luna": "GPT-5.6 Luna",
+  "gpt-5.6-terra": "GPT-5.6 Terra",
+  "gpt-5.6-sol": "GPT-5.6 Sol",
 };
 
 export default function SettingsPage() {
@@ -340,29 +347,32 @@ export default function SettingsPage() {
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-center">
                     <label className="text-sm opacity-80">{t("provider")}</label>
-                    <input
+                    <select
                       value={provider}
-                      readOnly
-                      className="px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--muted)]"
-                    />
+                      onChange={(e) => {
+                        const nextProvider = e.target.value as Provider;
+                        setCfg({ ...cfg, llm: { ...llm, provider: nextProvider, model: PROVIDER_MODELS[nextProvider][0] } });
+                      }}
+                      className="px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--surface)]"
+                    >
+                      <option value="mistral">Mistral</option>
+                      <option value="openai">OpenAI</option>
+                    </select>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-center">
                     <label className="text-sm opacity-80">{t("model")}</label>
-                    <input
-                      list="llm-models"
+                    <select
                       value={llm.model || ""}
                       onChange={(e) =>
                         setCfg({ ...cfg, llm: { ...llm, model: e.target.value } })
                       }
-                      placeholder={models[0] || t("modelNamePlaceholder")}
                       className="px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--surface)]"
-                    />
-                    <datalist id="llm-models">
+                    >
                       {models.map((m) => (
-                        <option key={m} value={m} />
+                        <option key={m} value={m}>{MODEL_LABELS[m] || m}</option>
                       ))}
-                    </datalist>
+                    </select>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-center">
@@ -399,6 +409,24 @@ export default function SettingsPage() {
                       className="px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--surface)]"
                     />
                   </div>
+
+                  {provider === "openai" && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-center">
+                      <label className="text-sm opacity-80">Reasoning effort</label>
+                      <select
+                        value={llm.reasoning_effort || "medium"}
+                        onChange={(e) =>
+                          setCfg({ ...cfg, llm: { ...llm, reasoning_effort: e.target.value as "none" | "low" | "medium" | "high" } })
+                        }
+                        className="px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--surface)]"
+                      >
+                        <option value="none">None</option>
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                      </select>
+                    </div>
+                  )}
 
                   <div className="flex gap-2">
                     <button

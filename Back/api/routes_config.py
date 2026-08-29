@@ -9,7 +9,7 @@ import json
 from fastapi import APIRouter, HTTPException
 from pydantic import ValidationError
 
-from rag_core.llm import ask_mistral_with_context
+from rag_core.llm_providers import get_llm_provider
 from runtime_settings import (
     CONFIG_PATH,
     get_runtime_settings,
@@ -67,13 +67,13 @@ def test_llm(llm: dict):
     try:
         settings = load_runtime_settings(config_data=candidate)
         generation = settings.generation
-        sample = ask_mistral_with_context(
+        sample = get_llm_provider(generation.provider).generate(
             "Réponds uniquement par OK.",
-            context_text="",
-            history=[],
             model=generation.model,
             temperature=generation.temperature,
+            top_p=generation.top_p,
             max_tokens=16,
+            settings=generation,
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

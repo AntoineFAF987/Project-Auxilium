@@ -560,7 +560,8 @@ class AnswerPipelineTests(unittest.TestCase):
             q="Is it possible to tropicalize a 3730 positionner?",
             source_mode="local",
         )
-        with self._patch_pipeline(llm=llm):
+        evidence = (0.9, {**self.chunk[1], "text": "The 3730 tropicalization is no longer possible."})
+        with self._patch_pipeline(index=_Index([evidence], [0.9]), llm=llm):
             result = run_answer_pipeline(body, _request())
 
         self.assertEqual(result.answer, "No. Tropicalization is no longer possible.")
@@ -579,7 +580,8 @@ class AnswerPipelineTests(unittest.TestCase):
             q="C'est possible de tropicaliser un 3730 ?",
             source_mode="local",
         )
-        with self._patch_pipeline(llm=llm):
+        evidence = (0.9, {**self.chunk[1], "text": "La tropicalisation du 3730 n'est plus possible."})
+        with self._patch_pipeline(index=_Index([evidence], [0.9]), llm=llm):
             result = run_answer_pipeline(body, _request())
 
         self.assertEqual(result.answer, "Non. La tropicalisation n'est plus possible.")
@@ -670,7 +672,9 @@ class AnswerPipelineTests(unittest.TestCase):
 
     def test_nearby_product_only_adds_indirect_evidence_caveat(self):
         body = AskIn(q="Peut-on tropicaliser un 3725 ?", source_mode="local")
+        evidence = (0.9, {**self.chunk[1], "text": "La tropicalisation du positionneur 3730 n'est plus proposée."})
         with self._patch_pipeline(
+            index=_Index([evidence], [0.9]),
             faithfulness_enabled=False,
             context_text="[1] La tropicalisation du positionneur 3730 n'est plus proposée.",
         ):
@@ -699,6 +703,217 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(result.answer, "Les documents ne concordent pas.")
         self.assertEqual(result.review.caveat_type, "CONFLICTING_EVIDENCE")
         self.assertIn("interdit", result.review.message or "")
+
+    def test_conversational_introductions_skip_condensation_and_retrieval(self):
+        from api import answer_pipeline as pipeline
+
+        formulations = [
+            "J'ai rencontré une difficulté avec un appareil.",
+            "On vient de me soumettre un sujet.",
+            "Je vais commencer par vous donner le contexte.",
+        ]
+        for question in formulations:
+            index = _Index([self.chunk], [0.9])
+            with (
+                self._patch_pipeline(index=index),
+                patch.object(pipeline, "classify_turn", return_value=type("Turn", (), {"turn_type": "conversational_continuation", "decision_reason": "test"})()),
+            ):
+                result = run_answer_pipeline(AskIn(q=question), _request())
+            self.assertEqual(index.search_calls, [])
+            self.assertEqual(result.mode, "GENERAL(conversational)")
+            self.assertEqual(result.route_mode, "general")
+
+    def test_answer_seeking_turns_still_retrieve_without_question_mark_rule(self):
+        from api import answer_pipeline as pipeline
+
+        formulations = [
+            "Peut-on adapter le module AX-17 ?",
+            "Est-il possible d'adapter le module AX-17 ?",
+            "On me demande si le module AX-17 peut être adapté.",
+            "Que puis-je répondre concernant l'adaptation du module AX-17 ?",
+            "Je cherche des informations sur la possibilité d'adapter le module AX-17.",
+        ]
+        for question in formulations:
+            index = _Index([self.chunk], [0.9])
+            with (
+                self._patch_pipeline(index=index),
+                patch.object(pipeline, "classify_turn", return_value=type("Turn", (), {"turn_type": "answer_seeking", "decision_reason": "test"})()),
+            ):
+                result = run_answer_pipeline(AskIn(q=question), _request())
+            self.assertEqual(len(index.search_calls), 1)
+            self.assertEqual(result.mode, "STRICT(local)")
+
+    def test_evidence_modes_are_direct_related_or_none_without_domain_rules(self):
+        from api.answer_pipeline import _classify_evidence_mode
+
+        self.assertEqual(
+            _classify_evidence_mode("Le module AX-17 est-il compatible ?", "Le module AX-17 est compatible.", relevant=True),
+            "direct",
+        )
+        self.assertEqual(
+            _classify_evidence_mode("Le module AX-17 est-il compatible ?", "Le module AX-18 est compatible.", relevant=True),
+            "related",
+        )
+        self.assertEqual(
+            _classify_evidence_mode("Le module AX-17 est-il compatible ?", "Une procédure administrative générale.", relevant=False),
+            "none",
+        )
+        self.assertEqual(
+            _classify_evidence_mode(
+                "Le module AX-17 est-il compatible ?",
+                "Le module AX-18 est compatible. Le module AX-19 ne l'est pas.",
+                relevant=True,
+            ),
+            "related",
+        )
+
+    def test_related_evidence_reaches_generator_with_a_reservation_policy(self):
+        from api import answer_pipeline as pipeline
+
+        observed = {}
+
+        def llm(_fn, _question, context_text="", **kwargs):
+            observed.update(kwargs)
+            return "Le cas AX-18 est documenté, mais il ne permet pas de conclure pour AX-17. <CITATIONS>[1]</CITATIONS>"
+
+        related = (0.9, {**self.chunk[1], "text": "Le module AX-18 est compatible."})
+        with (
+            self._patch_pipeline(index=_Index([related], [0.9]), llm=llm, context_text="[1] Le module AX-18 est compatible."),
+            patch.object(pipeline, "classify_turn", return_value=type("Turn", (), {"turn_type": "answer_seeking", "decision_reason": "test"})()),
+        ):
+            result = run_answer_pipeline(AskIn(q="Le module AX-17 est-il compatible ?", source_mode="local"), _request())
+
+        self.assertEqual(observed["evidence_mode"], "related")
+        self.assertIn("AX-18", result.answer)
+
+    def test_related_evidence_bypasses_lexical_relevance_abstention_and_keeps_sources(self):
+        from api import answer_pipeline as pipeline
+
+        related = (0.91, {**self.chunk[1], "file": "related-reference.txt", "text": "La référence AX-18 est compatible."})
+        with (
+            self._patch_pipeline(
+                index=_Index([related], [0.91]), relevance=False,
+                context_text="[1] La référence AX-18 est compatible.",
+                post_review_enabled=False, faithfulness_enabled=False,
+            ),
+            patch.object(pipeline, "classify_turn", return_value=type("Turn", (), {"turn_type": "answer_seeking", "decision_reason": "test"})()),
+        ):
+            result = run_answer_pipeline(AskIn(q="La référence AX-17 est-elle compatible ?", source_mode="local"), _request())
+
+        self.assertEqual(result.answer, "La conservation est de **trente jours**.")
+        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assertNotEqual(result.status, "abstained")
+
+    def test_partial_and_chronological_evidence_reach_generation_with_sources(self):
+        from api import answer_pipeline as pipeline
+
+        observed = {}
+
+        def llm(_fn, _question, context_text="", **kwargs):
+            observed["context"] = context_text
+            observed.update(kwargs)
+            return (
+                "Les sources décrivent une première étape, puis l'absence de décision finale. "
+                "Je ne peux donc pas confirmer la conclusion demandée. <CITATIONS>[1,2]</CITATIONS>"
+            )
+
+        partial = [
+            (0.93, {**self.chunk[1], "text": "Le 4 avril, la demande AX-17 a été déposée."}),
+            (0.91, {**self.chunk[1], "text": "Le 12 avril, aucune décision finale concernant AX-17 n'était encore reçue."}),
+        ]
+        with (
+            self._patch_pipeline(
+                index=_Index(partial, [0.93, 0.91]),
+                llm=llm,
+                context_text="[1] Le 4 avril, la demande AX-17 a été déposée.\n[2] Le 12 avril, aucune décision finale concernant AX-17 n'était encore reçue.",
+                post_review_enabled=False,
+                faithfulness_enabled=False,
+            ),
+            patch.object(pipeline, "classify_turn", return_value=type("Turn", (), {"turn_type": "answer_seeking", "decision_reason": "test"})()),
+        ):
+            result = run_answer_pipeline(AskIn(q="La demande AX-17 a-t-elle été acceptée ?", source_mode="local"), _request())
+
+        self.assertEqual(observed["evidence_mode"], "direct")
+        self.assertIn("première étape", result.answer)
+        self.assertIn("ne peux donc pas confirmer", result.answer)
+        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assertNotEqual(result.status, "abstained")
+
+    def test_contradictory_direct_evidence_reaches_generation_with_sources(self):
+        from api import answer_pipeline as pipeline
+
+        def llm(_fn, _question, context_text="", **kwargs):
+            return "Les sources divergent ; elles ne permettent pas d'arbitrer. <CITATIONS>[1,2]</CITATIONS>"
+
+        contradictory = [
+            (0.93, {**self.chunk[1], "text": "La référence AX-17 est approuvée."}),
+            (0.92, {**self.chunk[1], "text": "La référence AX-17 n'est pas approuvée."}),
+        ]
+        with (
+            self._patch_pipeline(
+                index=_Index(contradictory, [0.93, 0.92]),
+                llm=llm,
+                context_text="[1] La référence AX-17 est approuvée.\n[2] La référence AX-17 n'est pas approuvée.",
+                post_review_enabled=False,
+                faithfulness_enabled=False,
+            ),
+            patch.object(pipeline, "classify_turn", return_value=type("Turn", (), {"turn_type": "answer_seeking", "decision_reason": "test"})()),
+        ):
+            result = run_answer_pipeline(AskIn(q="La référence AX-17 est-elle approuvée ?", source_mode="local"), _request())
+
+        self.assertIn("divergent", result.answer)
+        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assertNotEqual(result.status, "abstained")
+
+    def test_vaguely_similar_block_remains_none_and_abstains(self):
+        from api.answer_pipeline import _evaluate_evidence
+
+        block = (0.8, {"text": "Un sujet général sans relation exploitable.", "path": "C:/docs/general.txt"})
+        decision = _evaluate_evidence(
+            "La référence AX-17 est-elle compatible ?", [block],
+            guard_ok=False, context_is_relevant=False, overlap=0,
+        )
+        self.assertEqual(decision.mode, "none")
+        self.assertEqual(decision.reason, "guard_rejected_final_blocks")
+
+    def test_evidence_decision_handles_direct_related_and_explicit_comparison(self):
+        from api.answer_pipeline import _evaluate_evidence
+
+        direct = [(0.9, {"text": "La référence AX-17 est compatible."})]
+        related = [
+            (0.9, {"text": "La référence AX-18 est compatible."}),
+            (0.85, {"text": "La version AX-19 est compatible dans les mêmes conditions."}),
+        ]
+        comparison = [(0.9, {"text": "AX-17 diffère de AX-18 sur cette propriété."})]
+
+        self.assertEqual(_evaluate_evidence("AX-17 est-il compatible ?", direct, guard_ok=True, context_is_relevant=True, overlap=2).mode, "direct")
+        self.assertEqual(_evaluate_evidence("AX-17 est-il compatible ?", related, guard_ok=True, context_is_relevant=False, overlap=1).mode, "related")
+        self.assertEqual(_evaluate_evidence("Comparer AX-17 et AX-18", comparison, guard_ok=True, context_is_relevant=True, overlap=2).mode, "direct")
+
+    def test_related_evidence_accepts_morphological_reformulations_without_domain_rules(self):
+        from api.answer_pipeline import _evaluate_evidence
+
+        related = [(0.9, {"text": "La tropicalisation du produit AX-18 est document\u00e9e."})]
+        decision = _evaluate_evidence(
+            "Peut-on tropicaliser le produit AX-17 ?",
+            related,
+            guard_ok=True,
+            context_is_relevant=False,
+            overlap=0,
+        )
+
+        self.assertEqual(decision.mode, "related")
+        self.assertEqual(decision.reason, "different_anchor_with_guard_and_topic_relation")
+
+    def test_comparison_with_both_requested_entities_is_direct(self):
+        from api.answer_pipeline import _classify_evidence_mode
+
+        self.assertEqual(
+            _classify_evidence_mode(
+                "Comparer AX-17 et AX-18", "AX-17 diffère de AX-18 sur cette propriété.", relevant=True
+            ),
+            "direct",
+        )
 
     def test_persistence_is_executed_once_by_the_shared_pipeline(self):
         from api import answer_pipeline as pipeline

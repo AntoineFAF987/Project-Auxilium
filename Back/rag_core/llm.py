@@ -6,6 +6,7 @@ Ajout: adaptation au ton/humeur (cheerful, sad, frustrated, angry, confused, urg
 from typing import List, Dict, Optional
 from .affect import detect_mood
 from runtime_settings import get_runtime_settings
+from .llm_providers import generate_from_payload
 
 def ask_mistral_with_context(
     question: str,
@@ -17,6 +18,8 @@ def ask_mistral_with_context(
     smalltalk_mode: bool = False,
     smalltalk_kind: str | None = None,
     roleplay_mode: bool = False,
+    conversational_mode: bool = False,
+    evidence_mode: str = "none",
     **kwargs,
 ) -> str:
     import os as _os, requests as _requests
@@ -24,7 +27,7 @@ def ask_mistral_with_context(
     generation = get_runtime_settings().generation
 
     api_key = _os.getenv("MISTRAL_API_KEY")
-    if not api_key:
+    if generation.provider == "mistral" and not api_key:
         raise RuntimeError(
             "MISTRAL_API_KEY absente. Définis-la puis relance l’API.\n"
             'PowerShell :  setx MISTRAL_API_KEY "ta_cle"'
@@ -140,6 +143,15 @@ def ask_mistral_with_context(
         return base
 
     messages: List[Dict] = []
+    if conversational_mode:
+        messages = [{"role": "system", "content": (
+            "The user is introducing context, not asking a complete factual question yet. "
+            "Reply briefly and naturally, acknowledge the situation, and ask one helpful clarifying question. "
+            "Do not search for or invent a documentary answer."
+        )}]
+        messages.extend({"role": m["role"], "content": m["content"]} for m in (history or []) if isinstance(m, dict) and "role" in m and "content" in m)
+        messages.append({"role": "user", "content": question})
+        return generate_from_payload({"model": model or generation.model, "messages": messages, "temperature": temperature if temperature is not None else generation.smalltalk_temperature, "top_p": generation.top_p, "max_tokens": max_tokens or 160})
     NO_META_FR = "N’emploie jamais de phrases méta (ex. « je suis une IA »)."
     NO_META_EN = "Never use meta statements (e.g., “I am an AI”)."
 
@@ -155,7 +167,6 @@ def ask_mistral_with_context(
             if isinstance(m, dict) and "role" in m and "content" in m:
                 messages.append({"role": m["role"], "content": m["content"]})
         messages.append({"role": "user", "content": question})
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         roleplay_temperature = max(
             temperature if temperature is not None else generation.roleplay_temperature,
             generation.roleplay_temperature,
@@ -165,10 +176,7 @@ def ask_mistral_with_context(
             generation.roleplay_max_tokens,
         )
         payload = {"model": model or generation.model, "messages": messages, "temperature": _adjust_temp(roleplay_temperature), "top_p": generation.top_p, "max_tokens": roleplay_max_tokens}
-        r = _requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=generation.http_timeout_sec)
-        if r.status_code == 401: raise RuntimeError("401 Unauthorized: vérifie MISTRAL_API_KEY.")
-        if r.status_code == 429: raise RuntimeError("429 Too Many Requests: quota/ratelimit.")
-        r.raise_for_status(); return r.json()["choices"][0]["message"]["content"]
+        return generate_from_payload(payload)
 
     # 2) SMALL TALK
     if smalltalk_mode:
@@ -186,7 +194,6 @@ def ask_mistral_with_context(
             if isinstance(m, dict) and "role" in m and "content" in m:
                 messages.append({"role": m["role"], "content": m["content"]})
         messages.append({"role": "user", "content": question})
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         smalltalk_temperature = max(
             temperature if temperature is not None else generation.smalltalk_temperature,
             generation.smalltalk_temperature,
@@ -196,10 +203,7 @@ def ask_mistral_with_context(
             generation.smalltalk_max_tokens,
         )
         payload = {"model": model or generation.model, "messages": messages, "temperature": _adjust_temp(smalltalk_temperature), "top_p": generation.top_p, "max_tokens": smalltalk_max_tokens}
-        r = _requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=generation.http_timeout_sec)
-        if r.status_code == 401: raise RuntimeError("401 Unauthorized: vérifie MISTRAL_API_KEY.")
-        if r.status_code == 429: raise RuntimeError("429 Too Many Requests: quota/ratelimit.")
-        r.raise_for_status(); return r.json()["choices"][0]["message"]["content"]
+        return generate_from_payload(payload)
 
     # 3) Mode normal — naturel & strict si contexte
     rules = []
@@ -220,8 +224,10 @@ def ask_mistral_with_context(
             rules.append("Si la question demande des faits précis sans source fournie, dis-le plutôt que de deviner.")
         else:
             rules += [
-                'Utilise UNIQUEMENT le CONTEXTE fourni ; si l\'info manque, réponds exactement : "Je ne sais pas".',
+                "Utilise UNIQUEMENT le CONTEXTE fourni ; n'invente jamais une conclusion ou un fait absent.",
                 "N'AJOUTE JAMAIS d'informations, comparaisons ou exemples qui ne sont pas explicitement dans le CONTEXTE.",
+                "Lorsqu'un CONTEXTE utile est fourni, ne réponds jamais uniquement par une abstention. Restitue d'abord tous les faits pertinents établis par les sources, y compris les étapes, dates, positions, contradictions ou éléments partiels.",
+                "Si le CONTEXTE ne permet pas de confirmer la conclusion finale, explique précisément ce qui est établi, ce qui manque pour conclure et formule une conclusion prudente. Pour une évolution dans le temps, synthétise les éléments connus dans leur ordre chronologique.",
                 "Même en mode strict, fournis une réponse complète et structurée basée sur le contexte.",
                 ("À la toute fin de ta réponse, ajoute une ligne <CITATIONS>[i1,i2,...]</CITATIONS> "
                  "où i1,i2,... sont les numéros [1..N] des sources DU CONTEXTE réellement utilisées. "
@@ -244,8 +250,10 @@ def ask_mistral_with_context(
             rules.append("If precise facts are requested and no source is provided, say so rather than guessing.")
         else:
             rules += [
-                "Answer ONLY from the provided CONTEXT; if missing, reply exactly: \"I don't know\".",
+                "Answer ONLY from the provided CONTEXT; never invent a conclusion or fact that is absent.",
                 "NEVER add information, comparisons, or examples that are not explicitly in the CONTEXT.",
+                "When useful CONTEXT is provided, never answer with a bare abstention. First state every relevant fact established by the sources, including steps, dates, positions, contradictions, or partial evidence.",
+                "If the CONTEXT cannot confirm the final conclusion, explain precisely what is established, what is missing to conclude, and give a cautious conclusion. For changes over time, summarize the known evidence chronologically.",
                 "Even in strict mode, provide a complete and structured answer based on context.",
                 ("At the very end of your answer, add a line <CITATIONS>[i1,i2,...]</CITATIONS> "
                  "where i1,i2,... are the [1..N] indices of CONTEXT sources actually used. "
@@ -253,6 +261,23 @@ def ask_mistral_with_context(
             ]
 
     messages = [{"role": "system", "content": " ".join(rules)}]
+    if evidence_mode in {"direct", "related"} and context_text and context_text.strip():
+        if is_fr:
+            messages[0]["content"] += (
+                " Le contexte a été retenu comme preuve exploitable : produis obligatoirement une synthèse factuelle "
+                "sourcée avant toute réserve."
+            )
+        else:
+            messages[0]["content"] += (
+                " The context was retained as usable evidence: always provide a sourced factual synthesis before any caveat."
+            )
+    if evidence_mode == "related" and context_text and context_text.strip():
+        messages[0]["content"] += (
+            " The context contains related evidence, but not direct evidence for every requested entity. "
+            "State what is documented, name the documented case, explain why it is related, and explicitly say "
+            "that it cannot establish the answer for the requested case with certainty. If related sources disagree, "
+            "report the disagreement without selecting one as a conclusion for the requested case."
+        )
     for m in (history or []):
         if isinstance(m, dict) and "role" in m and "content" in m:
             messages.append({"role": m["role"], "content": m["content"]})
@@ -268,10 +293,5 @@ def ask_mistral_with_context(
         top_p = generation.strict_top_p
 
     messages.append({"role": "user", "content": user_content})
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {"model": model or generation.model, "messages": messages, "temperature": _adjust_temp(final_temperature), "top_p": top_p, "max_tokens": max_tokens if max_tokens is not None else generation.max_tokens}
-    r = _requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=generation.http_timeout_sec)
-    if r.status_code == 401: raise RuntimeError("401 Unauthorized: vérifie MISTRAL_API_KEY.")
-    if r.status_code == 429: raise RuntimeError("429 Too Many Requests: quota/ratelimit.")
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
+    return generate_from_payload(payload)

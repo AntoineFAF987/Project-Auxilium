@@ -26,6 +26,7 @@ from rag_core.faithfulness import (
     verify_answer_claims,
 )
 from rag_core.llm_stream import ask_mistral_with_context_stream
+from rag_core.turn_type import classify_turn
 from runtime_settings import get_runtime_settings
 from .chats_db import create_chat, append_message
 from auth_ms import verify_ms_token
@@ -35,6 +36,7 @@ import threading, random, time
 
 
 AnswerStatus = Literal["answered", "abstained", "fallback"]
+EvidenceMode = Literal["direct", "related", "none"]
 ReviewStatus = Literal["OK", "CAVEAT"]
 CaveatType = Literal[
     "STALE_SOURCE",
@@ -118,6 +120,15 @@ class AnswerPipelineResult:
             review=self.review.to_dict(),
             faithfulness_review=self.faithfulness_review,
         )
+
+
+@dataclass(frozen=True)
+class EvidenceDecision:
+    mode: EvidenceMode
+    reason: str
+    context_is_relevant: bool
+    context_relevance_reason: str
+    morphological_topic_overlap: int = 0
 
 
 def _infer_result_status(
@@ -335,6 +346,122 @@ def _check_context_relevance(question: str, context: str, threshold: float = Non
     # Ratio mots clés partagés / mots clés question
     ratio = overlap / max(1, q_words)
     return ratio >= threshold
+
+
+def _specific_anchors(text: str) -> set[str]:
+    """Extract stable, domain-neutral identifiers (serial/model/reference-like tokens)."""
+    return {
+        token.lower()
+        for token in re.findall(r"\b(?=[\w-]*\d)[\w-]{2,}\b", text or "")
+    }
+
+
+def _classify_evidence_mode(question: str, context: str, *, relevant: bool) -> EvidenceMode:
+    """Separate direct support from useful, but entity-mismatched, context."""
+    if not context or not relevant:
+        return "none"
+    requested = _specific_anchors(question)
+    documented = _specific_anchors(context)
+    if not requested:
+        return "direct"
+    if requested.issubset(documented):
+        return "direct"
+    if documented - requested:
+        return "related"
+    return "none"
+
+
+def _evidence_text(blocks: List[Tuple[float, Dict]]) -> str:
+    """Use chunk bodies only: formatted context also contains citation/chunk numbers."""
+    return "\n".join(str(meta.get("text") or "") for _, meta in (blocks or []))
+
+
+def _morphological_topic_overlap(question: str, context: str) -> int:
+    """Count close lexical variants without tying evidence to an exact word form.
+
+    This is deliberately only a supporting signal: the reranker guard and a
+    distinct documented anchor are still required before such a block can be
+    considered related evidence.  It makes ordinary inflectional or
+    derivational variants (for example a verb and its noun) comparable without
+    embedding a domain vocabulary in the policy.
+    """
+    def tokens(text: str) -> set[str]:
+        return {
+            token.casefold()
+            for token in re.findall(r"\b[^\W\d_]{4,}\b", text or "", flags=re.UNICODE)
+        }
+
+    question_tokens = tokens(question)
+    context_tokens = tokens(context)
+    related = 0
+    for q_token in question_tokens:
+        for c_token in context_tokens:
+            if q_token == c_token:
+                continue
+            common_prefix = 0
+            for q_char, c_char in zip(q_token, c_token):
+                if q_char != c_char:
+                    break
+                common_prefix += 1
+            shorter = min(len(q_token), len(c_token))
+            # A long shared prefix relative to both words is a lightweight,
+            # language-agnostic morphology signal, not a domain rule.
+            if common_prefix >= 5 and common_prefix / shorter >= 0.6:
+                related += 1
+                break
+    return related
+
+
+def _evaluate_evidence(
+    question: str,
+    blocks: List[Tuple[float, Dict]],
+    *,
+    guard_ok: bool,
+    context_is_relevant: bool,
+    overlap: int,
+) -> EvidenceDecision:
+    """Single source of truth for usable local evidence after final block selection."""
+    if not blocks:
+        return EvidenceDecision("none", "no_final_blocks", context_is_relevant, "empty_context", 0)
+
+    requested = _specific_anchors(question)
+    evidence_text = _evidence_text(blocks)
+    documented = _specific_anchors(evidence_text)
+    morphological_overlap = _morphological_topic_overlap(question, evidence_text)
+    relevance_reason = "lexical_relevance" if context_is_relevant else "lexical_relevance_below_threshold"
+    usable_direct_signal = bool(guard_ok or context_is_relevant or overlap >= OVERLAP_MIN)
+
+    if requested and requested.issubset(documented) and usable_direct_signal:
+        return EvidenceDecision(
+            "direct", "requested_anchors_in_final_blocks", context_is_relevant, relevance_reason, morphological_overlap
+        )
+    if not requested and context_is_relevant and usable_direct_signal:
+        return EvidenceDecision(
+            "direct", "context_relevant_without_specific_anchor", context_is_relevant, relevance_reason, morphological_overlap
+        )
+
+    # A different reference can be useful only with reranker support and a
+    # topical relation. Exact overlap helps, but cannot be an absolute gate:
+    # equivalent requests regularly use different inflected word forms.
+    topical_relation = bool(context_is_relevant or overlap >= OVERLAP_MIN or morphological_overlap)
+    if requested and (documented - requested) and guard_ok and topical_relation:
+        return EvidenceDecision(
+            "related",
+            "different_anchor_with_guard_and_topic_relation",
+            context_is_relevant,
+            relevance_reason,
+            morphological_overlap,
+        )
+
+    if not guard_ok:
+        reason = "guard_rejected_final_blocks"
+    elif not topical_relation:
+        reason = "no_topic_relation_for_related_evidence"
+    elif requested and not (documented - requested):
+        reason = "no_documented_related_anchor"
+    else:
+        reason = "final_blocks_not_usable_as_evidence"
+    return EvidenceDecision("none", reason, context_is_relevant, relevance_reason, morphological_overlap)
 
 def _condense_question(hist: List[Dict], q: str) -> str:
     """
@@ -850,6 +977,32 @@ def run_answer_pipeline(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"LLM error: {e}")
 
+    # Decide whether this turn is answerable now before rewriting or searching.
+    turn_decision = classify_turn(q, idx.embed_model, hist)
+    turn_type = turn_decision.turn_type
+    if turn_type == "conversational_continuation":
+        _log_event(request_id, {
+            "event": "ask", "turn_type": turn_type, "q_eff": q,
+            "should_condense": False, "route_mode": "general", "guard_ok": False,
+            "hits": 0, "context_blocks": 0, "evidence_mode": "none",
+            "turn_type_reason": turn_decision.decision_reason,
+            "turn_type_margin": getattr(turn_decision, "semantic_margin", None),
+        })
+        try:
+            ans = _generate_answer(
+                q, reply_preamble, history=hist, token_sink=token_sink,
+                conversational_mode=True, max_tokens=160,
+            )
+            return _result(
+                answer=ans, sources=[], mode="GENERAL(conversational)",
+                ctx_len=len(reply_preamble), request_id=request_id,
+                route_mode="general", validations={"turn_type": turn_type, "evidence_mode": "none"},
+            )
+        except FuturesTimeout:
+            raise HTTPException(status_code=504, detail="LLM timeout")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"LLM error: {e}")
+
     # ===================== RAG (pré-recherche pour signaux) =====================
     # TIER 0 amélioration: condensation de question avec historique
     # Désactiver si historique trop court (risque de dérive) - compter messages utilisateur uniquement
@@ -914,9 +1067,13 @@ def run_answer_pipeline(
 
     # --- NEW: Vérification de cohérence thématique du contexte ---
     context_is_relevant = _check_context_relevance(q, context_local)
+    evidence_decision = _evaluate_evidence(
+        q, blocks, guard_ok=bool(gated_ok), context_is_relevant=context_is_relevant, overlap=overlap,
+    )
+    evidence_mode = evidence_decision.mode
 
-    # --- Pertinence locale (PLUS souple): sémantique OU mots en commun ET cohérence ---
-    strict_local_ok = bool(context_local) and context_is_relevant and (bool(gated_ok) or overlap >= OVERLAP_MIN)
+    # Only the evidence decision controls whether local blocks are usable.
+    strict_local_ok = evidence_mode in {"direct", "related"}
 
     # TIER 0 amélioration: multi-query expansion si peu de hits ou faible overlap OU contexte hors sujet
     if ENABLE_EXPANSION and (not strict_local_ok or not context_is_relevant) and prelim_hits < max(4, RETRIEVE_K // 2):
@@ -943,8 +1100,11 @@ def run_answer_pipeline(
             context_local = format_context_for_llm(blocks) if blocks else ""
             overlap = keyword_overlap_count(q, context_local)
             context_is_relevant = _check_context_relevance(q, context_local)
-            # Recalculer strict_local_ok avec le nouveau contexte fusionné
-            strict_local_ok = bool(context_local) and context_is_relevant and (overlap >= OVERLAP_MIN)
+            evidence_decision = _evaluate_evidence(
+                q, blocks, guard_ok=bool(gated_ok), context_is_relevant=context_is_relevant, overlap=overlap,
+            )
+            evidence_mode = evidence_decision.mode
+            strict_local_ok = evidence_mode in {"direct", "related"}
         except Exception:
             # Fallback silencieux: on garde les résultats initiaux
             pass
@@ -960,6 +1120,7 @@ def run_answer_pipeline(
         "a_des_dates_recentes": bool(_looks_fresh_news(q)),
         "looks_equation": bool(_looks_like_equation(q)),
         "smalltalk_hint": bool(skind),
+        "evidence_mode": evidence_mode,
     }
 
     # --- Choix du mode (règle déterministe actu ⇒ web_live, hors sujet ⇒ general) ---
@@ -981,6 +1142,21 @@ def run_answer_pipeline(
     # --- Garde-fou pro : si routeur dit "general" mais local pertinent -> forcer local ---
     if route_mode == "general" and strict_local_ok and mode_in != "web_live":
         route_mode = "strict_local"
+
+    _log_event(request_id, {
+        "event": "evidence_decision",
+        "evidence_mode": evidence_mode,
+        "evidence_mode_reason": evidence_decision.reason,
+        "context_is_relevant": evidence_decision.context_is_relevant,
+        "context_relevance_reason": evidence_decision.context_relevance_reason,
+        "morphological_topic_overlap": evidence_decision.morphological_topic_overlap,
+        "strict_local_ok": strict_local_ok,
+        "guard_ok": bool(gated_ok),
+        "hits": len(prelim),
+        "final_context_block_count": len(blocks),
+        "top_hit_filenames": [str(meta.get("file") or Path(str(meta.get("path") or "")).name) for _, meta in prelim[:3]],
+        "top_hit_scores": [round(float(score), 4) for score, _ in prelim[:3]],
+    })
 
     # ------ Cache court (intègre le route_mode) ------
     ck = _cache_key(q, mode_in, route_mode, body.reply_to.content if body.reply_to else None)
@@ -1048,8 +1224,7 @@ def run_answer_pipeline(
             response_cache.set(ck, out)
             return _result(**out, request_id=request_id, route_mode=route_mode, validations=validations)
 
-        # double-check au cas où (pas obligatoire mais clair)
-        if not strict_local_ok:
+        if evidence_mode == "none":
             msg = "J’ai parcouru tes **sources**, mais rien de suffisamment pertinent."
             out = {"answer": msg, "sources": [], "mode": "STRICT(local)", "ctx_len": len(context_local)}
             response_cache.set(ck, out)
@@ -1068,7 +1243,8 @@ def run_answer_pipeline(
     # ===================== Appel LLM principal =====================
     try:
         answer = _generate_answer(
-            q, context_for_llm, history=hist, token_sink=token_sink
+            q, context_for_llm, history=hist, token_sink=token_sink,
+            evidence_mode=evidence_mode if use_strict else "none",
         )
         # Parse des citations éventuelles
         citations_idx = []
@@ -1175,8 +1351,21 @@ def run_answer_pipeline(
         "strict": use_strict,
         "web_links": len(web_sources_list),
         "ctx_len": len(context_for_llm or ""),
+        "context_blocks": len(blocks),
+        "q_eff": q_eff,
+        "should_condense": should_condense,
         "overlap": overlap,
         "guard_ok": bool(gated_ok),
+        "turn_type": turn_type,
+        "turn_type_reason": turn_decision.decision_reason,
+        "turn_type_margin": getattr(turn_decision, "semantic_margin", None),
+        "evidence_mode": evidence_mode,
+        "evidence_mode_reason": evidence_decision.reason,
+        "context_is_relevant": evidence_decision.context_is_relevant,
+        "context_relevance_reason": evidence_decision.context_relevance_reason,
+        "morphological_topic_overlap": evidence_decision.morphological_topic_overlap,
+        "strict_local_ok": strict_local_ok,
+        "source_count": len(sources),
     })
 
     out = {

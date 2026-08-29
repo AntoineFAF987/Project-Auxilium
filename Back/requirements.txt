@@ -17,6 +17,7 @@ cryptography==44.0.1
 # ===== HTTP & Requests =====
 httpx==0.28.1
 requests==2.32.3
+openai>=1.0.0
 
 # ===== RAG & AI (Embeddings, Vector Search) =====
 sentence-transformers==3.3.1

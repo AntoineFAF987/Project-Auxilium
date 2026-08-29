@@ -23,13 +23,14 @@ export type AppConfig = {
   version?: number;
   email?: { accounts?: EmailAccount[] };
   llm?: {
-    provider?: "mistral";
+    provider?: "mistral" | "openai";
     model?: string;
     temperature?: number;
     strict_temperature?: number;
     top_p?: number;
     strict_top_p?: number;
     max_tokens?: number;
+    reasoning_effort?: "none" | "low" | "medium" | "high";
   };
   // compat extensible
   [k: string]: any;
