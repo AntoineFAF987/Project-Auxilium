@@ -14,7 +14,7 @@ import "katex/dist/katex.min.css";
 type Source = { path: string; chunk: number };
 type PostGenerationReview = {
   status: "OK" | "CAVEAT";
-  caveat_type?: "STALE_SOURCE" | "INDIRECT_EVIDENCE" | "PARTIAL_EVIDENCE" | "CONFLICTING_EVIDENCE" | "INFERENCE" | "UNSUPPORTED_CLAIM" | "CONTRADICTED_CLAIM" | "WEB_RECOMMENDED" | null;
+  caveat_type?: "STALE_SOURCE" | "INDIRECT_EVIDENCE" | "PARTIAL_EVIDENCE" | "CONFLICTING_EVIDENCE" | "INFERENCE" | "UNSUPPORTED_CLAIM" | "CONTRADICTED_CLAIM" | "CITATION_MISMATCH" | "WEB_RECOMMENDED" | null;
   message?: string | null;
   severity: "info" | "warning";
   suggest_web: boolean;

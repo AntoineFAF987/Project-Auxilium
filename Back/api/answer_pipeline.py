@@ -19,6 +19,7 @@ from .sessions import _touch_session, _get_roleplay, _set_roleplay, SESSIONS, re
 from .roleplay import detect_roleplay_trigger, looks_factual
 from .math_tools import _is_explain_followup, _looks_like_equation, _solve_math
 from rag_core.faithfulness import (
+    CitationStatus,
     ClaimStatus,
     FaithfulnessReview,
     should_fallback_to_general,
@@ -43,6 +44,7 @@ CaveatType = Literal[
     "INFERENCE",
     "UNSUPPORTED_CLAIM",
     "CONTRADICTED_CLAIM",
+    "CITATION_MISMATCH",
     "WEB_RECOMMENDED",
 ]
 
@@ -54,6 +56,7 @@ _CAVEAT_TYPES = {
     "INFERENCE",
     "UNSUPPORTED_CLAIM",
     "CONTRADICTED_CLAIM",
+    "CITATION_MISMATCH",
     "WEB_RECOMMENDED",
 }
 
@@ -573,7 +576,11 @@ def _post_generation_review(
     if claim_review and claim_review.caveat_required:
         problems = [
             item for item in claim_review.claims
-            if item.status != ClaimStatus.SUPPORTED or item.citation_correct is False
+            if item.status != ClaimStatus.SUPPORTED
+            or (
+                item.status == ClaimStatus.SUPPORTED
+                and (item.citation_status == CitationStatus.MISMATCHED or item.citation_correct is False)
+            )
         ]
         priority = {
             ClaimStatus.CONTRADICTED: 0,
@@ -583,15 +590,18 @@ def _post_generation_review(
             ClaimStatus.SUPPORTED: 4,
         }
         problem = min(problems, key=lambda item: (
-            0 if item.citation_correct is False else priority[item.status]
+            priority[item.status],
+            0 if item.citation_status == CitationStatus.MISMATCHED else 1,
         ))
         claim_text = problem.claim.text.strip().rstrip(".!?")
         if len(claim_text) > 160:
             claim_text = claim_text[:157].rstrip() + "..."
-        if problem.citation_correct is False:
+        if problem.status == ClaimStatus.SUPPORTED and (
+            problem.citation_status == CitationStatus.MISMATCHED or problem.citation_correct is False
+        ):
             return PostGenerationReview(
                 status="CAVEAT",
-                caveat_type="PARTIAL_EVIDENCE",
+                caveat_type="CITATION_MISMATCH",
                 message=f"L'affirmation « {claim_text} » est soutenue par le contexte, mais pas par la source citée.",
                 severity="warning",
             )

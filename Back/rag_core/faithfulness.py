@@ -25,7 +25,7 @@ _STOPWORDS = {
     "a", "au", "aux", "avec", "ce", "ces", "cette", "dans", "de", "des",
     "du", "elle", "en", "est", "et", "il", "la", "le", "les", "leur",
     "leurs", "mais", "ou", "par", "pas", "plus", "pour", "que", "qui",
-    "son", "sur", "the", "an", "and", "are", "as", "at", "by", "for",
+    "son", "sur", "un", "une", "the", "an", "and", "are", "as", "at", "by", "for",
     "from", "in", "is", "it", "of", "on", "or", "that", "to", "was",
     "were", "with",
 }
@@ -44,6 +44,8 @@ _RECOMMENDATION_PATTERNS = (
 _NON_FACTUAL_PATTERNS = (
     r"^(?:bonjour|bonsoir|merci|avec plaisir|en resume|en conclusion)\b",
     r"^(?:voici|here is|in summary|to conclude)\b[^.!?]*:?$",
+    r"^(?:the key points|here are the key points|activites professionnelles|coordonnees|poste et role)\b[^.!?]*:?$",
+    r"^(?:i.ve included|let me know)\b",
 )
 
 
@@ -55,6 +57,12 @@ class ClaimStatus(str, Enum):
     CONTRADICTED = "CONTRADICTED"
 
 
+class CitationStatus(str, Enum):
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    MATCHED = "MATCHED"
+    MISMATCHED = "MISMATCHED"
+
+
 @dataclass(frozen=True)
 class AnswerClaim:
     claim_id: str
@@ -63,6 +71,7 @@ class AnswerClaim:
     end: int
     claim_type: str = "FACTUAL"
     cited_source_indices: Tuple[int, ...] = ()
+    verification_text: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -104,8 +113,12 @@ class ClaimVerification:
     evidence: Tuple[ClaimEvidence, ...] = ()
     reason: str = ""
     citation_correct: Optional[bool] = None
+    citation_status: CitationStatus = CitationStatus.NOT_APPLICABLE
+    citation_reason: Optional[str] = None
     nli_label: Optional[str] = None
     nli_score: Optional[float] = None
+    nli_entailment_score: Optional[float] = None
+    nli_contradiction_score: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -115,8 +128,12 @@ class ClaimVerification:
             "evidence": [item.to_dict() for item in self.evidence],
             "reason": self.reason,
             "citation_correct": self.citation_correct,
+            "citation_status": self.citation_status.value,
+            "citation_reason": self.citation_reason,
             "nli_label": self.nli_label,
             "nli_score": self.nli_score,
+            "nli_entailment_score": self.nli_entailment_score,
+            "nli_contradiction_score": self.nli_contradiction_score,
         }
 
 
@@ -165,12 +182,13 @@ class FaithfulnessReview:
 
 def _normalize(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", (value or "").casefold())
-    return "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    return normalized.replace("’", "'").replace("‘", "'")
 
 
 def _tokens(value: str) -> set[str]:
     return {
-        token for token in re.findall(r"[a-z0-9][a-z0-9_.-]*", _normalize(value))
+        token for token in re.findall(r"[a-z0-9]+(?:[_.-][a-z0-9]+)*", _normalize(value))
         if len(token) > 1 and token not in _STOPWORDS
     }
 
@@ -202,6 +220,27 @@ def _clean_answer(answer: str) -> str:
     return cleaned.strip()
 
 
+def _verification_text(value: str) -> str:
+    """Remove presentation/attribution syntax without changing displayed text."""
+    text = re.sub(r"(?:\*\*|__|`)", "", value or "")
+    text = re.sub(r"\[\s*\d+(?:\s*[,;]\s*\d+)*\s*\]", " ", text)
+    text = re.sub(
+        r"^\s*(?:d['’]apr[eè]s|selon)\s+(?:le\s+)?contexte(?:\s+fourni)?\s*[,,:-]\s*",
+        "", text, flags=re.I,
+    )
+    text = re.sub(r"^\s*(?:cependant|toutefois|en revanche)\s*[,,:-]\s*", "", text, flags=re.I)
+    attributed = re.match(
+        r"^.*?\bqui\s+(?:pr[eé]cise|indique|mentionne|confirme)\s+que\s+(.+)$",
+        text, flags=re.I | re.S,
+    )
+    if attributed:
+        text = attributed.group(1)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+_SENTENCE_PATTERN = re.compile(r".+?(?:\.(?=\s|$)|[!?](?=\s|$)|\n|$)", re.S)
+
+
 def _claim_units(sentence: str) -> List[Tuple[str, int, int]]:
     """Return explainable clause units, including explicit causal clauses."""
     units: List[Tuple[str, int, int]] = []
@@ -230,8 +269,9 @@ def extract_answer_claims(
 ) -> List[AnswerClaim]:
     """Extract factual sentences/clauses with stable response-local IDs."""
     cleaned = _clean_answer(answer)
+    answer_has_inline_citations = bool(re.search(r"\[\d+\]", cleaned))
     claims: List[AnswerClaim] = []
-    for sentence_match in re.finditer(r".+?(?:(?<!\d)[.!?](?!\d)|\n|$)", cleaned):
+    for sentence_match in _SENTENCE_PATTERN.finditer(cleaned):
         raw_sentence = sentence_match.group(0)
         sentence = raw_sentence.strip()
         if not sentence:
@@ -239,18 +279,33 @@ def extract_answer_claims(
         sentence_start = sentence_match.start() + len(raw_sentence) - len(raw_sentence.lstrip())
         for unit_text, unit_start, unit_end in _claim_units(sentence):
             text = unit_text.strip(" \t\r\n-*•")
-            normalized = _normalize(text)
-            if len(_tokens(text)) < 2:
+            check_text = _verification_text(text)
+            normalized = _normalize(check_text)
+            if len(_tokens(check_text)) < 2:
+                continue
+            if check_text.rstrip().endswith(":") or normalized.endswith(" max."):
+                continue
+            if re.search(r"\b(?:je ne peux pas repondre|i cannot answer|i can.t answer)\b", normalized):
                 continue
             if any(re.search(pattern, normalized) for pattern in _RECOMMENDATION_PATTERNS):
                 continue
             if any(re.search(pattern, normalized) for pattern in _NON_FACTUAL_PATTERNS):
                 continue
-            if normalized.startswith(("selon ", "d'apres ", "according to ")) and re.search(r"\[\d+\]", text):
-                continue
             start = sentence_start + unit_start
             end = sentence_start + unit_end
-            claim_type = "QUANTITATIVE" if _numbers(text) else "NEGATED_FACT" if _polarity(text) else "FACTUAL"
+            absence = bool(re.search(
+                r"\b(?:aucune?\s+(?:information|mention)|ne\s+(?:mentionne|mentionnent|contient|contiennent)|seul document.*\bnon\b)\b",
+                normalized,
+            ))
+            claim_type = (
+                "EVIDENCE_ABSENCE" if absence else
+                "QUANTITATIVE" if _numbers(check_text) else
+                "NEGATED_FACT" if _polarity(check_text) else "FACTUAL"
+            )
+            local_citations = tuple(int(item) for item in re.findall(r"\[(\d+)\]", text))
+            citations = local_citations
+            if not citations and not answer_has_inline_citations:
+                citations = tuple(dict.fromkeys(int(i) for i in cited_source_indices if int(i) > 0))
             digest = hashlib.sha1(f"{start}:{end}:{text}".encode("utf-8")).hexdigest()[:10]
             claims.append(AnswerClaim(
                 claim_id=f"claim-{len(claims) + 1:03d}-{digest}",
@@ -258,14 +313,15 @@ def extract_answer_claims(
                 start=start,
                 end=end,
                 claim_type=claim_type,
-                cited_source_indices=tuple(dict.fromkeys(int(i) for i in cited_source_indices if int(i) > 0)),
+                cited_source_indices=tuple(dict.fromkeys(citations)),
+                verification_text=check_text,
             ))
     return claims
 
 
 def _sentences_with_offsets(text: str) -> List[Tuple[str, int, int]]:
     spans = []
-    for match in re.finditer(r".+?(?:(?<!\d)[.!?](?!\d)|\n|$)", text or ""):
+    for match in _SENTENCE_PATTERN.finditer(text or ""):
         sentence = match.group(0).strip()
         if sentence:
             leading = len(match.group(0)) - len(match.group(0).lstrip())
@@ -275,6 +331,19 @@ def _sentences_with_offsets(text: str) -> List[Tuple[str, int, int]]:
         start = len(text) - len(text.lstrip())
         spans.append((text.strip(), start, start + len(text.strip())))
     return spans
+
+
+def _passages_with_offsets(text: str) -> List[Tuple[str, int, int]]:
+    """Sentence spans plus adjacent pairs for claims supported across a boundary."""
+    sentences = _sentences_with_offsets(text)
+    passages = list(sentences)
+    for first, second in zip(sentences, sentences[1:]):
+        passages.append((text[first[1]:second[2]].strip(), first[1], second[2]))
+    stripped = text.strip()
+    if stripped and len(sentences) > 1:
+        start = len(text) - len(text.lstrip())
+        passages.append((stripped, start, start + len(stripped)))
+    return passages
 
 
 def _evidence_score(claim: str, passage: str) -> float:
@@ -302,9 +371,10 @@ def _candidate_evidence(
     candidates: List[ClaimEvidence] = []
     for source_index, meta in enumerate(evidence_blocks, start=1):
         text = str(meta.get("text") or "")
-        best: Optional[ClaimEvidence] = None
-        for passage, start, end in _sentences_with_offsets(text):
-            score = _evidence_score(claim.text, passage)
+        block_candidates: List[ClaimEvidence] = []
+        check_text = claim.verification_text or claim.text
+        for passage, start, end in _passages_with_offsets(text):
+            score = _evidence_score(check_text, passage)
             item = ClaimEvidence(
                 evidence_id=f"evidence-{source_index}-{start}-{end}", text=passage,
                 start=start, end=end, support_score=score, source_index=source_index,
@@ -317,12 +387,14 @@ def _candidate_evidence(
                 heading_path=tuple(meta.get("heading_path") or ()),
                 block_ids=tuple(meta.get("block_ids") or ()), email_thread_id=_email_thread_id(meta),
             )
-            if best is None or item.support_score > best.support_score:
-                best = item
-        if best is not None:
-            candidates.append(best)
+            block_candidates.append(item)
+        block_candidates.sort(
+            key=lambda item: (item.support_score, len(item.text) if item.support_score < INFERENCE_THRESHOLD else 0),
+            reverse=True,
+        )
+        candidates.extend(block_candidates[:3])
     candidates.sort(key=lambda item: item.support_score, reverse=True)
-    return candidates[:2], len(evidence_blocks)
+    return candidates, len(evidence_blocks)
 
 
 def _load_nli_model():
@@ -345,35 +417,59 @@ def _load_nli_model():
             return None
 
 
+@dataclass(frozen=True)
+class _NLIResult:
+    label: Optional[str] = None
+    score: Optional[float] = None
+    entailment_score: Optional[float] = None
+    contradiction_score: Optional[float] = None
+
+
 def _run_nli_batch(
     claims: Sequence[AnswerClaim], evidences: Sequence[Sequence[ClaimEvidence]],
     *, use_nli: bool, nli_model: Any = None,
-) -> Tuple[List[Tuple[Optional[str], Optional[float]]], int, Optional[str]]:
+) -> Tuple[List[_NLIResult], int, Optional[str]]:
     if not use_nli or not claims:
-        return [(None, None) for _ in claims], 0, None
+        return [_NLIResult() for _ in claims], 0, None
     model = nli_model if nli_model is not None else _load_nli_model()
     if model is None:
-        return [(None, None) for _ in claims], 0, None
-    inputs = [f"{' '.join(item.text for item in evidence[:2])} [SEP] {claim.text}" for claim, evidence in zip(claims, evidences)]
+        return [_NLIResult() for _ in claims], 0, None
+    inputs = [
+        f"{' '.join(item.text for item in evidence[:2])} [SEP] {claim.verification_text or claim.text}"
+        for claim, evidence in zip(claims, evidences)
+    ]
     try:
-        raw_results = model(inputs, truncation=True, batch_size=min(8, len(inputs)))
+        raw_results = model(inputs, truncation=True, batch_size=min(8, len(inputs)), top_k=None)
         if isinstance(raw_results, dict):
             raw_results = [raw_results]
-        parsed: List[Tuple[Optional[str], Optional[float]]] = []
+        parsed: List[_NLIResult] = []
         for raw in raw_results:
-            if isinstance(raw, list):
-                raw = max(raw, key=lambda item: float(item.get("score", 0.0)))
-            parsed.append((str(raw.get("label") or "").upper(), float(raw.get("score") or 0.0)))
+            alternatives = raw if isinstance(raw, list) else [raw]
+            best = max(alternatives, key=lambda item: float(item.get("score", 0.0)))
+            scores = {
+                str(item.get("label") or "").upper(): float(item.get("score") or 0.0)
+                for item in alternatives
+            }
+            parsed.append(_NLIResult(
+                label=str(best.get("label") or "").upper(),
+                score=float(best.get("score") or 0.0),
+                entailment_score=max((v for k, v in scores.items() if "ENTAIL" in k), default=None),
+                contradiction_score=max((v for k, v in scores.items() if "CONTRADICTION" in k), default=None),
+            ))
         while len(parsed) < len(claims):
-            parsed.append((None, None))
+            parsed.append(_NLIResult())
         model_name = getattr(getattr(model, "model", None), "name_or_path", None) or NLI_MODEL_NAME
         return parsed[:len(claims)], 1, str(model_name)
     except Exception:
-        return [(None, None) for _ in claims], 0, None
+        return [_NLIResult() for _ in claims], 0, None
 
 
 def _deterministic_contradiction(claim: str, passage: str, score: float) -> bool:
-    return score >= PARTIAL_THRESHOLD and _polarity(claim) != _polarity(passage)
+    return (
+        score >= SUPPORTED_THRESHOLD
+        and not passage.rstrip().endswith("?")
+        and _polarity(claim) != _polarity(passage)
+    )
 
 
 def _looks_multi_fact(value: str) -> bool:
@@ -381,6 +477,70 @@ def _looks_multi_fact(value: str) -> bool:
     return any(connector in normalized for connector in (
         " et ", " ainsi que ", " mais ", " and ", " as well as ", " but ",
     ))
+
+
+def _absence_supported(
+    claim: AnswerClaim, evidence_blocks: Sequence[Mapping[str, Any]]
+) -> Optional[bool]:
+    if claim.claim_type != "EVIDENCE_ABSENCE":
+        return None
+    text = claim.verification_text or claim.text
+    products = _product_ids(text)
+    cited = set(claim.cited_source_indices)
+    normalized = _normalize(text)
+    excluded_product = re.search(r"\bnon\s+(\d{3,6})\b", normalized)
+    if excluded_product:
+        products = {excluded_product.group(1)}
+    if "autres sources" in normalized or "autres documents" in normalized:
+        cited_documents = {
+            block.get("document_id")
+            for index, block in enumerate(evidence_blocks, start=1)
+            if index in cited and block.get("document_id")
+        }
+        inspected = [
+            str(block.get("text") or "")
+            for index, block in enumerate(evidence_blocks, start=1)
+            if index not in cited and block.get("document_id") not in cited_documents
+        ]
+    else:
+        inspected = [str(block.get("text") or "") for block in evidence_blocks]
+    if products:
+        present = set().union(*(_product_ids(item) for item in inspected)) if inspected else set()
+        return products.isdisjoint(present)
+    target_match = re.search(
+        r"aucune mention (?:d[' ]?|de |du |des )?(.+?) n[' ]?(?:est|apparait)", normalized
+    )
+    if not target_match:
+        return None
+    target = re.sub(r"^(?:un|une|le|la|les)\s+", "", target_match.group(1)).strip()
+    if len(_tokens(target)) < 1:
+        return None
+    normalized_context = " ".join(_normalize(item) for item in inspected)
+    return target not in normalized_context
+
+
+def _citation_assessment(
+    claim: AnswerClaim, evidence: Sequence[ClaimEvidence]
+) -> Tuple[Optional[bool], CitationStatus, Optional[str]]:
+    cited = set(claim.cited_source_indices)
+    if not cited:
+        return None, CitationStatus.NOT_APPLICABLE, None
+    supporting = [item for item in evidence if item.support_score >= PARTIAL_THRESHOLD]
+    if any(item.source_index in cited for item in supporting):
+        return True, CitationStatus.MATCHED, "The cited context block contains supporting evidence"
+    cited_documents = {
+        item.document_id for item in evidence
+        if item.source_index in cited and item.document_id
+    }
+    if cited_documents and any(item.document_id in cited_documents for item in supporting):
+        return True, CitationStatus.MATCHED, "Supporting evidence is in another chunk of the cited document"
+    cited_threads = {
+        item.email_thread_id for item in evidence
+        if item.source_index in cited and item.email_thread_id
+    }
+    if cited_threads and any(item.email_thread_id in cited_threads for item in supporting):
+        return True, CitationStatus.MATCHED, "Supporting evidence is in another message of the cited email thread"
+    return False, CitationStatus.MISMATCHED, "No supporting span was found in the cited source or document"
 
 
 def verify_answer_claims(
@@ -398,31 +558,65 @@ def verify_answer_claims(
         evidence, count = _candidate_evidence(claim, evidence_blocks)
         evidence_by_claim.append(evidence)
         inspected += count
-    nli_results, model_calls, model_name = _run_nli_batch(
-        claims, evidence_by_claim, use_nli=use_nli, nli_model=nli_model
-    )
-
-    verifications: List[ClaimVerification] = []
-    for claim, evidence, (nli_label, nli_score) in zip(claims, evidence_by_claim, nli_results):
+    nli_results = [_NLIResult() for _ in claims]
+    nli_indices = []
+    for index, (claim, evidence) in enumerate(zip(claims, evidence_by_claim)):
         best = evidence[0] if evidence else None
         lexical = best.support_score if best else 0.0
-        cited = set(claim.cited_source_indices)
-        citation_correct = None if not cited else any(
-            item.source_index in cited and item.support_score >= PARTIAL_THRESHOLD for item in evidence
+        check_text = claim.verification_text or claim.text
+        deterministic = bool(best and _deterministic_contradiction(check_text, best.text, lexical))
+        if claim.claim_type != "EVIDENCE_ABSENCE" and lexical < SUPPORTED_THRESHOLD and not deterministic:
+            nli_indices.append(index)
+    selected_nli, model_calls, model_name = _run_nli_batch(
+        [claims[index] for index in nli_indices],
+        [evidence_by_claim[index] for index in nli_indices],
+        use_nli=use_nli,
+        nli_model=nli_model,
+    )
+    for index, result in zip(nli_indices, selected_nli):
+        nli_results[index] = result
+
+    verifications: List[ClaimVerification] = []
+    for claim, evidence, nli in zip(claims, evidence_by_claim, nli_results):
+        declarative = [item for item in evidence if not item.text.rstrip().endswith("?")]
+        best = declarative[0] if declarative else (evidence[0] if evidence else None)
+        lexical = best.support_score if best else 0.0
+        citation_correct, citation_status, citation_reason = _citation_assessment(claim, evidence)
+        check_text = claim.verification_text or claim.text
+        absence_supported = _absence_supported(claim, evidence_blocks)
+        if absence_supported is True and claim.cited_source_indices:
+            citation_correct = True
+            citation_status = CitationStatus.MATCHED
+            citation_reason = "The cited document establishes the scope; absence was checked across the remaining context"
+        aligned_evidence = any(
+            item.support_score >= PARTIAL_THRESHOLD
+            and not item.text.rstrip().endswith("?")
+            and _polarity(check_text) == _polarity(item.text)
+            for item in evidence
         )
-        contradiction = bool(best and _deterministic_contradiction(claim.text, best.text, lexical))
+        deterministic_contradiction = bool(
+            best and not aligned_evidence
+            and _deterministic_contradiction(check_text, best.text, lexical)
+        )
+        contradiction = deterministic_contradiction
         if (
-            nli_label and "CONTRADICTION" in nli_label
-            and (nli_score or 0.0) >= NLI_CONTRADICTION_THRESHOLD
-            and lexical >= INFERENCE_THRESHOLD
+            (nli.contradiction_score or 0.0) >= NLI_CONTRADICTION_THRESHOLD
+            and lexical >= PARTIAL_THRESHOLD
+            and not aligned_evidence
+            and not (best and best.text.rstrip().endswith("?"))
+            and _polarity(check_text) != _polarity(best.text if best else "")
         ):
             contradiction = True
-        if contradiction:
-            status, confidence, reason = ClaimStatus.CONTRADICTED, max(lexical, nli_score or 0.0), "The closest evidence expresses the opposite polarity"
-        elif nli_label and "ENTAIL" in nli_label and (nli_score or 0.0) >= NLI_ENTAILMENT_THRESHOLD:
-            status, confidence, reason = ClaimStatus.SUPPORTED, max(lexical, nli_score or 0.0), "Entailed by the selected evidence"
+        if absence_supported is True:
+            status, confidence, reason = ClaimStatus.SUPPORTED, 1.0, "The stated absence is confirmed across the inspected context"
+        elif absence_supported is False:
+            status, confidence, reason = ClaimStatus.CONTRADICTED, 1.0, "The context contains the information claimed to be absent"
+        elif contradiction:
+            status, confidence, reason = ClaimStatus.CONTRADICTED, max(lexical, nli.contradiction_score or 0.0), "The closest evidence expresses the opposite polarity"
         elif lexical >= SUPPORTED_THRESHOLD:
             status, confidence, reason = ClaimStatus.SUPPORTED, lexical, "Direct lexical support in the selected evidence"
+        elif (nli.entailment_score or 0.0) >= NLI_ENTAILMENT_THRESHOLD:
+            status, confidence, reason = ClaimStatus.SUPPORTED, max(lexical, nli.entailment_score or 0.0), "Entailed by the selected evidence"
         elif lexical >= PARTIAL_THRESHOLD or (
             lexical >= INFERENCE_THRESHOLD and _looks_multi_fact(claim.text)
         ):
@@ -434,15 +628,38 @@ def verify_answer_claims(
         else:
             status, confidence, reason = ClaimStatus.UNSUPPORTED, 1.0 - lexical, "No selected evidence directly supports this claim"
         if citation_correct is False and status == ClaimStatus.SUPPORTED:
-            reason = "Supported by the context, but not by the cited source"
+            cited = set(claim.cited_source_indices)
+            cited_documents = {
+                item.document_id for item in evidence
+                if item.source_index in cited and item.document_id
+            }
+            if (
+                best and (
+                    best.source_index in cited
+                    or (best.document_id and best.document_id in cited_documents)
+                )
+                and (nli.entailment_score or 0.0) >= NLI_ENTAILMENT_THRESHOLD
+            ):
+                citation_correct = True
+                citation_status = CitationStatus.MATCHED
+                citation_reason = "The cited source contains the premise accepted by NLI"
+            else:
+                citation_reason = "The fact is supported, but the cited source does not contain its evidence"
         associated = tuple(item for item in evidence if item.support_score >= INFERENCE_THRESHOLD)
         verifications.append(ClaimVerification(
             claim=claim, status=status, confidence=min(1.0, max(0.0, confidence)),
             evidence=associated, reason=reason, citation_correct=citation_correct,
-            nli_label=nli_label, nli_score=nli_score,
+            citation_status=citation_status, citation_reason=citation_reason,
+            nli_label=nli.label, nli_score=nli.score,
+            nli_entailment_score=nli.entailment_score,
+            nli_contradiction_score=nli.contradiction_score,
         ))
     verification_ms = (perf_counter() - verification_started) * 1000.0
-    caveat_required = any(item.status != ClaimStatus.SUPPORTED or item.citation_correct is False for item in verifications)
+    caveat_required = any(
+        item.status != ClaimStatus.SUPPORTED
+        or (item.status == ClaimStatus.SUPPORTED and item.citation_status == CitationStatus.MISMATCHED)
+        for item in verifications
+    )
     return FaithfulnessReview(
         status="CAVEAT" if caveat_required else "OK", claims=tuple(verifications),
         extraction_ms=extraction_ms, verification_ms=verification_ms,

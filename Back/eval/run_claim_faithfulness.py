@@ -8,7 +8,7 @@ from time import perf_counter
 from typing import Any, Dict, List
 
 from eval.ablation import percentile
-from rag_core.faithfulness import ClaimStatus, verify_answer_claims
+from rag_core.faithfulness import CitationStatus, ClaimStatus, verify_answer_claims
 
 
 BACK_DIR = Path(__file__).resolve().parent.parent
@@ -32,6 +32,7 @@ def run(config_path: Path, output_override: Path | None = None) -> Path:
     mapping_correct = mapping_total = 0
     unnecessary_caveats = missing_caveats = 0
     latencies: List[float] = []
+    confusion: Dict[str, Dict[str, int]] = {}
 
     for row in rows:
         started = perf_counter()
@@ -43,18 +44,29 @@ def run(config_path: Path, output_override: Path | None = None) -> Path:
         )
         elapsed_ms = (perf_counter() - started) * 1000.0
         latencies.append(elapsed_ms)
-        expected_statuses = row["expected_statuses"]
+        expected_statuses = row.get("expected_statuses") or [item["status"] for item in row["expected_claims"]]
         expected_citations = row.get("expected_citation_correct") or [None] * len(expected_statuses)
+        expected_citation_statuses = row.get("expected_citation_statuses") or [None] * len(expected_statuses)
         expected_sources = row.get("expected_sources") or [None] * len(expected_statuses)
         claim_rows = []
         for index, verification in enumerate(review.claims):
             expected_status = expected_statuses[index]
             expected_citation = expected_citations[index] if index < len(expected_citations) else None
+            expected_citation_status = (
+                expected_citation_statuses[index] if index < len(expected_citation_statuses) else None
+            )
             predicted_problem = (
                 verification.status != ClaimStatus.SUPPORTED
-                or verification.citation_correct is False
+                or (
+                    verification.status == ClaimStatus.SUPPORTED
+                    and verification.citation_status == CitationStatus.MISMATCHED
+                )
             )
-            expected_problem = expected_status != ClaimStatus.SUPPORTED.value or expected_citation is False
+            expected_problem = (
+                expected_status != ClaimStatus.SUPPORTED.value
+                or expected_citation is False
+                or expected_citation_status == CitationStatus.MISMATCHED.value
+            )
             if verification.status == ClaimStatus.SUPPORTED:
                 predicted_supported += 1
                 supported_tp += int(expected_status == ClaimStatus.SUPPORTED.value)
@@ -68,13 +80,18 @@ def run(config_path: Path, output_override: Path | None = None) -> Path:
             predicted_source = verification.evidence[0].source_index if verification.evidence else None
             if expected_source is not None:
                 mapping_total += 1
-                mapping_correct += int(predicted_source == expected_source)
+                allowed_sources = expected_source if isinstance(expected_source, list) else [expected_source]
+                mapping_correct += int(predicted_source in allowed_sources)
+            confusion.setdefault(expected_status, {}).setdefault(verification.status.value, 0)
+            confusion[expected_status][verification.status.value] += 1
             claim_rows.append({
                 "text": verification.claim.text,
                 "expected_status": expected_status,
                 "predicted_status": verification.status.value,
                 "expected_citation_correct": expected_citation,
                 "predicted_citation_correct": verification.citation_correct,
+                "expected_citation_status": expected_citation_status,
+                "predicted_citation_status": verification.citation_status.value,
                 "expected_source": expected_source,
                 "predicted_source": predicted_source,
                 "reason": verification.reason,
@@ -111,6 +128,7 @@ def run(config_path: Path, output_override: Path | None = None) -> Path:
             ),
             "evidence_mapping_accuracy": mapping_correct / mapping_total if mapping_total else 0.0,
             "unnecessary_caveat_rate": unnecessary_caveats / len(results) if results else 0.0,
+            "false_caveat_rate": unnecessary_caveats / len(results) if results else 0.0,
             "missing_caveat_rate": missing_caveats / len(results) if results else 0.0,
             "claims_per_response_mean": claim_count / len(results) if results else 0.0,
             "evidence_chunks_inspected_mean": mean(
@@ -125,6 +143,7 @@ def run(config_path: Path, output_override: Path | None = None) -> Path:
             "verification_mean_ms": mean(
                 item["review"]["verification_ms"] for item in results
             ) if results else 0.0,
+            "confusion_matrix": confusion,
         },
         "results": results,
     }

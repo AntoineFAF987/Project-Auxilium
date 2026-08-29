@@ -43,6 +43,7 @@ class PostGenerationReviewOut(BaseModel):
             "INFERENCE",
             "UNSUPPORTED_CLAIM",
             "CONTRADICTED_CLAIM",
+            "CITATION_MISMATCH",
             "WEB_RECOMMENDED",
         ]
     ] = None

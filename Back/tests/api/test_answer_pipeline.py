@@ -435,7 +435,7 @@ class AnswerPipelineTests(unittest.TestCase):
                 claim_review=claim_review,
             )
 
-        self.assertEqual(review.caveat_type, "PARTIAL_EVIDENCE")
+        self.assertEqual(review.caveat_type, "CITATION_MISMATCH")
         self.assertIn("source citée", review.message or "")
 
     def test_english_tropicalization_keeps_sourced_local_answer_when_verifier_asks_web(self):

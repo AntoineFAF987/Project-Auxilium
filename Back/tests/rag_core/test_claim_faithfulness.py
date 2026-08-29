@@ -1,4 +1,5 @@
 from rag_core.faithfulness import (
+    CitationStatus,
     ClaimStatus,
     extract_answer_claims,
     verify_answer_claims,
@@ -84,6 +85,15 @@ def test_contradiction_detects_opposite_polarity():
     assert _statuses(review) == [ClaimStatus.CONTRADICTED]
 
 
+def test_contradiction_detects_curly_apostrophe_negation():
+    review = verify_answer_claims(
+        "La tropicalisation complète du 3730 est possible.",
+        [_block("La tropicalisation complète du 3730 n’est plus possible.")],
+        use_nli=False,
+    )
+    assert _statuses(review) == [ClaimStatus.CONTRADICTED]
+
+
 def test_multiple_claims_map_to_distinct_sources():
     review = verify_answer_claims(
         "PostgreSQL 16 réduit le CPU de 11 %. Redis 7.2 est approuvé pour la production.",
@@ -101,15 +111,86 @@ def test_supported_claim_with_wrong_citation_is_flagged():
     review = verify_answer_claims(
         "Le 3730 possède un circuit imprimé verni.",
         [
-            _block("Le 3730 possède un circuit imprimé verni.", "right:c1"),
-            _block("Le 3725 utilise un boîtier en aluminium.", "wrong:c2"),
+            _block("Le 3730 possède un circuit imprimé verni.", "right:c1", document="right"),
+            _block("Le 3725 utilise un boîtier en aluminium.", "wrong:c2", document="wrong"),
         ],
         cited_source_indices=[2],
         use_nli=False,
     )
     assert _statuses(review) == [ClaimStatus.SUPPORTED]
     assert review.claims[0].citation_correct is False
+    assert review.claims[0].citation_status == CitationStatus.MISMATCHED
     assert review.caveat_required is True
+
+
+def test_supported_claim_in_another_chunk_of_cited_document_keeps_fact_and_citation_separate():
+    review = verify_answer_claims(
+        "Le 3730 possède un circuit imprimé verni.",
+        [
+            _block("Objet : tropicalisation du 3730.", "mail:header", document="mail-3730"),
+            _block("Le 3730 possède un circuit imprimé verni.", "mail:body", document="mail-3730"),
+        ],
+        cited_source_indices=[1],
+        use_nli=False,
+    )
+    assert _statuses(review) == [ClaimStatus.SUPPORTED]
+    assert review.claims[0].citation_status == CitationStatus.MATCHED
+    assert "another chunk" in (review.claims[0].citation_reason or "")
+    assert review.caveat_required is False
+
+
+def test_real_3725_3730_prudent_answer_has_no_false_partial_evidence():
+    answer = (
+        "D’après le **contexte fourni**, la tropicalisation du **Du Trovis 3730** n’est plus possible en raison "
+        "d’un **changement de technologie au niveau du détecteur de position**. Cette information est explicitement "
+        "mentionnée dans le document [1], qui précise que l’application d’un vernis supplémentaire modifierait le "
+        "comportement du détecteur.\n\nCependant, **aucune information n’est donnée dans le contexte concernant le "
+        "positionneur 3725**. Le document [1] traite uniquement du 3730, et les autres sources ne mentionnent ni ce "
+        "modèle ni sa tropicalisation."
+    )
+    context = _block(
+        "Du Trovis 3730 possède déjà un vernis à voir photo Ce n’est pas une tropicalisation complète. "
+        "Elle permet de tenir les spec de la fiche T à savoir : –20 à 80 °C pour toutes les exécutions. "
+        "La tropicalisation n’est plus possible, le changement de technologie au niveau du détecteur de position "
+        "ne le permet plus. L’application d’un vernis supplémentaire change son comportement.",
+        "mail-3730:body", document="mail-3730",
+    )
+    review = verify_answer_claims(answer, [context], cited_source_indices=[1], use_nli=False)
+    assert _statuses(review) == [ClaimStatus.SUPPORTED] * 4
+    assert review.claims[1].citation_status == CitationStatus.MATCHED
+    assert review.claims[2].claim.claim_type == "EVIDENCE_ABSENCE"
+    assert review.status == "OK"
+    assert review.caveat_required is False
+
+
+def test_markdown_and_inline_citation_do_not_lower_support():
+    review = verify_answer_claims(
+        "D’après le **contexte fourni**, le **3730** possède déjà un **vernis** [1].",
+        [_block("Le 3730 possède déjà un vernis.")],
+        cited_source_indices=[1],
+        use_nli=False,
+    )
+    assert _statuses(review) == [ClaimStatus.SUPPORTED]
+    assert review.claims[0].citation_status == CitationStatus.MATCHED
+
+
+def test_prudent_absence_for_neighbor_product_is_supported_not_hallucinated():
+    review = verify_answer_claims(
+        "Aucune information concernant le positionneur 3725 n’est disponible dans ce contexte.",
+        [_block("La tropicalisation du Trovis 3730 n’est plus possible.")],
+        use_nli=False,
+    )
+    assert _statuses(review) == [ClaimStatus.SUPPORTED]
+    assert review.caveat_required is False
+
+
+def test_genuinely_partial_claim_remains_partial():
+    review = verify_answer_claims(
+        "Le 3730 possède un circuit imprimé verni et un boîtier en titane.",
+        [_block("Le 3730 possède un circuit imprimé verni.")],
+        use_nli=False,
+    )
+    assert _statuses(review) == [ClaimStatus.PARTIALLY_SUPPORTED]
 
 
 def test_all_claims_use_one_batched_nli_invocation():

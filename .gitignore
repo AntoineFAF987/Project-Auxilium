@@ -30,6 +30,13 @@ Back/data/settings.db-shm
 Back/data/settings.db-wal
 Back/api/chat_secret.key
 **/token_cache.bin
+Back/data/email_attachments/
+Back/data/emails_cache/
+Back/data/emails_flattened/
+Back/data/index_rag/
+Back/eval/reports/
+Back/eval/data/claim_faithfulness_real_*.jsonl
+Back/eval/configs/claim_faithfulness_real_*.json
 
 # --- Fichiers locaux / temporaires ---
 *.backup
