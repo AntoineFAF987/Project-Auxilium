@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import re, json, uuid, hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, List, Dict, Literal, Optional, Tuple
@@ -877,6 +877,43 @@ def run_answer_pipeline(
     validations: Dict[str, Any] = {}
     q = validate_answer_request(body)
 
+    # The visible conversation lifecycle is independent from the response path:
+    # persist the user turn before processing, then persist exactly one completed
+    # assistant turn through ``finalize_result`` below.  This applies equally to
+    # RAG, general, conversational and streaming requests.
+    tenant_id, user_id = _try_get_auth_ids(request)
+    chat_id = (body.thread_id or "").strip()
+    user_turn_persisted = False
+    if tenant_id and user_id:
+        try:
+            title = (q[:60] + "…") if len(q) > 60 else q
+            chat_id = chat_id or str(uuid.uuid4())
+            create_chat(tenant_id, user_id, title=title or "Nouveau chat", chat_id=chat_id)
+            append_message(tenant_id, user_id, chat_id, "user", q, meta={"request_id": request_id})
+            user_turn_persisted = True
+        except Exception:
+            # Persistence failures must never prevent a response.  If processing
+            # later fails after a successful user write, that user turn remains.
+            pass
+
+    def finalize_result(result: AnswerPipelineResult) -> AnswerPipelineResult:
+        """Persist one complete assistant message after any successful path."""
+        if tenant_id and user_id and user_turn_persisted:
+            try:
+                append_message(
+                    tenant_id,
+                    user_id,
+                    chat_id,
+                    "assistant",
+                    result.answer,
+                    meta={"mode": result.mode, "review": result.review.to_dict(), "request_id": request_id},
+                )
+            except Exception:
+                # Keep the HTTP/SSE result available even if its assistant write fails.
+                pass
+        persisted_chat_id = chat_id if user_turn_persisted else result.chat_id
+        return replace(result, chat_id=(persisted_chat_id or None))
+
     # --- Historique & thread ---
     if body.reply_history:
         raw_hist: List[Dict] = [{"role": m.role, "content": m.content} for m in body.reply_history]
@@ -927,7 +964,7 @@ def run_answer_pipeline(
                 q, "", history=hist, token_sink=token_sink,
                 roleplay_mode=True, max_tokens=220,
             )
-            return _result(answer=ans, sources=[], request_id=request_id)
+            return finalize_result(_result(answer=ans, sources=[], request_id=request_id))
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout (roleplay)")
         except Exception as e:
@@ -944,7 +981,7 @@ def run_answer_pipeline(
                 q, reply_preamble, history=hist, token_sink=token_sink,
                 smalltalk_mode=True, smalltalk_kind=skind, max_tokens=200,
             )
-            return _result(answer=ans, sources=[], request_id=request_id)
+            return finalize_result(_result(answer=ans, sources=[], request_id=request_id))
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout (smalltalk)")
         except Exception as e:
@@ -956,7 +993,7 @@ def run_answer_pipeline(
         if math_ans:
             sess["no_context_once"] = True
             SESSIONS[thread_id] = sess
-            return _result(answer=math_ans, sources=[], request_id=request_id)
+            return finalize_result(_result(answer=math_ans, sources=[], request_id=request_id))
 
     # --- Maths directes ---
     if _looks_like_equation(q):
@@ -965,13 +1002,13 @@ def run_answer_pipeline(
             sess["last_math"] = q
             sess["no_context_once"] = True
             SESSIONS[thread_id] = sess
-            return _result(answer=math_ans, sources=[], request_id=request_id)
+            return finalize_result(_result(answer=math_ans, sources=[], request_id=request_id))
 
     # --- Mode "general" forcé par l'utilisateur ---
     if mode_in == "general":
         try:
             ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink)
-            return _result(answer=ans, sources=[], mode="GENERAL(no-context)", ctx_len=len(reply_preamble), request_id=request_id)
+            return finalize_result(_result(answer=ans, sources=[], mode="GENERAL(no-context)", ctx_len=len(reply_preamble), request_id=request_id))
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
         except Exception as e:
@@ -993,11 +1030,11 @@ def run_answer_pipeline(
                 q, reply_preamble, history=hist, token_sink=token_sink,
                 conversational_mode=True, max_tokens=160,
             )
-            return _result(
+            return finalize_result(_result(
                 answer=ans, sources=[], mode="GENERAL(conversational)",
                 ctx_len=len(reply_preamble), request_id=request_id,
                 route_mode="general", validations={"turn_type": turn_type, "evidence_mode": "none"},
-            )
+            ))
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
         except Exception as e:
@@ -1024,7 +1061,7 @@ def run_answer_pipeline(
         _log_event(request_id, {"event": "vague_question_fallback", "q": q, "user_msg_count": user_msg_count})
         try:
             ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink)
-            return _result(answer=ans, sources=[], mode="GENERAL(vague-no-history)", ctx_len=len(reply_preamble), request_id=request_id)
+            return finalize_result(_result(answer=ans, sources=[], mode="GENERAL(vague-no-history)", ctx_len=len(reply_preamble), request_id=request_id))
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
         except Exception as e:
@@ -1032,16 +1069,16 @@ def run_answer_pipeline(
 
     if not _local_index_ready():
         if mode_in in {"local", "web_index"}:
-            return _result(
+            return finalize_result(_result(
                 answer=_missing_index_message(mode_in),
                 sources=[],
                 mode="STRICT(local)",
                 ctx_len=0,
                 request_id=request_id,
-            )
+            ))
         try:
             ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink)
-            return _result(answer=ans, sources=[], mode="GENERAL(no-index)", ctx_len=len(reply_preamble), request_id=request_id)
+            return finalize_result(_result(answer=ans, sources=[], mode="GENERAL(no-index)", ctx_len=len(reply_preamble), request_id=request_id))
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
         except Exception as e:
@@ -1163,7 +1200,7 @@ def run_answer_pipeline(
     cached = response_cache.get(ck)
     if cached:
         cached["request_id"] = request_id
-        return _result(**cached, route_mode=route_mode)
+        return finalize_result(_result(**cached, route_mode=route_mode))
 
     # -------- Verrou post-maths + RESPECT strict du route_mode --------
     if sess.get("no_context_once"):
@@ -1201,7 +1238,7 @@ def run_answer_pipeline(
         except FuturesTimeout:
             out = {"answer": "Recherche web trop longue. Réessaie ou passe en mode local.", "sources": [], "mode": "STRICT(web_live)", "ctx_len": 0}
             response_cache.set(ck, out)
-            return _result(**out, request_id=request_id, route_mode=route_mode, validations=validations)
+            return finalize_result(_result(**out, request_id=request_id, route_mode=route_mode, validations=validations))
         except Exception:
             web_text = ""
 
@@ -1209,7 +1246,7 @@ def run_answer_pipeline(
         if not web_text.strip():
             out = {"answer": "Je n’ai rien trouvé via la **recherche web en direct**.", "sources": [], "mode": "STRICT(web_live)", "ctx_len": 0}
             response_cache.set(ck, out)
-            return _result(**out, request_id=request_id, route_mode=route_mode, validations=validations)
+            return finalize_result(_result(**out, request_id=request_id, route_mode=route_mode, validations=validations))
 
         context_for_llm = f"{reply_preamble}{web_text}"
         use_strict = True
@@ -1222,13 +1259,13 @@ def run_answer_pipeline(
             msg = "Je n’ai rien trouvé de pertinent dans les **sources autorisées**."
             out = {"answer": msg, "sources": [], "mode": "STRICT(local)", "ctx_len": 0}
             response_cache.set(ck, out)
-            return _result(**out, request_id=request_id, route_mode=route_mode, validations=validations)
+            return finalize_result(_result(**out, request_id=request_id, route_mode=route_mode, validations=validations))
 
         if evidence_mode == "none":
             msg = "J’ai parcouru tes **sources**, mais rien de suffisamment pertinent."
             out = {"answer": msg, "sources": [], "mode": "STRICT(local)", "ctx_len": len(context_local)}
             response_cache.set(ck, out)
-            return _result(**out, request_id=request_id, route_mode=route_mode, validations=validations)
+            return finalize_result(_result(**out, request_id=request_id, route_mode=route_mode, validations=validations))
 
         context_for_llm = reply_preamble + context_local
         use_strict = True
@@ -1378,32 +1415,9 @@ def run_answer_pipeline(
     }
     if not body.reply_to:
         response_cache.set(ck, out)
-    # ------ Persistance (optionnelle si Authorization présent) ------
-    tenant_id, user_id = _try_get_auth_ids(request)
-    chat_id = (body.thread_id or "").strip()
-    if tenant_id and user_id:
-        try:
-            # Crée la conversation si besoin
-            title = (q[:60] + "…") if len(q) > 60 else q
-            chat_id = chat_id or str(uuid.uuid4())
-            create_chat(tenant_id, user_id, title=title or "Nouveau chat", chat_id=chat_id)
-            # Ajoute les messages (user puis assistant)
-            append_message(tenant_id, user_id, chat_id, "user", q, meta={"request_id": request_id})
-            append_message(
-                tenant_id,
-                user_id,
-                chat_id,
-                "assistant",
-                answer,
-                meta={"mode": mode_label, "review": review.to_dict()},
-            )
-        except Exception:
-            # Ne bloque pas la réponse si la persistance échoue
-            pass
-    return _result(
+    return finalize_result(_result(
         **out,
         request_id=request_id,
-        chat_id=(chat_id or None),
         route_mode=route_mode,
         validations=validations,
-    )
+    ))

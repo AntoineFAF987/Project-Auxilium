@@ -4,7 +4,7 @@ import sys
 import types
 import unittest
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -938,6 +938,86 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(result.chat_id, "chat-1")
         create.assert_called_once()
         self.assertEqual(append.call_count, 2)
+
+    def test_smalltalk_persists_user_and_assistant_without_retrieval(self):
+        from api import answer_pipeline as pipeline
+
+        index = _Index([self.chunk], [0.9])
+        with (
+            self._patch_pipeline(index=index),
+            patch.object(pipeline, "classify_smalltalk_semantic", return_value="greeting"),
+            patch.object(pipeline, "_try_get_auth_ids", return_value=("tenant-1", "user-1")),
+            patch.object(pipeline, "create_chat") as create,
+            patch.object(pipeline, "append_message") as append,
+        ):
+            result = run_answer_pipeline(AskIn(q="Bonjour", thread_id="chat-smalltalk"), _request())
+
+        self.assertEqual(index.search_calls, [])
+        create.assert_called_once()
+        self.assertEqual(append.call_count, 2)
+        self.assertEqual([call.args[3] for call in append.call_args_list], ["user", "assistant"])
+        self.assertEqual([call.args[4] for call in append.call_args_list], ["Bonjour", result.answer])
+        self.assertEqual(result.chat_id, "chat-smalltalk")
+
+    def test_conversational_and_general_paths_persist_without_rag(self):
+        from api import answer_pipeline as pipeline
+
+        for body, turn_type in (
+            (AskIn(q="Je souhaite expliquer une situation", thread_id="chat-conversation"), "conversational_continuation"),
+            (AskIn(q="Explique ce principe", source_mode="general", thread_id="chat-general"), None),
+        ):
+            index = _Index([self.chunk], [0.9])
+            with (
+                self._patch_pipeline(index=index),
+                patch.object(pipeline, "classify_turn", return_value=type("Turn", (), {"turn_type": turn_type, "decision_reason": "test"})()) if turn_type else nullcontext(),
+                patch.object(pipeline, "_try_get_auth_ids", return_value=("tenant-1", "user-1")),
+                patch.object(pipeline, "create_chat"),
+                patch.object(pipeline, "append_message") as append,
+            ):
+                run_answer_pipeline(body, _request())
+            self.assertEqual(index.search_calls, [])
+            self.assertEqual([call.args[3] for call in append.call_args_list], ["user", "assistant"])
+
+    def test_streamed_turn_persists_one_complete_assistant_message(self):
+        from api import answer_pipeline as pipeline
+
+        streamed = []
+        with (
+            self._patch_pipeline(post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(pipeline, "_try_get_auth_ids", return_value=("tenant-1", "user-1")),
+            patch.object(pipeline, "create_chat"),
+            patch.object(pipeline, "append_message") as append,
+            patch.object(pipeline, "_safe_llm_stream", return_value=iter([
+                "Première partie ", "et dernière partie. <CITATIONS>[1]</CITATIONS>",
+            ])),
+        ):
+            result = run_answer_pipeline(
+                AskIn(q="Question locale", source_mode="local", thread_id="chat-stream"),
+                _request("/ask/stream"),
+                token_sink=streamed.append,
+            )
+
+        self.assertEqual(streamed, ["Première partie ", "et dernière partie. <CITATIONS>[1]</CITATIONS>"])
+        self.assertEqual(append.call_count, 2)
+        self.assertEqual(append.call_args_list[1].args[3], "assistant")
+        self.assertEqual(append.call_args_list[1].args[4], result.answer)
+
+    def test_processing_error_keeps_the_already_persisted_user_turn(self):
+        from api import answer_pipeline as pipeline
+
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "classify_smalltalk_semantic", return_value="greeting"),
+            patch.object(pipeline, "_try_get_auth_ids", return_value=("tenant-1", "user-1")),
+            patch.object(pipeline, "create_chat"),
+            patch.object(pipeline, "append_message") as append,
+            patch.object(pipeline, "_safe_llm", side_effect=RuntimeError("generation failed")),
+        ):
+            with self.assertRaises(HTTPException):
+                run_answer_pipeline(AskIn(q="Bonjour", thread_id="chat-error"), _request())
+
+        self.assertEqual(append.call_count, 1)
+        self.assertEqual(append.call_args.args[3], "user")
 
     def test_cached_response_keeps_the_same_public_result(self):
         llm = Mock(side_effect=self._llm)
