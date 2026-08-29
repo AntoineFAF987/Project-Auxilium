@@ -201,6 +201,7 @@ CONTEXT_RELEVANCE_THRESHOLD = _RUNTIME_SETTINGS.thresholds.context_relevance
 ENABLE_RERANKER = _RUNTIME_SETTINGS.features.enable_reranker
 ENABLE_CONDENSATION = _RUNTIME_SETTINGS.features.enable_query_condensation
 ENABLE_EXPANSION = _RUNTIME_SETTINGS.features.enable_query_expansion
+ENABLE_POST_GENERATION_REVIEW = _RUNTIME_SETTINGS.features.enable_post_generation_review
 ENABLE_FAITHFULNESS_CHECK = _RUNTIME_SETTINGS.features.enable_faithfulness_check
 FAITHFULNESS_THRESHOLD = _RUNTIME_SETTINGS.thresholds.faithfulness
 FAITHFULNESS_STRICT_ONLY = _RUNTIME_SETTINGS.features.faithfulness_strict_only
@@ -1088,7 +1089,7 @@ def run_answer_pipeline(
     faithfulness_result: Optional[Dict[str, Any]] = None
     claim_review: Optional[FaithfulnessReview] = None
     context_for_check = ""
-    if ENABLE_FAITHFULNESS_CHECK:
+    if ENABLE_POST_GENERATION_REVIEW and ENABLE_FAITHFULNESS_CHECK:
         try:
             # Déterminer le contexte pour la vérification (local strict ou web strict)
             if route_mode == "strict_local":
@@ -1149,16 +1150,19 @@ def run_answer_pipeline(
     else:
         sources = []
 
-    # La revue arrive apres la generation et ne peut plus remplacer la reponse.
-    review = _post_generation_review(
-        q,
-        answer,
-        context_for_check or (context_for_llm if use_strict else ""),
-        sources,
-        faithfulness_result,
-        claim_review,
-    )
-    validations["post_answer"] = {"performed": True, **review.to_dict()}
+    # Contrat API conservé : lorsque les post-checks sont désactivés, la revue
+    # reste neutre et aucun travail n'est exécuté après la génération.
+    review = PostGenerationReview()
+    if ENABLE_POST_GENERATION_REVIEW:
+        review = _post_generation_review(
+            q,
+            answer,
+            context_for_check or (context_for_llm if use_strict else ""),
+            sources,
+            faithfulness_result,
+            claim_review,
+        )
+        validations["post_answer"] = {"performed": True, **review.to_dict()}
 
     # Logs structurés
     _log_event(request_id, {

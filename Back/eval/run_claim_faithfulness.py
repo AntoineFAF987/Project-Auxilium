@@ -21,8 +21,14 @@ def _resolve(value: str) -> Path:
 
 def run(config_path: Path, output_override: Path | None = None) -> Path:
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    dataset_path = _resolve(config["dataset"]).resolve()
-    rows = [json.loads(line) for line in dataset_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    dataset_values = config.get("datasets") or [config["dataset"]]
+    dataset_paths = [_resolve(value).resolve() for value in dataset_values]
+    rows = [
+        json.loads(line)
+        for dataset_path in dataset_paths
+        for line in dataset_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     use_nli = bool(config.get("use_nli", False))
 
     results: List[Dict[str, Any]] = []
@@ -112,7 +118,11 @@ def run(config_path: Path, output_override: Path | None = None) -> Path:
     report = {
         "schema_version": 1,
         "benchmark_name": config.get("benchmark_name"),
-        "configuration": {**config, "dataset": str(dataset_path)},
+        "configuration": {
+            **config,
+            "datasets": [str(path) for path in dataset_paths],
+            **({"dataset": str(dataset_paths[0])} if len(dataset_paths) == 1 else {}),
+        },
         "case_count": len(results),
         "claim_count": claim_count,
         "metrics": {
@@ -142,6 +152,21 @@ def run(config_path: Path, output_override: Path | None = None) -> Path:
             ) if results else 0.0,
             "verification_mean_ms": mean(
                 item["review"]["verification_ms"] for item in results
+            ) if results else 0.0,
+            "span_selection_mean_ms": mean(
+                item["review"].get("span_selection_ms", 0.0) for item in results
+            ) if results else 0.0,
+            "nli_mean_ms": mean(
+                item["review"].get("nli_ms", 0.0) for item in results
+            ) if results else 0.0,
+            "candidate_spans_mean": mean(
+                item["review"].get("candidate_span_count", 0) for item in results
+            ) if results else 0.0,
+            "nli_pairs_mean": mean(
+                item["review"].get("nli_pair_count", 0) for item in results
+            ) if results else 0.0,
+            "nli_evidence_spans_mean": mean(
+                item["review"].get("nli_evidence_span_count", 0) for item in results
             ) if results else 0.0,
             "confusion_matrix": confusion,
         },

@@ -30,6 +30,7 @@ rag_params = {
     "enable_web_search": runtime_settings.features.enable_web_search,
     "enable_query_condensation": runtime_settings.features.enable_query_condensation,
     "enable_query_expansion": runtime_settings.features.enable_query_expansion,
+    "enable_post_generation_review": runtime_settings.features.enable_post_generation_review,
     "enable_faithfulness_check": runtime_settings.features.enable_faithfulness_check,
     "faithfulness_threshold": runtime_settings.thresholds.faithfulness,
     "faithfulness_strict_only": runtime_settings.features.faithfulness_strict_only,

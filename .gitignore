@@ -36,6 +36,7 @@ Back/data/emails_flattened/
 Back/data/index_rag/
 Back/eval/reports/
 Back/eval/data/claim_faithfulness_real_*.jsonl
+Back/eval/data/claim_faithfulness_logic_*.jsonl
 Back/eval/configs/claim_faithfulness_real_*.json
 
 # --- Fichiers locaux / temporaires ---

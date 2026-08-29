@@ -1,5 +1,21 @@
 # Claim-level faithfulness v1
 
+## Runtime status
+
+`enable_post_generation_review = false` and
+`enable_faithfulness_check = false` are the current runtime defaults. All
+post-generation review is disabled by default. Claim-level
+faithfulness is retained for benchmark/evaluation and can be re-enabled after
+further calibration. To reactivate runtime review, set both required flags in
+`config.json`, or use `AUXILIUM_ENABLE_POST_GENERATION_REVIEW=true` and, for
+claim-level review, `AUXILIUM_ENABLE_FAITHFULNESS_CHECK=true`, then restart the
+service.
+
+With the global flag disabled, the user runtime does not run the general
+post-review, freshness/citation/indirect-evidence checks, claim extraction,
+evidence-span selection, or NLI. It emits no post-generation caveat. The
+benchmark calls the checker directly and is unaffected.
+
 This post-generation layer is non-destructive. It receives only the completed
 answer and the exact final context blocks used for generation. It does not run
 retrieval, rewrite the answer, change abstention, or delay token streaming.

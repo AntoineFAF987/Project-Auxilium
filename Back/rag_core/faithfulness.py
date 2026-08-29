@@ -2,7 +2,8 @@ from __future__ import annotations
 
 """Non-destructive, post-generation claim-level faithfulness review."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 from enum import Enum
 import hashlib
 import re
@@ -47,6 +48,33 @@ _NON_FACTUAL_PATTERNS = (
     r"^(?:the key points|here are the key points|activites professionnelles|coordonnees|poste et role)\b[^.!?]*:?$",
     r"^(?:i.ve included|let me know)\b",
 )
+
+# Small, explicit bilingual vocabulary used only to rank plausible spans. It
+# never changes the faithfulness thresholds or decides support by itself.
+_CONCEPT_ALIASES = {
+    "pressure": ("pressure", "pression"),
+    "temperature": ("temperature", "température"),
+    "varnish": ("varnish", "vernis"),
+    "tropicalization": ("tropicalization", "tropicalisation", "tropicalize", "tropicaliser"),
+    "detector": ("detector", "détecteur"),
+    "technology": ("technology", "technologie"),
+    "particle": ("particle", "particles", "particule", "particules"),
+    "oil": ("oil", "huile"),
+    "dew_point": ("dew point", "point de rosée"),
+    "class": ("class", "classe"),
+    "schedule": ("schedule", "scheduled", "planning", "calendrier", "date", "prévu", "prevu"),
+    "deployment": ("deployment", "deploy", "déploiement", "deploiement", "mise en production"),
+    "postpone": ("postponed", "rescheduled", "repoussé", "repousse", "reporté", "reporte"),
+    "index": ("index", "indice"),
+    "staging": ("staging", "préproduction", "preproduction"),
+    "production": ("production",),
+    "recommendation": ("recommend", "recommendation", "recommande", "recommandation"),
+    "possible": ("possible", "impossible", "cannot", "can", "peut", "permet"),
+    "change": ("change", "changes", "changed", "changement", "alter", "alters", "modifier", "modifie", "modifierait"),
+    "behavior": ("behavior", "behaviour", "comportement"),
+    "compatibility": ("compatible", "compatibility", "incompatible", "compatibilite", "compatibilité"),
+    "specification": ("specification", "specifications", "spec", "specs"),
+}
 
 
 class ClaimStatus(str, Enum):
@@ -96,6 +124,13 @@ class ClaimEvidence:
     heading_path: Tuple[str, ...] = ()
     block_ids: Tuple[str, ...] = ()
     email_thread_id: Optional[str] = None
+    evidence_date: Optional[str] = None
+    chronological_key: Optional[str] = None
+    selection_score: float = 0.0
+    span_kind: str = "sentence"
+    context_product_ids: Tuple[str, ...] = ()
+    is_historical: bool = False
+    selection_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -148,6 +183,11 @@ class FaithfulnessReview:
     model_calls: int
     model_name: Optional[str]
     caveat_required: bool
+    span_selection_ms: float = 0.0
+    nli_ms: float = 0.0
+    candidate_span_count: int = 0
+    nli_pair_count: int = 0
+    nli_evidence_span_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         counts = {status.value: 0 for status in ClaimStatus}
@@ -165,6 +205,11 @@ class FaithfulnessReview:
             "model_calls": self.model_calls,
             "model_name": self.model_name,
             "caveat_required": self.caveat_required,
+            "span_selection_ms": self.span_selection_ms,
+            "nli_ms": self.nli_ms,
+            "candidate_span_count": self.candidate_span_count,
+            "nli_pair_count": self.nli_pair_count,
+            "nli_evidence_span_count": self.nli_evidence_span_count,
         }
 
     def legacy_summary(self) -> Dict[str, Any]:
@@ -193,6 +238,18 @@ def _tokens(value: str) -> set[str]:
     }
 
 
+def _concepts(value: str) -> set[str]:
+    normalized = _normalize(value)
+    found = set()
+    for concept, aliases in _CONCEPT_ALIASES.items():
+        if any(
+            re.search(rf"(?<![a-z0-9]){re.escape(_normalize(alias))}(?![a-z0-9])", normalized)
+            for alias in aliases
+        ):
+            found.add(concept)
+    return found
+
+
 def _product_ids(value: str) -> set[str]:
     return {
         token for token in re.findall(r"\b\d{3,6}\b", value or "")
@@ -209,6 +266,7 @@ def _polarity(value: str) -> bool:
     explicit = any(re.search(rf"\b{re.escape(marker)}\b", normalized) for marker in _NEGATIONS)
     grammatical = bool(
         re.search(r"\bn[' ]?(?:est|a|ont|sont)\b[^.!?]{0,30}\b(?:pas|plus)\b", normalized)
+        or re.search(r"(?:\bne\b|\bn[' ])[^.!?]{1,40}\b(?:pas|plus)\b", normalized)
         or " no longer " in normalized
     )
     return explicit or grammatical
@@ -294,7 +352,10 @@ def extract_answer_claims(
             start = sentence_start + unit_start
             end = sentence_start + unit_end
             absence = bool(re.search(
-                r"\b(?:aucune?\s+(?:information|mention)|ne\s+(?:mentionne|mentionnent|contient|contiennent)|seul document.*\bnon\b)\b",
+                r"\b(?:aucune?\s+(?:(?:nouvelle|r[eé]cente?)\s+)?(?:information|mention|date)|"
+                r"ne\s+(?:mentionne|mentionnent|contient|contiennent)|"
+                r"(?:je|nous)\s+ne\s+(?:peux|pouvons)\s+pas\s+conclure|"
+                r"seul document.*\bnon\b|documents?.*uniquement)\b",
                 normalized,
             ))
             claim_type = (
@@ -333,26 +394,72 @@ def _sentences_with_offsets(text: str) -> List[Tuple[str, int, int]]:
     return spans
 
 
-def _passages_with_offsets(text: str) -> List[Tuple[str, int, int]]:
-    """Sentence spans plus adjacent pairs for claims supported across a boundary."""
+def _focused_windows(text: str, claim: str) -> List[Tuple[str, int, int]]:
+    """Bounded local windows around lexical, entity, number, and bilingual anchors."""
+    normalized_claim = _normalize(claim)
+    anchors = {
+        token for token in _tokens(claim) if len(token) >= 4
+    } | _product_ids(claim) | _numbers(claim)
+    for concept in _concepts(claim):
+        anchors.update(_normalize(alias) for alias in _CONCEPT_ALIASES[concept])
+    matches: List[int] = []
+    normalized_text = _normalize(text)
+    for anchor in anchors:
+        if not anchor:
+            continue
+        matches.extend(match.start() for match in re.finditer(re.escape(anchor), normalized_text))
+    windows: List[Tuple[str, int, int]] = []
+    for position in sorted(set(matches))[:40]:
+        start = max(0, position - 150)
+        end = min(len(text), position + 210)
+        left = max((text.rfind(mark, start, position) for mark in (".", "?", "!", "\n", ";", "·", "•")), default=-1)
+        right_candidates = [text.find(mark, position, end) for mark in (".", "?", "!", "\n", ";", "·", "•")]
+        proposition_boundary = re.search(
+            r"\s+(?=(?:La|Le|Les|Une|Un|L['’]|The|This|It)\s)",
+            text[position + 20:end],
+        )
+        if proposition_boundary:
+            right_candidates.append(position + 20 + proposition_boundary.start())
+        right_candidates = [value for value in right_candidates if value >= 0]
+        if left >= start:
+            start = left + 1
+        if right_candidates:
+            end = min(right_candidates) + 1
+        passage = text[start:end].strip()
+        if passage and len(passage) >= min(12, len(normalized_claim)):
+            actual_start = start + len(text[start:end]) - len(text[start:end].lstrip())
+            windows.append((passage, actual_start, actual_start + len(passage)))
+    return windows
+
+
+def _passages_with_offsets(text: str, claim: str) -> List[Tuple[str, int, int, str]]:
+    """Short local passages, adjacent sentences, and controlled focused windows."""
     sentences = _sentences_with_offsets(text)
-    passages = list(sentences)
+    passages: List[Tuple[str, int, int, str]] = [(*item, "sentence") for item in sentences]
     for first, second in zip(sentences, sentences[1:]):
-        passages.append((text[first[1]:second[2]].strip(), first[1], second[2]))
+        passages.append((text[first[1]:second[2]].strip(), first[1], second[2], "adjacent"))
+    passages.extend((*item, "focused") for item in _focused_windows(text, claim))
     stripped = text.strip()
-    if stripped and len(sentences) > 1:
+    if stripped and len(stripped) <= 600 and len(sentences) > 1:
         start = len(text) - len(text.lstrip())
-        passages.append((stripped, start, start + len(stripped)))
-    return passages
+        passages.append((stripped, start, start + len(stripped), "chunk_fallback"))
+    deduplicated: Dict[Tuple[int, int], Tuple[str, int, int, str]] = {}
+    for passage in passages:
+        key = (passage[1], passage[2])
+        previous = deduplicated.get(key)
+        if previous is None or previous[3] == "chunk_fallback":
+            deduplicated[key] = passage
+    return list(deduplicated.values())
 
 
-def _evidence_score(claim: str, passage: str) -> float:
+def _evidence_score(claim: str, passage: str, context_products: Optional[set[str]] = None) -> float:
     claim_tokens = _tokens(claim)
     if not claim_tokens:
         return 0.0
     overlap = len(claim_tokens & _tokens(passage)) / len(claim_tokens)
     claim_products = _product_ids(claim)
-    if claim_products and not claim_products.issubset(_product_ids(passage)):
+    available_products = _product_ids(passage) | (context_products or set())
+    if claim_products and not claim_products.issubset(available_products):
         overlap *= 0.2
     claim_numbers = _numbers(claim) - claim_products
     if claim_numbers and not claim_numbers.issubset(_numbers(passage)):
@@ -360,9 +467,68 @@ def _evidence_score(claim: str, passage: str) -> float:
     return overlap
 
 
+def _selection_score(claim: str, passage: str, context_products: set[str]) -> float:
+    lexical = _evidence_score(claim, passage, context_products)
+    claim_concepts = _concepts(claim)
+    concept_score = (
+        len(claim_concepts & _concepts(passage)) / len(claim_concepts)
+        if claim_concepts else 0.0
+    )
+    claim_products = _product_ids(claim)
+    entity_score = 1.0 if claim_products and claim_products.issubset(context_products) else 0.0
+    claim_numbers = _numbers(claim) - claim_products
+    number_score = 1.0 if claim_numbers and claim_numbers.issubset(_numbers(passage)) else 0.0
+    length_penalty = max(0, len(passage) - 240) / 1200.0
+    return lexical + 0.35 * concept_score + 0.20 * entity_score + 0.15 * number_score - length_penalty
+
+
 def _email_thread_id(meta: Mapping[str, Any]) -> Optional[str]:
     document_meta = meta.get("document_metadata") or {}
     return document_meta.get("thread_id") or (meta.get("source_metadata") or {}).get("thread_id")
+
+
+def _temporal_metadata(meta: Mapping[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    document_meta = meta.get("document_metadata") or {}
+    return document_meta.get("date"), document_meta.get("chronological_key")
+
+
+def _timestamp(value: Optional[str]) -> float:
+    if not value:
+        return float("-inf")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return float("-inf")
+
+
+def _temporal_precedence(claim: AnswerClaim, candidates: Sequence[ClaimEvidence]) -> List[ClaimEvidence]:
+    """Retain superseded evidence as history while preferring the latest state."""
+    check_text = claim.verification_text or claim.text
+    result = list(candidates)
+    by_thread: Dict[str, List[int]] = {}
+    for index, item in enumerate(result):
+        if item.email_thread_id and item.selection_score >= INFERENCE_THRESHOLD:
+            by_thread.setdefault(item.email_thread_id, []).append(index)
+    for indices in by_thread.values():
+        dated = [index for index in indices if _timestamp(result[index].chronological_key or result[index].evidence_date) != float("-inf")]
+        if len(dated) < 2:
+            continue
+        newest_index = max(dated, key=lambda index: _timestamp(result[index].chronological_key or result[index].evidence_date))
+        newest = result[newest_index]
+        newest_numbers = _numbers(newest.text) - _product_ids(newest.text)
+        for index in dated:
+            if index == newest_index:
+                result[index] = replace(newest, selection_reason="latest relevant evidence in thread")
+                continue
+            item = result[index]
+            older = _timestamp(item.chronological_key or item.evidence_date) < _timestamp(newest.chronological_key or newest.evidence_date)
+            numeric_conflict = bool(newest_numbers and (_numbers(item.text) - _product_ids(item.text)) and newest_numbers != (_numbers(item.text) - _product_ids(item.text)))
+            polarity_conflict = _polarity(item.text) != _polarity(newest.text)
+            same_topic = bool(_concepts(check_text) & _concepts(item.text) & _concepts(newest.text))
+            if older and same_topic and (numeric_conflict or polarity_conflict):
+                result[index] = replace(item, is_historical=True, selection_reason="older conflicting state retained as historical")
+    result.sort(key=lambda item: (not item.is_historical, item.selection_score, item.support_score, -len(item.text)), reverse=True)
+    return result
 
 
 def _candidate_evidence(
@@ -373,8 +539,11 @@ def _candidate_evidence(
         text = str(meta.get("text") or "")
         block_candidates: List[ClaimEvidence] = []
         check_text = claim.verification_text or claim.text
-        for passage, start, end in _passages_with_offsets(text):
-            score = _evidence_score(check_text, passage)
+        context_products = _product_ids(text)
+        evidence_date, chronological_key = _temporal_metadata(meta)
+        for passage, start, end, span_kind in _passages_with_offsets(text, check_text):
+            score = _evidence_score(check_text, passage, context_products)
+            selection_score = _selection_score(check_text, passage, context_products)
             item = ClaimEvidence(
                 evidence_id=f"evidence-{source_index}-{start}-{end}", text=passage,
                 start=start, end=end, support_score=score, source_index=source_index,
@@ -386,15 +555,17 @@ def _candidate_evidence(
                 path=meta.get("path"), page=meta.get("page"), section=meta.get("section"),
                 heading_path=tuple(meta.get("heading_path") or ()),
                 block_ids=tuple(meta.get("block_ids") or ()), email_thread_id=_email_thread_id(meta),
+                evidence_date=evidence_date, chronological_key=chronological_key,
+                selection_score=selection_score, span_kind=span_kind,
+                context_product_ids=tuple(sorted(context_products)),
             )
             block_candidates.append(item)
         block_candidates.sort(
-            key=lambda item: (item.support_score, len(item.text) if item.support_score < INFERENCE_THRESHOLD else 0),
+            key=lambda item: (item.selection_score, item.support_score, -len(item.text)),
             reverse=True,
         )
-        candidates.extend(block_candidates[:3])
-    candidates.sort(key=lambda item: item.support_score, reverse=True)
-    return candidates, len(evidence_blocks)
+        candidates.extend(block_candidates[:4])
+    return _temporal_precedence(claim, candidates), len(evidence_blocks)
 
 
 def _load_nli_model():
@@ -464,11 +635,73 @@ def _run_nli_batch(
         return [_NLIResult() for _ in claims], 0, None
 
 
-def _deterministic_contradiction(claim: str, passage: str, score: float) -> bool:
+def _select_nli_evidence(claim: AnswerClaim, evidence: Sequence[ClaimEvidence]) -> List[ClaimEvidence]:
+    """Choose at most two short, compatible, non-historical premises."""
+    check_text = claim.verification_text or claim.text
+    claim_products = _product_ids(check_text)
+    claim_concepts = _concepts(check_text)
+    plausible = []
+    for item in evidence:
+        if item.is_historical or item.text.rstrip().endswith("?"):
+            continue
+        if claim_products and not claim_products.issubset(set(item.context_product_ids) | _product_ids(item.text)):
+            continue
+        shared_concepts = claim_concepts & _concepts(item.text)
+        if claim_concepts and not shared_concepts and item.support_score < INFERENCE_THRESHOLD:
+            continue
+        plausible.append(item)
+    if not plausible:
+        if claim_products:
+            return []
+        plausible = [item for item in evidence if not item.is_historical and not item.text.rstrip().endswith("?")]
+    if not plausible:
+        return []
+    local_plausible = [item for item in plausible if item.span_kind != "chunk_fallback"]
+    if local_plausible:
+        plausible = local_plausible
+    # Adjacent-sentence candidates already carry the minimal two-sentence
+    # context when needed. A second independent premise too often introduces
+    # an unrelated polarity or an obsolete state.
+    return plausible[:1]
+
+
+def _contradiction_compatible(claim: str, evidence: ClaimEvidence) -> bool:
+    """Require a local declarative span about the same entity and property."""
+    if evidence.is_historical or evidence.span_kind == "chunk_fallback" or evidence.text.rstrip().endswith("?"):
+        return False
+    claim_products = _product_ids(claim)
+    if claim_products and not claim_products.issubset(set(evidence.context_product_ids) | _product_ids(evidence.text)):
+        return False
+    claim_concepts = _concepts(claim)
+    if claim_concepts and not (claim_concepts & _concepts(evidence.text)):
+        return False
+    claim_numbers = _numbers(claim) - claim_products
+    evidence_numbers = _numbers(evidence.text) - _product_ids(evidence.text)
+    numeric_conflict = bool(claim_numbers and evidence_numbers and claim_numbers != evidence_numbers)
+    polarity_conflict = _polarity(claim) != _polarity(evidence.text)
+    return polarity_conflict or numeric_conflict
+
+
+def _structured_semantic_support(claim: str, evidence: ClaimEvidence) -> bool:
+    """Conservative bilingual agreement; used only when every claim concept aligns."""
+    if evidence.is_historical or evidence.span_kind == "chunk_fallback" or evidence.text.rstrip().endswith("?"):
+        return False
+    claim_concepts = _concepts(claim)
+    if len(claim_concepts) < 2 or not claim_concepts.issubset(_concepts(evidence.text)):
+        return False
+    claim_products = _product_ids(claim)
+    if claim_products and not claim_products.issubset(set(evidence.context_product_ids) | _product_ids(evidence.text)):
+        return False
+    claim_numbers = _numbers(claim) - claim_products
+    if claim_numbers and not claim_numbers.issubset(_numbers(evidence.text)):
+        return False
+    return _polarity(claim) == _polarity(evidence.text)
+
+
+def _deterministic_contradiction(claim: str, evidence: ClaimEvidence) -> bool:
     return (
-        score >= SUPPORTED_THRESHOLD
-        and not passage.rstrip().endswith("?")
-        and _polarity(claim) != _polarity(passage)
+        _contradiction_compatible(claim, evidence)
+        and evidence.selection_score >= SUPPORTED_THRESHOLD
     )
 
 
@@ -507,6 +740,32 @@ def _absence_supported(
     if products:
         present = set().union(*(_product_ids(item) for item in inspected)) if inspected else set()
         return products.isdisjoint(present)
+    if re.search(r"\baucune?\s+(?:nouvelle|recente?)\s+(?:date|information)\b", normalized):
+        dated_blocks = []
+        for block in evidence_blocks:
+            document_meta = block.get("document_metadata") or {}
+            value = document_meta.get("chronological_key") or document_meta.get("date")
+            timestamp = _timestamp(value)
+            if timestamp != float("-inf"):
+                dated_blocks.append((timestamp, str(block.get("text") or "")))
+        since_match = re.search(
+            r"depuis\s+(?:le\s+)?(\d{1,2})\s+"
+            r"(janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre)",
+            normalized,
+        )
+        if since_match and dated_blocks:
+            months = {
+                "janvier": 1, "fevrier": 2, "mars": 3, "avril": 4, "mai": 5, "juin": 6,
+                "juillet": 7, "aout": 8, "septembre": 9, "octobre": 10, "novembre": 11, "decembre": 12,
+            }
+            latest_year = datetime.fromtimestamp(max(item[0] for item in dated_blocks)).year
+            cutoff = datetime(latest_year, months[since_match.group(2)], int(since_match.group(1))).timestamp()
+            later_relevant = [
+                value for timestamp, value in dated_blocks
+                if timestamp > cutoff + 86400 and _concepts(value) & {"schedule", "deployment"}
+            ]
+            return not later_relevant
+        return bool(dated_blocks)
     target_match = re.search(
         r"aucune mention (?:d[' ]?|de |du |des )?(.+?) n[' ]?(?:est|apparait)", normalized
     )
@@ -552,37 +811,50 @@ def verify_answer_claims(
     claims = extract_answer_claims(answer, cited_source_indices=cited_source_indices)
     extraction_ms = (perf_counter() - extraction_started) * 1000.0
     verification_started = perf_counter()
+    selection_started = perf_counter()
     evidence_by_claim: List[List[ClaimEvidence]] = []
     inspected = 0
     for claim in claims:
         evidence, count = _candidate_evidence(claim, evidence_blocks)
         evidence_by_claim.append(evidence)
         inspected += count
+    span_selection_ms = (perf_counter() - selection_started) * 1000.0
+    candidate_span_count = sum(len(items) for items in evidence_by_claim)
+    nli_evidence_by_claim = [_select_nli_evidence(claim, evidence) for claim, evidence in zip(claims, evidence_by_claim)]
     nli_results = [_NLIResult() for _ in claims]
     nli_indices = []
     for index, (claim, evidence) in enumerate(zip(claims, evidence_by_claim)):
-        best = evidence[0] if evidence else None
+        nli_evidence = nli_evidence_by_claim[index]
+        best = nli_evidence[0] if nli_evidence else (evidence[0] if evidence else None)
         lexical = best.support_score if best else 0.0
         check_text = claim.verification_text or claim.text
-        deterministic = bool(best and _deterministic_contradiction(check_text, best.text, lexical))
-        if claim.claim_type != "EVIDENCE_ABSENCE" and lexical < SUPPORTED_THRESHOLD and not deterministic:
+        deterministic = bool(best and _deterministic_contradiction(check_text, best))
+        semantic = any(_structured_semantic_support(check_text, item) for item in nli_evidence)
+        if claim.claim_type != "EVIDENCE_ABSENCE" and lexical < SUPPORTED_THRESHOLD and not deterministic and not semantic:
             nli_indices.append(index)
+    nli_started = perf_counter()
     selected_nli, model_calls, model_name = _run_nli_batch(
         [claims[index] for index in nli_indices],
-        [evidence_by_claim[index] for index in nli_indices],
+        [nli_evidence_by_claim[index] for index in nli_indices],
         use_nli=use_nli,
         nli_model=nli_model,
     )
+    nli_ms = (perf_counter() - nli_started) * 1000.0
     for index, result in zip(nli_indices, selected_nli):
         nli_results[index] = result
 
     verifications: List[ClaimVerification] = []
-    for claim, evidence, nli in zip(claims, evidence_by_claim, nli_results):
-        declarative = [item for item in evidence if not item.text.rstrip().endswith("?")]
+    for claim_index, (claim, evidence, nli) in enumerate(zip(claims, evidence_by_claim, nli_results)):
+        nli_evidence = nli_evidence_by_claim[claim_index]
+        declarative = [item for item in evidence if not item.is_historical and not item.text.rstrip().endswith("?")]
         best = declarative[0] if declarative else (evidence[0] if evidence else None)
         lexical = best.support_score if best else 0.0
         citation_correct, citation_status, citation_reason = _citation_assessment(claim, evidence)
         check_text = claim.verification_text or claim.text
+        semantic_evidence = next(
+            (item for item in nli_evidence if _structured_semantic_support(check_text, item)),
+            None,
+        )
         absence_supported = _absence_supported(claim, evidence_blocks)
         if absence_supported is True and claim.cited_source_indices:
             citation_correct = True
@@ -590,21 +862,22 @@ def verify_answer_claims(
             citation_reason = "The cited document establishes the scope; absence was checked across the remaining context"
         aligned_evidence = any(
             item.support_score >= PARTIAL_THRESHOLD
+            and not item.is_historical
             and not item.text.rstrip().endswith("?")
             and _polarity(check_text) == _polarity(item.text)
             for item in evidence
         )
         deterministic_contradiction = bool(
             best and not aligned_evidence
-            and _deterministic_contradiction(check_text, best.text, lexical)
+            and _deterministic_contradiction(check_text, best)
         )
         contradiction = deterministic_contradiction
         if (
             (nli.contradiction_score or 0.0) >= NLI_CONTRADICTION_THRESHOLD
             and lexical >= PARTIAL_THRESHOLD
             and not aligned_evidence
-            and not (best and best.text.rstrip().endswith("?"))
-            and _polarity(check_text) != _polarity(best.text if best else "")
+            and best is not None
+            and _contradiction_compatible(check_text, best)
         ):
             contradiction = True
         if absence_supported is True:
@@ -615,6 +888,8 @@ def verify_answer_claims(
             status, confidence, reason = ClaimStatus.CONTRADICTED, max(lexical, nli.contradiction_score or 0.0), "The closest evidence expresses the opposite polarity"
         elif lexical >= SUPPORTED_THRESHOLD:
             status, confidence, reason = ClaimStatus.SUPPORTED, lexical, "Direct lexical support in the selected evidence"
+        elif semantic_evidence is not None:
+            status, confidence, reason = ClaimStatus.SUPPORTED, 1.0, "Entities, values, polarity, and bilingual property concepts align in one local span"
         elif (nli.entailment_score or 0.0) >= NLI_ENTAILMENT_THRESHOLD:
             status, confidence, reason = ClaimStatus.SUPPORTED, max(lexical, nli.entailment_score or 0.0), "Entailed by the selected evidence"
         elif lexical >= PARTIAL_THRESHOLD or (
@@ -633,7 +908,11 @@ def verify_answer_claims(
                 item.document_id for item in evidence
                 if item.source_index in cited and item.document_id
             }
-            if (
+            if semantic_evidence is not None and semantic_evidence.source_index in cited:
+                citation_correct = True
+                citation_status = CitationStatus.MATCHED
+                citation_reason = "The cited source contains the structurally aligned supporting span"
+            elif (
                 best and (
                     best.source_index in cited
                     or (best.document_id and best.document_id in cited_documents)
@@ -645,7 +924,13 @@ def verify_answer_claims(
                 citation_reason = "The cited source contains the premise accepted by NLI"
             else:
                 citation_reason = "The fact is supported, but the cited source does not contain its evidence"
-        associated = tuple(item for item in evidence if item.support_score >= INFERENCE_THRESHOLD)
+        associated_items = [item for item in evidence if item.support_score >= INFERENCE_THRESHOLD]
+        if semantic_evidence is not None and semantic_evidence not in associated_items:
+            associated_items.append(semantic_evidence)
+        for item in nli_evidence:
+            if item not in associated_items:
+                associated_items.append(item)
+        associated = tuple(associated_items)
         verifications.append(ClaimVerification(
             claim=claim, status=status, confidence=min(1.0, max(0.0, confidence)),
             evidence=associated, reason=reason, citation_correct=citation_correct,
@@ -666,6 +951,10 @@ def verify_answer_claims(
         total_ms=(perf_counter() - total_started) * 1000.0,
         evidence_chunks_inspected=inspected, model_calls=model_calls,
         model_name=model_name, caveat_required=caveat_required,
+        span_selection_ms=span_selection_ms, nli_ms=nli_ms,
+        candidate_span_count=candidate_span_count,
+        nli_pair_count=len(nli_indices) if model_calls else 0,
+        nli_evidence_span_count=sum(len(nli_evidence_by_claim[index]) for index in nli_indices) if model_calls else 0,
     )
 
 

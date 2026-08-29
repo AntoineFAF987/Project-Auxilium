@@ -86,7 +86,8 @@ class FeatureSettings(_FrozenSettings):
     enable_web_search: bool = True
     enable_query_condensation: bool = True
     enable_query_expansion: bool = True
-    enable_faithfulness_check: bool = True
+    enable_post_generation_review: bool = False
+    enable_faithfulness_check: bool = False
     faithfulness_strict_only: bool = True
 
 
@@ -213,6 +214,7 @@ def _runtime_payload(config: Mapping[str, Any]) -> dict[str, Any]:
         "enable_web_search",
         "enable_query_condensation",
         "enable_query_expansion",
+        "enable_post_generation_review",
         "enable_faithfulness_check",
         "faithfulness_threshold",
         "faithfulness_strict_only",
@@ -281,6 +283,7 @@ def _runtime_payload(config: Mapping[str, Any]) -> dict[str, Any]:
                 "enable_web_search": "enable_web_search",
                 "enable_query_condensation": "enable_query_condensation",
                 "enable_query_expansion": "enable_query_expansion",
+                "enable_post_generation_review": "enable_post_generation_review",
                 "enable_faithfulness_check": "enable_faithfulness_check",
                 "faithfulness_strict_only": "faithfulness_strict_only",
             }.items()
@@ -345,6 +348,7 @@ _ENV_PATHS: dict[str, tuple[str, str]] = {
     "AUXILIUM_ENABLE_WEB_SEARCH": ("features", "enable_web_search"),
     "AUXILIUM_ENABLE_QUERY_CONDENSATION": ("features", "enable_query_condensation"),
     "AUXILIUM_ENABLE_QUERY_EXPANSION": ("features", "enable_query_expansion"),
+    "AUXILIUM_ENABLE_POST_GENERATION_REVIEW": ("features", "enable_post_generation_review"),
     "AUXILIUM_ENABLE_FAITHFULNESS_CHECK": ("features", "enable_faithfulness_check"),
     "AUXILIUM_FAITHFULNESS_STRICT_ONLY": ("features", "faithfulness_strict_only"),
     "AUXILIUM_LLM_PROVIDER": ("generation", "provider"),

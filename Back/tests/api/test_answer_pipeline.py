@@ -114,6 +114,8 @@ class AnswerPipelineTests(unittest.TestCase):
         route_mode="strict_local",
         relevance=True,
         faithfulness=None,
+        post_review_enabled=True,
+        faithfulness_enabled=True,
         llm=None,
         fresh=False,
         context_text="[1] La politique prévoit une conservation de trente jours.",
@@ -148,7 +150,8 @@ class AnswerPipelineTests(unittest.TestCase):
         stack.enter_context(patch.object(pipeline, "_llm_route", return_value=route_mode))
         stack.enter_context(patch.object(pipeline, "ENABLE_EXPANSION", False))
         stack.enter_context(patch.object(pipeline, "ENABLE_CONDENSATION", False))
-        stack.enter_context(patch.object(pipeline, "ENABLE_FAITHFULNESS_CHECK", True))
+        stack.enter_context(patch.object(pipeline, "ENABLE_POST_GENERATION_REVIEW", post_review_enabled))
+        stack.enter_context(patch.object(pipeline, "ENABLE_FAITHFULNESS_CHECK", faithfulness_enabled))
         stack.enter_context(patch.object(pipeline, "_safe_llm", side_effect=llm_impl))
         legacy = faithfulness or {"faithful": True, "score": 0.95, "label": "entailment"}
         status = (
@@ -233,11 +236,120 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(result.answer, "La conservation est de trente jours.")
         self.assertEqual(result.review.status, "OK")
 
+    def test_claim_faithfulness_flag_off_skips_checker_and_keeps_streaming(self):
+        from api import answer_pipeline as pipeline
+        from rag_core import faithfulness as faithfulness_module
+
+        streamed = []
+        body = AskIn(q="Quelle est la durée de conservation ?", source_mode="local")
+        with (
+            self._patch_pipeline(post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(
+                pipeline,
+                "_safe_llm_stream",
+                return_value=iter([
+                    "La conservation est de ",
+                    "trente jours. <CITATIONS>[1]</CITATIONS>",
+                ]),
+            ),
+            patch.object(faithfulness_module, "extract_answer_claims") as extract_claims,
+            patch.object(faithfulness_module, "_load_nli_model") as load_nli,
+            patch.object(pipeline, "_post_generation_review") as post_review,
+        ):
+            checker = pipeline.verify_answer_claims
+            result = run_answer_pipeline(body, _request(), token_sink=streamed.append)
+
+        checker.assert_not_called()
+        extract_claims.assert_not_called()
+        load_nli.assert_not_called()
+        post_review.assert_not_called()
+        self.assertEqual(streamed, [
+            "La conservation est de ",
+            "trente jours. <CITATIONS>[1]</CITATIONS>",
+        ])
+        self.assertIsNone(result.faithfulness_review)
+        self.assertNotIn("claim_faithfulness", result.validations)
+        self.assertNotIn("faithfulness", result.validations)
+        self.assertNotIn("post_answer", result.validations)
+        self.assertEqual(result.review.status, "OK")
+        self.assertFalse(result.review.has_caveat)
+
+    def test_claim_faithfulness_flag_on_still_runs_checker(self):
+        from api import answer_pipeline as pipeline
+
+        body = AskIn(q="Quelle est la durée de conservation ?", source_mode="local")
+        with self._patch_pipeline(post_review_enabled=True, faithfulness_enabled=True):
+            checker = pipeline.verify_answer_claims
+            result = run_answer_pipeline(body, _request())
+
+        checker.assert_called_once()
+        self.assertIsNotNone(result.faithfulness_review)
+        self.assertTrue(result.validations["claim_faithfulness"]["performed"])
+
+    def test_post_generation_review_flag_off_skips_all_caveats(self):
+        from api import answer_pipeline as pipeline
+
+        body = AskIn(q="Peut-on tropicaliser un 3725 ?", source_mode="local")
+        with (
+            self._patch_pipeline(
+                post_review_enabled=False,
+                faithfulness_enabled=False,
+                context_text=(
+                    "[1] Document publié en 2021 : la tropicalisation du positionneur "
+                    "3730 n'est plus proposée."
+                ),
+            ),
+            patch.object(pipeline, "_post_generation_review") as post_review,
+        ):
+            result = run_answer_pipeline(body, _request())
+
+        post_review.assert_not_called()
+        self.assertIsNone(result.faithfulness_review)
+        self.assertEqual(result.review.status, "OK")
+        self.assertIsNone(result.review.caveat_type)
+        self.assertIsNone(result.review.message)
+
+    def test_post_generation_review_can_be_reenabled_explicitly(self):
+        from api import answer_pipeline as pipeline
+
+        expected = PostGenerationReview(
+            status="CAVEAT",
+            caveat_type="INDIRECT_EVIDENCE",
+            message="Réserve de test réactivée.",
+            severity="warning",
+        )
+        body = AskIn(q="Question locale", source_mode="local")
+        with (
+            self._patch_pipeline(post_review_enabled=True, faithfulness_enabled=False),
+            patch.object(pipeline, "_post_generation_review", return_value=expected) as post_review,
+        ):
+            result = run_answer_pipeline(body, _request())
+
+        post_review.assert_called_once()
+        self.assertEqual(result.review, expected)
+        self.assertTrue(result.validations["post_answer"]["performed"])
+
+    def test_flag_off_keeps_independent_stale_source_guard(self):
+        body = AskIn(q="Cette politique est-elle applicable ?", source_mode="local")
+        with self._patch_pipeline(
+            faithfulness_enabled=False,
+            context_text="[1] Politique publiée en 2021 et toujours applicable à cette date.",
+        ):
+            result = run_answer_pipeline(body, _request())
+
+        self.assertIsNone(result.faithfulness_review)
+        self.assertEqual(result.review.caveat_type, "STALE_SOURCE")
+
     def test_local_unanswerable_abstains_without_generation(self):
         empty_index = _Index([], [])
         llm = Mock(side_effect=AssertionError("generation must not run"))
         body = AskIn(q="Information absente du corpus", source_mode="local")
-        with self._patch_pipeline(index=empty_index, relevance=False, llm=llm):
+        with self._patch_pipeline(
+            index=empty_index,
+            relevance=False,
+            faithfulness_enabled=False,
+            llm=llm,
+        ):
             result = run_answer_pipeline(body, _request())
 
         self.assertEqual(result.status, "abstained")
@@ -559,6 +671,7 @@ class AnswerPipelineTests(unittest.TestCase):
     def test_nearby_product_only_adds_indirect_evidence_caveat(self):
         body = AskIn(q="Peut-on tropicaliser un 3725 ?", source_mode="local")
         with self._patch_pipeline(
+            faithfulness_enabled=False,
             context_text="[1] La tropicalisation du positionneur 3730 n'est plus proposée.",
         ):
             result = run_answer_pipeline(body, _request())
@@ -634,6 +747,33 @@ class TransportParityTests(unittest.TestCase):
         async for item in response.body_iterator:
             chunks.append(item.decode() if isinstance(item, bytes) else item)
         return "".join(chunks)
+
+    def test_sse_with_post_checks_off_emits_content_then_done_without_caveat(self):
+        from api import routes_ask
+
+        result = AnswerPipelineResult(
+            answer="Réponse streamée sans post-vérification.",
+            review=PostGenerationReview(),
+            faithfulness_review=None,
+        )
+
+        def pipeline(_body, _request, *, token_sink=None):
+            token_sink("Réponse streamée ")
+            token_sink("sans post-vérification.")
+            return result
+
+        with patch.object(routes_ask, "run_answer_pipeline", side_effect=pipeline):
+            response = asyncio.run(routes_ask.ask_stream(AskIn(q="Question"), _request("/ask/stream")))
+            stream = asyncio.run(self._collect(response))
+
+        events = [json.loads(line[6:]) for line in stream.splitlines() if line.startswith("data: ")]
+        event_types = [event["type"] for event in events]
+        self.assertGreaterEqual(event_types.count("content"), 2)
+        self.assertEqual(event_types[-1], "done")
+        self.assertTrue(all(event_type == "content" for event_type in event_types[:-1]))
+        self.assertNotIn("event: caveat", stream)
+        self.assertIsNone(events[-1]["faithfulness_review"])
+        self.assertIsNone(events[-1]["review"]["caveat_type"])
 
     def test_json_and_sse_reconstruct_the_same_validated_answer(self):
         from api import routes_ask

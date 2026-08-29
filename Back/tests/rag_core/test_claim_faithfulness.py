@@ -216,4 +216,121 @@ def test_all_claims_use_one_batched_nli_invocation():
     )
     assert model.calls == 1
     assert review.model_calls == 1
+    assert review.nli_pair_count == 2
+    assert 2 <= review.nli_evidence_span_count <= 4
     assert _statuses(review) == [ClaimStatus.SUPPORTED, ClaimStatus.CONTRADICTED]
+
+
+def test_temporal_precedence_retains_old_state_as_history():
+    old = _block("Le deploiement Atlas est prevu le 3 juin.", "old:c1", document="old")
+    old["document_metadata"] = {
+        "thread_id": "atlas", "date": "2026-05-01T09:00:00Z", "chronological_key": "2026-05-01T09:00:00Z"
+    }
+    new = _block("Mise a jour : le deploiement Atlas est desormais prevu le 10 juin.", "new:c1", document="new")
+    new["document_metadata"] = {
+        "thread_id": "atlas", "date": "2026-05-03T09:00:00Z", "chronological_key": "2026-05-03T09:00:00Z"
+    }
+    review = verify_answer_claims("Le deploiement Atlas est maintenant prevu le 10 juin.", [old, new], use_nli=False)
+    assert _statuses(review) == [ClaimStatus.SUPPORTED]
+    assert review.claims[0].evidence[0].source_index == 2
+    assert any(item.is_historical for item in review.claims[0].evidence)
+    assert review.claims[0].evidence[0].selection_reason == "latest relevant evidence in thread"
+
+
+def test_long_chunk_uses_local_polarity_for_unrelated_negation():
+    review = verify_answer_claims(
+        "La teneur en huile est de classe 3.",
+        [_block(
+            "La fiche indique : taille des particules classe 4 · teneur en huile : classe 3 · "
+            "point de rosee classe 3. La tropicalisation complete n'est plus possible."
+        )],
+        use_nli=False,
+    )
+    assert _statuses(review) == [ClaimStatus.SUPPORTED]
+    assert review.claims[0].evidence[0].span_kind in {"focused", "sentence", "adjacent"}
+
+
+def test_local_polarity_handles_ne_sagit_pas_and_unpunctuated_next_proposition():
+    review = verify_answer_claims(
+        "Le 3730 possede un vernis, mais il ne s'agit pas d'une tropicalisation complete. "
+        "Le point de rosee est de classe 3.",
+        [_block(
+            "Le 3730 possede deja un vernis. Ce n'est pas une tropicalisation complete. "
+            "Point de rosee : classe 3 La tropicalisation n'est plus possible."
+        )],
+        use_nli=False,
+    )
+    assert review.claims[0].status != ClaimStatus.CONTRADICTED
+    assert review.claims[1].status == ClaimStatus.SUPPORTED
+
+
+def test_multilingual_selection_sends_relevant_french_span_to_single_nli_batch():
+    class InspectingNLI:
+        model = type("Model", (), {"name_or_path": "fake-multilingual-nli"})()
+
+        def __call__(self, inputs, **_kwargs):
+            assert len(inputs) == 1
+            assert "pression de service" in inputs[0].lower()
+            assert "10 bar" in inputs[0].lower()
+            return [[
+                {"label": "ENTAILMENT", "score": 0.94},
+                {"label": "NEUTRAL", "score": 0.04},
+                {"label": "CONTRADICTION", "score": 0.02},
+            ]]
+
+    review = verify_answer_claims(
+        "The TROVIS 5000 operating pressure is 10 bar.",
+        [_block(
+            "Le TROVIS 5000 est un positionneur numerique. La pression de service du TROVIS 5000 est de 10 bar. "
+            "La tropicalisation complete n'est pas disponible."
+        )],
+        use_nli=True,
+        nli_model=InspectingNLI(),
+    )
+    assert _statuses(review) == [ClaimStatus.SUPPORTED]
+    assert review.nli_pair_count == 1
+    assert review.claims[0].evidence[0].source_index == 1
+
+
+def test_multilingual_structural_support_requires_all_properties_and_polarity():
+    review = verify_answer_claims(
+        "The TROVIS 3730 electronic card includes a protective varnish, but this is not a full tropicalization. "
+        "The tropicalization process is no longer possible due to changes in the position detector technology used in 3730.",
+        [_block(
+            "La carte electronique du TROVIS 3730 possede deja un vernis. Ce n'est pas une tropicalisation complete. "
+            "La tropicalisation n'est plus possible, le changement de technologie du detecteur de position ne le permet plus."
+        )],
+        use_nli=False,
+    )
+    assert _statuses(review) == [ClaimStatus.SUPPORTED, ClaimStatus.SUPPORTED]
+
+
+def test_recent_absence_is_document_scope_claim_not_hallucination():
+    older = _block("Le projet Atlas etait planifie pour le 5 juin.", "atlas-old:c1", document="atlas-old")
+    older["document_metadata"] = {
+        "thread_id": "atlas", "date": "2026-06-03T08:00:00Z", "chronological_key": "2026-06-03T08:00:00Z"
+    }
+    current = _block("Point du 5 juin : la prochaine date du projet Atlas reste a confirmer.", "atlas-now:c1", document="atlas-now")
+    current["document_metadata"] = {
+        "thread_id": "atlas", "date": "2026-06-05T17:00:00Z", "chronological_key": "2026-06-05T17:00:00Z"
+    }
+    review = verify_answer_claims(
+        "Aucune nouvelle date n'a ete communiquee pour le projet Atlas depuis le 5 juin.",
+        [older, current],
+        use_nli=False,
+    )
+    assert review.claims[0].claim.claim_type == "EVIDENCE_ABSENCE"
+    assert _statuses(review) == [ClaimStatus.SUPPORTED]
+    assert review.caveat_required is False
+
+
+def test_contradiction_ignores_question_and_requires_same_property():
+    review = verify_answer_claims(
+        "La pression maximale du TROVIS 5000 est de 10 bar.",
+        [_block(
+            "La pression maximale du TROVIS 5000 est de 10 bar. "
+            "La tropicalisation est-elle impossible avec le nouveau detecteur ?"
+        )],
+        use_nli=False,
+    )
+    assert _statuses(review) == [ClaimStatus.SUPPORTED]

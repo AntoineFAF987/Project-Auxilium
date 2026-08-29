@@ -28,6 +28,8 @@ class RuntimeSettingsLoadingTests(unittest.TestCase):
         self.assertEqual(settings.generation.temperature, 0.6)
         self.assertEqual(settings.generation.strict_temperature, 0.45)
         self.assertEqual(settings.generation.max_tokens, 1200)
+        self.assertFalse(settings.features.enable_post_generation_review)
+        self.assertFalse(settings.features.enable_faithfulness_check)
 
     def test_config_file_values_override_defaults(self):
         from runtime_settings import load_runtime_settings
@@ -71,6 +73,8 @@ class RuntimeSettingsLoadingTests(unittest.TestCase):
                 "AUXILIUM_HYBRID_ALPHA": "0.4",
                 "AUXILIUM_LLM_MODEL": "env-model",
                 "AUXILIUM_ENABLE_QUERY_EXPANSION": "false",
+                "AUXILIUM_ENABLE_POST_GENERATION_REVIEW": "true",
+                "AUXILIUM_ENABLE_FAITHFULNESS_CHECK": "true",
             },
         )
 
@@ -78,6 +82,8 @@ class RuntimeSettingsLoadingTests(unittest.TestCase):
         self.assertEqual(settings.retrieval.hybrid_alpha, 0.4)
         self.assertEqual(settings.generation.model, "env-model")
         self.assertFalse(settings.features.enable_query_expansion)
+        self.assertTrue(settings.features.enable_post_generation_review)
+        self.assertTrue(settings.features.enable_faithfulness_check)
 
     def test_explicit_experiment_override_has_highest_priority(self):
         from runtime_settings import load_runtime_settings
@@ -220,6 +226,8 @@ class RuntimeSettingsConsumerTests(unittest.TestCase):
         self.assertEqual(settings.retrieval.max_context_chars, 12000)
         self.assertEqual(settings.generation.model, "mistral-small-latest")
         self.assertEqual(settings.generation.max_tokens, 1200)
+        self.assertFalse(settings.features.enable_post_generation_review)
+        self.assertFalse(settings.features.enable_faithfulness_check)
 
 
 if __name__ == "__main__":
