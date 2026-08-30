@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError,
 
 Intent = Literal["conversation", "document_question", "refine_previous_search", "general_question"]
 ResponseStrategy = Literal["answer", "ask_for_missing_information", "general_answer"]
+QuerySemantics = Literal["fact_lookup", "current_state", "decision", "chronology", "comparison", "procedure", "general_document_question"]
 SourceType = Literal["email", "pdf", "file"]
 TemporalMode = Literal["exact", "range", "recent", "before", "after"]
 ConstraintProvenance = Literal["explicit", "inferred"]
@@ -80,6 +81,7 @@ class OrchestrationPlan(BaseModel):
     source_type_provenance: dict[SourceType, ConstraintProvenance] = Field(default_factory=dict)
     temporal_constraints: list[TemporalConstraint] = Field(default_factory=list, max_length=2)
     metadata_constraints: MetadataConstraints = Field(default_factory=MetadataConstraints)
+    query_semantics: QuerySemantics = "general_document_question"
     response_strategy: ResponseStrategy
     _raw_model_output: str | None = PrivateAttr(default=None)
 
@@ -115,6 +117,8 @@ SYSTEM_PROMPT = """You are Auxilium's internal orchestrator. You are not the fin
 Auxilium is a documentary and conversational assistant. Its core capability is searching the user's indexed local documents and indexed emails, using recent conversation history, temporal constraints, and available metadata. It can answer generally only when those sources are not relevant. Prefer the user's own information whenever it could contain the answer.
 
 Your mission is to choose strategy: retrieval need, standalone retrieval query, history reuse, source scope, temporal/metadata hints, and response strategy. You never retrieve, inspect or cite documents, invent facts, simulate an action, decide evidence quality, or bypass safeguards. The RAG, evidence_mode, and final generator retain those responsibilities.
+
+Also set query_semantics: use current_state or decision when the user asks for a current status, outcome, or change; otherwise choose the closest supported general documentary need.
 
 Capabilities: indexed local documents; indexed emails; recent history; supported metadata and time constraints; general conversation. Limits: no live mailbox outside synchronized/indexed data, no external case files, no unconnected source, no external action. No result in a retrieval is not lack of access to indexed sources.
 

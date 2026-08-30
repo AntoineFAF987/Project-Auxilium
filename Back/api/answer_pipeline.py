@@ -35,6 +35,7 @@ from .orchestration import (
 )
 from .orchestration_debug import record_snapshot
 from .response_trace import ResponseTraceStore
+from .iterative_retrieval import run_iterative_evidence_retrieval
 from .chats_db import create_chat, append_message
 from auth_ms import verify_ms_token
 
@@ -1224,6 +1225,27 @@ def run_answer_pipeline(
     prelim_hits = len(prelim)
     fused = fuse_contiguous_passages(prelim, gap=FUSE_ADJACENT_GAP)
     blocks = clip_context_blocks(fused, max_chars=MAX_CONTEXT_CHARS, keep=FINAL_K)
+
+    # Bounded evidence enrichment happens after the stable first retrieval and
+    # before evidence_mode/generation. It follows only existing corpus links.
+    retrieval_rounds = []
+    if orchestration_plan is not None:
+        blocks, retrieval_rounds, iterative_sufficiency = run_iterative_evidence_retrieval(
+            candidate_pool=prelim,
+            initial_evidence=blocks,
+            corpus=list(getattr(idx, "corpus", []) or []),
+            query=q_eff,
+            semantics=orchestration_plan.query_semantics,
+            max_rounds=3,
+            max_expanded_chunks=4,
+        )
+        blocks = clip_context_blocks(blocks, max_chars=MAX_CONTEXT_CHARS, keep=FINAL_K)
+        trace("retrieval_rounds", {
+            "rounds": retrieval_rounds,
+            "stop_reason": iterative_sufficiency.reason,
+            "evidence_sufficient": iterative_sufficiency.sufficient,
+            "final_evidence_chunk_uids": [meta.get("chunk_uid") for _, meta in blocks],
+        })
 
     gated_ok = answerability_guard(ce_scores, threshold=ANS_THRESHOLD)
     context_local = format_context_for_llm(blocks) if blocks else ""

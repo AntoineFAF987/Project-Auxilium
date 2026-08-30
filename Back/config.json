@@ -97,8 +97,8 @@
     "per_sec": 10
   },
   "llm": {
-    "provider": "mistral",
-    "model": "mistral-small-latest",
+    "provider": "openai",
+    "model": "gpt-5.6-luna",
     "temperature": 0.6,
     "strict_temperature": 0.45,
     "top_p": 0.9,
