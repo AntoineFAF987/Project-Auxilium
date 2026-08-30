@@ -439,7 +439,8 @@ class AnswerPipelineTests(unittest.TestCase):
         ):
             run_answer_pipeline(AskIn(q="Regarde les plus récents", source_mode="auto"), _request())
 
-        self.assertEqual(self.index.search_calls[0][0], plan.retrieval_query)
+        self.assertTrue(self.index.search_calls[0][0].startswith("Regarde les plus"))
+        self.assertIn(plan.retrieval_query, [query for query, _kwargs in self.index.search_calls])
         # The message itself did not select emails, so a planner-proposed
         # source scope cannot become a hard filter.
         self.assertIsNone(self.index.search_calls[0][1]["allowed_sources"])
@@ -483,7 +484,8 @@ class AnswerPipelineTests(unittest.TestCase):
 
         self.assertEqual(orchestrate.call_count, len(messages))
         smalltalk.assert_not_called()
-        self.assertEqual(len(self.index.search_calls), len(messages))
+        self.assertGreaterEqual(len(self.index.search_calls), len(messages))
+        self.assertLessEqual(len(self.index.search_calls), 3 * len(messages))
 
     def test_invalid_orchestration_falls_back_to_legacy_pipeline(self):
         from api import answer_pipeline as pipeline
@@ -497,6 +499,69 @@ class AnswerPipelineTests(unittest.TestCase):
 
         self.assertEqual(result.mode, "STRICT(local)")
         self.assertEqual(len(self.index.search_calls), 1)
+
+    def test_provider_failure_preserves_documentary_retrieval_and_trace_details(self):
+        from api import answer_pipeline as pipeline
+        from api.response_trace import ResponseTraceStore
+
+        class BadRequestError(Exception):
+            code = "unsupported_parameter"
+            status_code = 400
+
+        trace_store = ResponseTraceStore()
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "RESPONSE_TRACE_ENABLED", True),
+            patch.object(pipeline, "RESPONSE_TRACES", trace_store),
+            patch.object(pipeline, "_run_orchestration", side_effect=BadRequestError("reasoning parameter rejected")),
+        ):
+            result = run_answer_pipeline(AskIn(q="Was my request finally approved?"), _request())
+
+        trace = trace_store.get(result.request_id)["stages"]["orchestration"]
+        self.assertEqual(result.mode, "STRICT(local)")
+        self.assertEqual(len(self.index.search_calls), 1)
+        self.assertEqual(trace["error_category"], "provider_error")
+        self.assertEqual(trace["provider_error_type"], "BadRequestError")
+        self.assertEqual(trace["provider_error_code"], "unsupported_parameter")
+        self.assertEqual(trace["fallback_strategy"], "documentary_retrieval")
+
+    def test_provider_failure_on_internal_project_approval_uses_retrieval(self):
+        from api import answer_pipeline as pipeline
+
+        class BadRequestError(Exception):
+            pass
+
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", side_effect=BadRequestError("bad request")),
+        ):
+            result = run_answer_pipeline(AskIn(q="Can you check whether Project Alpha was approved?"), _request())
+
+        self.assertEqual(result.mode, "STRICT(local)")
+        self.assertEqual(len(self.index.search_calls), 1)
+
+    def test_provider_failure_keeps_real_conversation_and_general_questions_out_of_forced_retrieval(self):
+        from api import answer_pipeline as pipeline
+
+        class BadRequestError(Exception):
+            pass
+
+        conversation = type("Turn", (), {"turn_type": "conversational_continuation", "decision_reason": "test"})()
+        general = type("Turn", (), {"turn_type": "answer_seeking", "decision_reason": "test"})()
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", side_effect=BadRequestError("bad request")),
+            patch.object(pipeline, "classify_turn", side_effect=[conversation, general]),
+            patch.object(pipeline, "_llm_route", return_value="general"),
+        ):
+            hello = run_answer_pipeline(AskIn(q="Hello"), _request())
+            explain = run_answer_pipeline(AskIn(q="Explain REST APIs"), _request())
+
+        self.assertEqual(hello.mode, "GENERAL(conversational)")
+        self.assertTrue(explain.mode.startswith("GENERAL"))
 
     def test_retrieval_parameters_and_order_are_preserved(self):
         from api import answer_pipeline as pipeline

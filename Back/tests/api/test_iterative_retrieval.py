@@ -124,3 +124,111 @@ def test_round_budget_and_expansion_deduplication_are_bounded():
     )
     assert len(rounds) <= 3
     assert [round_["action"]["type"] for round_ in rounds].count("EXPAND") <= 1
+
+
+def test_selected_header_is_an_evidence_gap_and_expands_before_unrelated_candidate():
+    pending = _row("request", "jan10", "Request remains pending.", date="2026-01-10T00:00:00Z")
+    attachment = {"document_id": "final-pdf", "relation_type": "attachment"}
+    header = _row("email-jan20", "jan20-header", "Subject: Final decision regarding request", date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_header"}], attachments=[attachment])
+    body = _row("email-jan20", "jan20-body", "The request was approved.", date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_body"}], order=1)
+    unrelated_attachment = {"document_id": "inventory-pdf", "relation_type": "attachment"}
+    unrelated = _row("inventory", "other-header", "Subject: Inventory delivery update", date="2026-01-21T00:00:00Z", blocks=[{"block_type": "email_header"}], attachments=[unrelated_attachment])
+    pdf = _row("final-pdf", "pdf", "Final attached decision.", source="pdf")
+    unrelated_pdf = _row("inventory-pdf", "other-pdf", "Inventory details.", source="pdf")
+
+    evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.90, pending), (0.35, header), (0.34, unrelated)],
+        initial_evidence=[(0.90, pending), (0.35, header)],
+        corpus=[pending, header, body, unrelated, pdf, unrelated_pdf],
+        query="Was my request finally approved?", semantics="decision",
+    )
+
+    assert any(gap["document_id"] == "email-jan20" for gap in rounds[0]["evidence_gaps"])
+    assert rounds[0]["selected_lead_type"] == "evidence_gap"
+    assert rounds[1]["action"]["type"] == "EXPAND"
+    assert rounds[1]["selected_lead"] == "email-jan20"
+    assert not any(item[1]["chunk_uid"] == "other-pdf" for item in evidence)
+    assert decision.sufficient is True
+
+
+def test_selected_header_expands_then_follows_attachment_when_body_is_not_outcome_evidence():
+    attachment = {"document_id": "final-pdf", "relation_type": "attachment"}
+    header = _row("email", "header", "Subject: Final decision regarding request", blocks=[{"block_type": "email_header"}], attachments=[attachment])
+    body = _row("email", "body", "Please see attached final decision.", blocks=[{"block_type": "email_body"}], order=1)
+    pdf = _row("final-pdf", "pdf", "The request was approved.", source="pdf")
+    evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.9, header)], initial_evidence=[(0.9, header)], corpus=[header, body, pdf],
+        query="Was my request finally approved?", semantics="decision",
+    )
+
+    assert [round_["action"]["type"] for round_ in rounds] == ["SEARCH", "EXPAND", "FOLLOW"]
+    assert rounds[2]["action"]["relation"] == "attachment"
+    assert any(meta["chunk_uid"] == "pdf" for _, meta in evidence)
+    assert decision.sufficient is True
+
+
+def test_loaded_header_without_available_relation_is_not_actionable_gap():
+    header = _row("email", "header", "Subject: Project update", blocks=[{"block_type": "email_header"}])
+    _evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.9, header)], initial_evidence=[(0.9, header)], corpus=[header],
+        query="What was decided?", semantics="decision",
+    )
+    assert rounds[0]["evidence_gaps"] == []
+    assert len(rounds) == 1
+    assert decision.sufficient is False
+
+
+def test_current_state_prioritizes_newer_state_resolution_gap_over_higher_retrieval_scores():
+    jan10 = _row("jan10", "jan10-header", "Subject: Request submitted", date="2026-01-10T00:00:00Z", blocks=[{"block_type": "email_header"}])
+    jan10_body = _row("jan10", "jan10-body", "The request was submitted.", date="2026-01-10T00:00:00Z", blocks=[{"block_type": "email_body"}], order=1)
+    jan15 = _row("jan15", "jan15-header", "Subject: Request pending", date="2026-01-15T00:00:00Z", blocks=[{"block_type": "email_header"}])
+    jan15_body = _row("jan15", "jan15-body", "The request is pending.", date="2026-01-15T00:00:00Z", blocks=[{"block_type": "email_body"}], order=1)
+    jan20 = _row("jan20", "jan20-header", "Subject: Final status update", date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_header"}])
+    jan20_body = _row("jan20", "jan20-body", "The request was approved.", date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_body"}], order=1)
+
+    _evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.95, jan10), (0.90, jan15), (0.30, jan20)],
+        initial_evidence=[(0.95, jan10), (0.90, jan15), (0.30, jan20)],
+        corpus=[jan10, jan10_body, jan15, jan15_body, jan20, jan20_body],
+        query="What is the current status of my request?", semantics="current_state",
+    )
+
+    assert rounds[0]["selected_lead"] == "jan20"
+    selected_gap = next(gap for gap in rounds[0]["evidence_gaps"] if gap["document_id"] == "jan20")
+    assert selected_gap["priority_class"] == "potential_newer_state_resolution"
+    assert selected_gap["state_change_potential"] is True
+    assert rounds[1]["action"]["target_document_id"] == "jan20"
+    assert decision.sufficient is True
+
+
+def test_current_state_does_not_promote_newer_state_header_from_another_topic():
+    request = _row("request", "request-header", "Subject: Request submitted", date="2026-01-10T00:00:00Z", blocks=[{"block_type": "email_header"}])
+    request_body = _row("request", "request-body", "Request remains pending.", date="2026-01-10T00:00:00Z", blocks=[{"block_type": "email_body"}], order=1)
+    unrelated = _row("inventory", "inventory-header", "Subject: Final status update for inventory", date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_header"}])
+    unrelated_body = _row("inventory", "inventory-body", "Inventory was approved.", date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_body"}], order=1)
+
+    _evidence, rounds, _decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.95, request), (0.30, unrelated)], initial_evidence=[(0.95, request), (0.30, unrelated)],
+        corpus=[request, request_body, unrelated, unrelated_body],
+        query="What is the current status of my request?", semantics="current_state",
+    )
+
+    unrelated_gap = next(gap for gap in rounds[0]["evidence_gaps"] if gap["document_id"] == "inventory")
+    assert unrelated_gap["semantic_fit"] == "weak_selected_evidence"
+    assert unrelated_gap["priority_class"] != "potential_newer_state_resolution"
+    assert rounds[0]["selected_lead"] != "inventory"
+
+
+def test_candidate_shared_person_name_is_not_a_topical_relation():
+    direct = _row("request", "direct", "Request approved.", date="2026-01-10T00:00:00Z")
+    attachment = {"document_id": "application-pdf", "relation_type": "attachment"}
+    other_personal = _row("application", "application-header", "Subject: Application at Example Corp for Alex Doe", date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_header"}], attachments=[attachment])
+    pdf = _row("application-pdf", "application-pdf-chunk", "Application details.", source="pdf")
+
+    _evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.9, direct), (0.4, other_personal)], initial_evidence=[(0.9, direct)],
+        corpus=[direct, other_personal, pdf], query="What is the current status of Alex Doe's request?", semantics="current_state",
+    )
+
+    assert rounds[0]["candidate_leads"] == []
+    assert decision.sufficient is True

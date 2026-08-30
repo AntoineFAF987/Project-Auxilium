@@ -36,6 +36,7 @@ from .orchestration import (
 from .orchestration_debug import record_snapshot
 from .response_trace import ResponseTraceStore
 from .iterative_retrieval import run_iterative_evidence_retrieval
+from .multi_query_retrieval import build_retrieval_queries, reciprocal_rank_fusion
 from .chats_db import create_chat, append_message
 from auth_ms import verify_ms_token
 
@@ -275,6 +276,77 @@ def _run_orchestration(q: str, history: List[Dict]) -> OrchestrationPlan:
         )
     finally:
         LLM_SEM.release()
+
+
+def _sanitize_provider_error_message(value: Any) -> str | None:
+    if not value:
+        return None
+    text = str(value)
+    text = re.sub(r"(?i)(bearer\s+|sk-[a-z0-9_-]+)[a-z0-9_.-]+", r"\1[redacted]", text)
+    return text[:800]
+
+
+def _orchestration_failure_details(exc: Exception) -> dict[str, Any]:
+    """Classify provider failures separately from invalid model JSON."""
+    provider = _RUNTIME_SETTINGS.generation.provider
+    model = ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model
+    endpoint = "responses.create" if provider == "openai" else "POST /v1/chat/completions"
+    details: dict[str, Any] = {
+        "provider": provider, "model": model,
+        "request_schema_version": "orchestration_plan_v2",
+        "endpoint": endpoint,
+        "reasoning_effort": _RUNTIME_SETTINGS.generation.reasoning_effort,
+        "timeout": ORCHESTRATOR_SETTINGS.timeout,
+    }
+    if isinstance(exc, OrchestrationPlanOutputError):
+        return {
+            **details, "error_category": "model_output_validation_error",
+            "provider_error_type": None, "provider_error_code": None,
+            "provider_error_message": None,
+            "validation_error_details": exc.validation_error_details,
+        }
+    if isinstance(exc, FuturesTimeout):
+        return {
+            **details, "error_category": "timeout", "provider_error_type": type(exc).__name__,
+            "provider_error_code": None, "provider_error_message": "orchestration call timed out",
+            "validation_error_details": None,
+        }
+    response = getattr(exc, "response", None)
+    body: Any = None
+    if response is not None:
+        try:
+            body = response.json()
+        except Exception:
+            body = getattr(response, "text", None)
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None) or getattr(response, "status_code", None)
+    message = getattr(exc, "message", None) or str(exc)
+    if isinstance(body, dict):
+        code = body.get("code") or (body.get("error") or {}).get("code") or code
+        message = body.get("message") or (body.get("error") or {}).get("message") or message
+        error_body = body.get("error") if isinstance(body.get("error"), dict) else body
+        safe_response = {
+            key: _sanitize_provider_error_message(error_body.get(key))
+            for key in ("type", "code", "message", "param") if error_body.get(key) is not None
+        }
+    else:
+        safe_response = None
+    return {
+        **details, "error_category": "provider_error", "provider_error_type": type(exc).__name__,
+        "provider_error_code": str(code) if code is not None else None,
+        "provider_error_message": _sanitize_provider_error_message(message),
+        "validation_error_details": {"provider_response": safe_response} if safe_response else None,
+    }
+
+
+def _looks_like_documentary_fallback(question: str, history: List[Dict]) -> bool:
+    """Conservative fallback: prefer local retrieval for likely user-owned facts."""
+    text = " ".join([question] + [str(item.get("content", "")) for item in history[-4:] if item.get("role") == "user"]).lower()
+    markers = (
+        "status", "decision", "approval", "approved", "rejected", "request", "case", "file", "response",
+        "authorization", "validation", "dossier", "demande", "decision", "autorisation", "validation",
+        "reponse", "accepte", "refuse", "toujours", "enfin", "verifie", "cherche", "mails", "documents",
+    )
+    return any(re.search(rf"\b{re.escape(marker)}\b", text) for marker in markers)
 
 
 def _safe_llm_stream(fn, *args, **kwargs):
@@ -1059,6 +1131,8 @@ def run_answer_pipeline(
     orchestration_plan: Optional[OrchestrationPlan] = None
     raw_orchestration_plan: Optional[OrchestrationPlan] = None
     orchestration_ms: Optional[float] = None
+    orchestration_failure: dict[str, Any] | None = None
+    documentary_orchestration_fallback = False
     if ORCHESTRATOR_SETTINGS.enabled:
         started = time.perf_counter()
         try:
@@ -1094,10 +1168,23 @@ def run_answer_pipeline(
                 "validation_error": None,
                 "validation_error_details": None,
                 "raw_model_output": raw_orchestration_plan._raw_model_output,
+                "error_category": None,
+                "provider_error_type": None,
+                "provider_error_code": None,
+                "provider_error_message": None,
+                "fallback_strategy": None,
             })
         except Exception as exc:
             orchestration_ms = round((time.perf_counter() - started) * 1000, 1)
-            _log_event(request_id, {"event": "orchestration_fallback", "orchestration_ms": orchestration_ms, "reason": type(exc).__name__})
+            orchestration_failure = _orchestration_failure_details(exc)
+            documentary_orchestration_fallback = (
+                orchestration_failure["error_category"] in {"provider_error", "timeout"}
+                and _looks_like_documentary_fallback(q, hist)
+            )
+            fallback_strategy = "documentary_retrieval" if documentary_orchestration_fallback else (
+                "conversation" if not _looks_like_documentary_fallback(q, hist) else "legacy_routing"
+            )
+            _log_event(request_id, {"event": "orchestration_fallback", "orchestration_ms": orchestration_ms, "reason": type(exc).__name__, "error_category": orchestration_failure["error_category"], "fallback_strategy": fallback_strategy})
             record_snapshot(None, orchestration_ms=orchestration_ms, fallback_used=True)
             trace("orchestration", {
                 "raw_orchestration_plan": None,
@@ -1106,8 +1193,18 @@ def run_answer_pipeline(
                 "orchestration_latency_ms": orchestration_ms,
                 "fallback_used": True,
                 "validation_error": type(exc).__name__,
-                "validation_error_details": exc.validation_error_details if isinstance(exc, OrchestrationPlanOutputError) else None,
+                "validation_error_details": orchestration_failure["validation_error_details"],
                 "raw_model_output": exc.raw_model_output if isinstance(exc, OrchestrationPlanOutputError) else None,
+                "error_category": orchestration_failure["error_category"],
+                "provider_error_type": orchestration_failure["provider_error_type"],
+                "provider_error_code": orchestration_failure["provider_error_code"],
+                "provider_error_message": orchestration_failure["provider_error_message"],
+                "provider": orchestration_failure["provider"], "model": orchestration_failure["model"],
+                "request_schema_version": orchestration_failure["request_schema_version"],
+                "endpoint": orchestration_failure["endpoint"],
+                "reasoning_effort": orchestration_failure["reasoning_effort"],
+                "timeout": orchestration_failure["timeout"],
+                "fallback_strategy": fallback_strategy,
             })
 
     if orchestration_plan is not None and not orchestration_plan.needs_retrieval:
@@ -1128,8 +1225,8 @@ def run_answer_pipeline(
             raise HTTPException(status_code=500, detail=f"LLM error: {e}")
 
     # Decide whether this turn is answerable now before rewriting or searching.
-    turn_decision = classify_turn(q, idx.embed_model, hist) if orchestration_plan is None else None
-    turn_type = turn_decision.turn_type if turn_decision else "orchestrated"
+    turn_decision = classify_turn(q, idx.embed_model, hist) if orchestration_plan is None and not documentary_orchestration_fallback else None
+    turn_type = turn_decision.turn_type if turn_decision else ("documentary_fallback" if documentary_orchestration_fallback else "orchestrated")
     if turn_type == "conversational_continuation":
         _log_event(request_id, {
             "event": "ask", "turn_type": turn_type, "q_eff": q,
@@ -1204,24 +1301,31 @@ def run_answer_pipeline(
             # An explicit source mode remains authoritative; an empty
             # intersection must not accidentally mean "all sources" to idx.search.
             allowed_sources = {"__no_matching_source__"}
-    trace("retrieval_input", {"original_query": q, "orchestrator_query": orchestration_plan.retrieval_query if orchestration_plan else None, "q_eff": q_eff, "q_eff_source": "orchestrator_query" if orchestration_plan else ("condensed_query" if should_condense else "original_query"), "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": orchestration_plan.source_types if orchestration_plan else [], "temporal_constraints": [item.model_dump(mode="json") for item in orchestration_plan.temporal_constraints] if orchestration_plan else [], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
+    retrieval_queries = (
+        build_retrieval_queries(original_query=q, orchestrator_query=orchestration_plan.retrieval_query)
+        if orchestration_plan else [("original", q_eff)]
+    )
+    trace("retrieval_input", {"original_query": q, "orchestrator_query": orchestration_plan.retrieval_query if orchestration_plan else None, "q_eff": q_eff, "q_eff_source": "orchestrator_query" if orchestration_plan else ("condensed_query" if should_condense else "original_query"), "retrieval_queries": [{"type": kind, "query": query} for kind, query in retrieval_queries], "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": orchestration_plan.source_types if orchestration_plan else [], "temporal_constraints": [item.model_dump(mode="json") for item in orchestration_plan.temporal_constraints] if orchestration_plan else [], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
     _log_event(request_id, {"event": "rag_search_start", "q_eff": q_eff, "should_condense": should_condense, "hist_len": len(hist), "orchestrated": orchestration_plan is not None})
 
     retrieval_started = time.perf_counter()
-    prelim, ce_scores = idx.search(
-        q_eff,
-        retrieve_k=RETRIEVE_K,
-        top_k_faiss=TOP_K_FAISS,
-        hybrid_alpha=HYBRID_ALPHA,
-        use_rerank=ENABLE_RERANKER,
-        allowed_sources=allowed_sources,
-    )
-    before_constraints = len(prelim)
+    query_rankings = []
+    query_trace = []
+    ce_scores = []
     rejected_candidates = []
-    if orchestration_plan:
-        rejected_candidates = [{"filename": meta.get("file"), "source": meta.get("source"), "score": score, **reason} for score, meta in prelim if (reason := explain_candidate_rejection(meta, orchestration_plan))]
-        prelim = filter_retrieval_candidates(prelim, orchestration_plan)
-    trace("retrieval", {"retrieval_ms": round((time.perf_counter() - retrieval_started) * 1000, 1), "idx_search_candidates": before_constraints, "after_constraint_filter": len(prelim), "initial_candidates": [{"filename": meta.get("file"), "source": meta.get("source"), "score": score, "document_metadata": meta.get("document_metadata") or {}} for score, meta in prelim[:20]], "rejected_candidates": rejected_candidates[:20]})
+    for query_kind, query_text in retrieval_queries:
+        rows, scores = idx.search(query_text, retrieve_k=RETRIEVE_K, top_k_faiss=TOP_K_FAISS, hybrid_alpha=HYBRID_ALPHA, use_rerank=ENABLE_RERANKER, allowed_sources=allowed_sources)
+        if query_kind == "original" or not ce_scores:
+            ce_scores = scores
+        before_filter = len(rows)
+        if orchestration_plan:
+            rejected_candidates.extend([{"query_type": query_kind, "filename": meta.get("file"), "source": meta.get("source"), "score": score, **reason} for score, meta in rows if (reason := explain_candidate_rejection(meta, orchestration_plan))])
+            rows = filter_retrieval_candidates(rows, orchestration_plan)
+        query_rankings.append((query_kind, rows))
+        query_trace.append({"type": query_kind, "query": query_text, "candidate_count": before_filter, "after_constraint_filter": len(rows)})
+    prelim = reciprocal_rank_fusion(query_rankings) if len(query_rankings) > 1 else (query_rankings[0][1] if query_rankings else [])
+    before_constraints = sum(item["candidate_count"] for item in query_trace)
+    trace("retrieval", {"retrieval_ms": round((time.perf_counter() - retrieval_started) * 1000, 1), "retrieval_queries": query_trace, "idx_search_candidates": before_constraints, "after_constraint_filter": len(prelim), "candidate_fusion": {"fusion_method": "rrf" if len(query_rankings) > 1 else "single_query", "unique_candidates_before_final_pool": len(prelim)}, "initial_candidates": [{"filename": meta.get("file"), "source": meta.get("source"), "score": score, "retrieved_by": meta.get("retrieved_by"), "per_query_rank": meta.get("per_query_rank"), "per_query_score": meta.get("per_query_score"), "fusion_score": meta.get("fusion_score"), "document_metadata": meta.get("document_metadata") or {}} for score, meta in prelim[:20]], "rejected_candidates": rejected_candidates[:20]})
     prelim_hits = len(prelim)
     fused = fuse_contiguous_passages(prelim, gap=FUSE_ADJACENT_GAP)
     blocks = clip_context_blocks(fused, max_chars=MAX_CONTEXT_CHARS, keep=FINAL_K)
@@ -1316,6 +1420,8 @@ def run_answer_pipeline(
     if orchestration_plan is not None:
         # In this path the plan is the only authority deciding to retrieve.
         # evidence_mode still determines whether the retrieved blocks are usable.
+        route_mode = "strict_local"
+    elif documentary_orchestration_fallback:
         route_mode = "strict_local"
     elif mode_in in {"local", "web_index", "web_live"}:
         route_mode = {
