@@ -101,12 +101,20 @@ class AnswerPipelineTests(unittest.TestCase):
             {
                 "idx": 7,
                 "path": "C:/docs/policy.txt",
+                "source": "file",
+                "document_id": "doc_policy",
+                "document_metadata": {"origin_path": "C:/docs/policy.txt", "indexed_path": "C:/docs/policy.txt"},
                 "chunk_id": 2,
                 "text": "La politique prévoit une conservation de trente jours.",
             },
         )
         self.index = _Index([self.chunk], [0.9])
         self.cache = _Cache()
+
+    def assert_local_policy_source(self, sources):
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0]["document_id"], "doc_policy")
+        self.assertEqual(sources[0]["type"], "local_file")
 
     def _patch_pipeline(
         self,
@@ -208,7 +216,7 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(result.answer, "La conservation est de **trente jours**.")
         self.assertEqual(result.mode, "STRICT(local)")
         self.assertEqual(result.status, "answered")
-        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assert_local_policy_source(result.sources)
         self.assertTrue(result.validation_performed)
         self.assertTrue(result.validations["faithfulness"]["faithful"])
 
@@ -422,6 +430,51 @@ class AnswerPipelineTests(unittest.TestCase):
 
         self.assertEqual(self.index.search_calls, [])
         self.assertEqual(result.validations["orchestration_needs_retrieval"], False)
+
+    def test_general_question_catalog_probe_promotes_strong_local_title_match(self):
+        from api import answer_pipeline as pipeline
+        from api.response_trace import ResponseTraceStore
+
+        matching = dict(self.chunk[1])
+        matching.update({"document_id": "orion-pdf", "title": "Guide de Project Orion.pdf", "file": "Guide de Project Orion.pdf", "text": "Project Orion is documented locally."})
+        index = _Index([(0.9, matching)], [0.9])
+        index.corpus = [matching]
+        plan = OrchestrationPlan(intent="general_question", needs_retrieval=False, response_strategy="general_answer")
+        traces = ResponseTraceStore()
+        with (
+            self._patch_pipeline(index=index),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+            patch.object(pipeline, "RESPONSE_TRACE_ENABLED", True),
+            patch.object(pipeline, "RESPONSE_TRACES", traces),
+        ):
+            result = run_answer_pipeline(AskIn(q="What is Project Orion?"), _request())
+
+        probe = traces.get(result.request_id)["stages"]["catalog_probe"]
+        self.assertTrue(probe["strong_match"])
+        self.assertGreaterEqual(probe["timing_ms"], 0.0)
+        self.assertEqual(index.search_calls[0][0], "What is Project Orion?")
+
+    def test_general_question_catalog_probe_keeps_unmatched_question_general(self):
+        from api import answer_pipeline as pipeline
+        from api.response_trace import ResponseTraceStore
+
+        index = _Index()
+        index.corpus = [{"document_id": "other", "title": "Unrelated financial report.pdf", "file": "Unrelated financial report.pdf"}]
+        plan = OrchestrationPlan(intent="general_question", needs_retrieval=False, response_strategy="general_answer")
+        traces = ResponseTraceStore()
+        with (
+            self._patch_pipeline(index=index),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+            patch.object(pipeline, "RESPONSE_TRACE_ENABLED", True),
+            patch.object(pipeline, "RESPONSE_TRACES", traces),
+        ):
+            result = run_answer_pipeline(AskIn(q="Explain REST APIs"), _request())
+
+        self.assertTrue(result.mode.startswith("GENERAL"))
+        self.assertEqual(index.search_calls, [])
+        self.assertFalse(traces.get(result.request_id)["stages"]["catalog_probe"]["strong_match"])
 
     def test_orchestrated_query_is_retrieved_without_condensation(self):
         from api import answer_pipeline as pipeline
@@ -658,7 +711,7 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(result.answer, "Brouillon non fidèle.")
         self.assertEqual(result.mode, "STRICT(local)")
         self.assertEqual(result.status, "answered")
-        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assert_local_policy_source(result.sources)
         self.assertEqual(result.review.caveat_type, "CONTRADICTED_CLAIM")
 
     def test_unsupported_claim_uses_existing_post_generation_caveat_channel(self):
@@ -723,7 +776,7 @@ class AnswerPipelineTests(unittest.TestCase):
 
         self.assertEqual(result.answer, "No. Tropicalization is no longer possible.")
         self.assertEqual(result.mode, "STRICT(local)")
-        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assert_local_policy_source(result.sources)
         self.assertEqual(result.review.caveat_type, "WEB_RECOMMENDED")
         self.assertTrue(result.review.suggest_web)
 
@@ -743,7 +796,7 @@ class AnswerPipelineTests(unittest.TestCase):
 
         self.assertEqual(result.answer, "Non. La tropicalisation n'est plus possible.")
         self.assertEqual(result.mode, "STRICT(local)")
-        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assert_local_policy_source(result.sources)
         self.assertEqual(result.review.status, "OK")
 
     def test_fresh_question_with_insufficient_local_context_can_still_ask_web(self):
@@ -799,7 +852,7 @@ class AnswerPipelineTests(unittest.TestCase):
             result = run_answer_pipeline(body, _request())
 
         self.assertEqual(result.answer, "Réponse locale validée.")
-        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assert_local_policy_source(result.sources)
         self.assertEqual(result.review.caveat_type, "WEB_RECOMMENDED")
 
     def test_post_verifier_none_action_remains_unchanged(self):
@@ -958,7 +1011,8 @@ class AnswerPipelineTests(unittest.TestCase):
             result = run_answer_pipeline(AskIn(q="La référence AX-17 est-elle compatible ?", source_mode="local"), _request())
 
         self.assertEqual(result.answer, "La conservation est de **trente jours**.")
-        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assert_local_policy_source(result.sources)
+        self.assertEqual(result.sources[0]["display_name"], "related-reference.txt")
         self.assertNotEqual(result.status, "abstained")
 
     def test_partial_and_chronological_evidence_reach_generation_with_sources(self):
@@ -993,7 +1047,7 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(observed["evidence_mode"], "direct")
         self.assertIn("première étape", result.answer)
         self.assertIn("ne peux donc pas confirmer", result.answer)
-        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assert_local_policy_source(result.sources)
         self.assertNotEqual(result.status, "abstained")
 
     def test_contradictory_direct_evidence_reaches_generation_with_sources(self):
@@ -1019,7 +1073,7 @@ class AnswerPipelineTests(unittest.TestCase):
             result = run_answer_pipeline(AskIn(q="La référence AX-17 est-elle approuvée ?", source_mode="local"), _request())
 
         self.assertIn("divergent", result.answer)
-        self.assertEqual(result.sources, [{"path": "C:/docs/policy.txt", "chunk": -1}])
+        self.assert_local_policy_source(result.sources)
         self.assertNotEqual(result.status, "abstained")
 
     def test_vaguely_similar_block_remains_none_and_abstains(self):

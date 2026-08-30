@@ -24,10 +24,18 @@ def stable_document_id(path: str, native_id: Optional[str] = None) -> str:
 
 class _Builder:
     def __init__(self, path: str, source: str, title: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, native_id: Optional[str] = None):
+        source_metadata = dict(metadata or {})
+        if source in {"file", "pdf"}:
+            resolved_path = str(Path(path).resolve())
+            # Parsing normally reads the user-selected file directly. Importers
+            # that copied it internally may provide distinct values explicitly.
+            source_metadata.setdefault("origin_path", resolved_path)
+            source_metadata.setdefault("indexed_path", resolved_path)
+            source_metadata.setdefault("display_name", Path(path).name)
         self.document = Document(
             document_id=stable_document_id(path, native_id), source=source,
             path=str(Path(path).resolve()), file=Path(path).name, title=title,
-            source_metadata=metadata or {},
+            source_metadata=source_metadata,
         )
         self._heading_stack: List[Tuple[int, str, str]] = []
         self._section_order = 0

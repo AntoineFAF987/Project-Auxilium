@@ -191,7 +191,9 @@ def _topic_relation(meta: dict[str, Any], query: str, semantics: QuerySemantics)
     title_topics = title_terms - _STATE_CHANGE_TERMS - proper_shared
     query_topics = query_terms - _STATE_CHANGE_TERMS - proper_shared
     competing_topic = bool(title_topics - query_topics) and not non_entity_shared
-    if non_entity_shared:
+    # A multiword entity/label ("Project Orion", a product code plus name)
+    # is a subject in its own right; one name alone remains insufficient.
+    if non_entity_shared or (semantics in {"fact_lookup", "general_document_question"} and len(proper_shared) >= 2):
         return "direct_subject_match", state_potential
     if semantics in {"current_state", "decision"} and state_potential and not competing_topic:
         return "state_resolution_context", True
@@ -357,9 +359,9 @@ def _priority_items(evidence: EvidenceSet, semantics: QuerySemantics) -> list[tu
     return sorted(evidence.items, key=lambda item: (_date_key(item[1]), item[0]), reverse=True)
 
 
-def _has_answer_bearing_content(items: list[tuple[float, dict[str, Any]]], semantics: QuerySemantics) -> bool:
+def _has_answer_bearing_content(items: list[tuple[float, dict[str, Any]]], semantics: QuerySemantics, query: str) -> bool:
     if semantics in {"fact_lookup", "general_document_question"}:
-        return any(not _is_header_only(meta) for _, meta in items)
+        return any(not _is_header_only(meta) and _candidate_is_related(meta, query, semantics) for _, meta in items)
     if semantics == "chronology":
         return len({_date_key(meta)[:10] for _, meta in items if _date_key(meta)}) >= 2
     # A mention of a decision alone (for example, "see attached decision") is
@@ -379,13 +381,13 @@ def _inspect(
     # First complete selected partial evidence. A header is a lead, not the
     # document's answer-bearing content.
     expansion_gaps = [gap for gap in gaps if gap.available_actions and gap.available_actions[0].type == "EXPAND"]
-    answer_available = _has_answer_bearing_content(items, semantics)
+    answer_available = _has_answer_bearing_content(items, semantics, query)
     if expansion_gaps and semantics in {"decision", "current_state", "chronology"} and (
         not answer_available
         or expansion_gaps[0].priority_class in {"potential_newer_state_resolution", "recent_directly_related", "temporal_coverage"}
     ):
         return EvidenceSufficiency(False, "semantic_question_has_unresolved_selected_evidence_gap", expansion_gaps[0].available_actions[0])
-    if leads and semantics in {"decision", "current_state", "chronology"}:
+    if leads and semantics in {"fact_lookup", "general_document_question", "decision", "current_state", "chronology"}:
         return EvidenceSufficiency(False, "semantic_question_has_unresolved_answer_bearing_candidate", leads[0].available_actions[0])
     if answer_available:
         return EvidenceSufficiency(True, "semantic_answer_bearing_evidence_available")

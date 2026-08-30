@@ -14,7 +14,18 @@ import TeX from "@matejmazur/react-katex";
 import "katex/dist/katex.min.css";
 
 /* ---------------- Types & Constantes --------------- */
-type Source = { path: string; chunk: number };
+type Source = {
+  document_id?: string;
+  type?: "local_file" | "email" | "email_attachment" | "web" | string;
+  display_name?: string;
+  origin_path?: string | null;
+  folder_path?: string | null;
+  indexed_path?: string | null;
+  exists?: boolean;
+  // Compatibility with conversations saved before the structured contract.
+  path?: string;
+  chunk?: number;
+};
 type PostGenerationReview = {
   status: "OK" | "CAVEAT";
   caveat_type?: "STALE_SOURCE" | "INDIRECT_EVIDENCE" | "PARTIAL_EVIDENCE" | "CONFLICTING_EVIDENCE" | "INFERENCE" | "UNSUPPORTED_CLAIM" | "CONTRADICTED_CLAIM" | "CITATION_MISMATCH" | "WEB_RECOMMENDED" | null;
@@ -1868,7 +1879,7 @@ export default function Page() {
                     const isLast = i === messages.length - 1;
 
                     const renderSource = (s: Source, key: number) => {
-                      const isWeb = /^https?:\/\//i.test(s.path || "");
+                      const isWeb = s.type === "web" || /^https?:\/\//i.test(s.path || "");
                       if (isWeb) {
                         return (
                           <li key={key} className="break-all">
@@ -1885,14 +1896,31 @@ export default function Page() {
                           </li>
                         );
                       }
+                      const unavailable = s.type === "local_file" && !s.exists;
+                      const folder = (s.folder_path || "").split(/[\\/]+/).filter(Boolean).slice(-3).join(" > ");
+                      const triggerSourceAction = async (action: "open_file" | "reveal_in_folder") => {
+                        if (!s.document_id || unavailable) return;
+                        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/sources/open`, {
+                          method: "POST", headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ document_id: s.document_id, action }),
+                        });
+                        if (!response.ok) {
+                          const data = await response.json().catch(() => null);
+                          alert(data?.detail || "Impossible d'ouvrir la source.");
+                        }
+                      };
                       return (
-                        <li key={key} className="break-all">
-                          <code className="bg-[var(--muted)] px-1 py-0.5 rounded">
-                            {s.path}
-                          </code>{" "}
-                          <span className="text-[var(--muted-text)]">
-                            {s.chunk >= 0 ? `(chunk ${s.chunk})` : ""}
-                          </span>
+                        <li key={key} className="list-none rounded-lg border border-[var(--border)] px-3 py-2">
+                          <div className="font-medium" title={s.origin_path || undefined}>{s.display_name || s.path || "Source locale"}</div>
+                          {folder && <div className="text-xs text-[var(--muted-text)] mt-0.5">{folder}</div>}
+                          {unavailable ? (
+                            <div className="text-xs text-amber-600 dark:text-amber-300 mt-1">Source introuvable à son emplacement d&apos;origine</div>
+                          ) : s.type === "local_file" ? (
+                            <div className="mt-2 flex gap-2">
+                              <button onClick={() => triggerSourceAction("open_file")} className="text-xs underline hover:opacity-80">Ouvrir</button>
+                              <button onClick={() => triggerSourceAction("reveal_in_folder")} className="text-xs underline hover:opacity-80">Afficher dans le dossier</button>
+                            </div>
+                          ) : null}
                         </li>
                       );
                     };

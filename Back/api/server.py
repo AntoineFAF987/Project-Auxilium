@@ -31,6 +31,7 @@ from .routes_chats import router as chats_router
 from .routes_mail_sync import router as mail_sync_router
 from .routes_orchestrator_debug import router as orchestrator_debug_router
 from .routes_response_trace import router as response_trace_router
+from .routes_sources import router as sources_router
 
 # Rate limit & config
 from .sessions import _RateLimiter
@@ -103,6 +104,7 @@ app.include_router(mail_sync_router)  # ✅ nouveau: mail sync (delta-like)
 app.include_router(status_router)
 app.include_router(ingest_router)
 app.include_router(ask_router)
+app.include_router(sources_router)
 
 @app.on_event("startup")
 async def on_startup():

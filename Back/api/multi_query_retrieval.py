@@ -27,12 +27,39 @@ def normalized_query(original: str) -> str | None:
     return candidate[:400]
 
 
-def build_retrieval_queries(*, original_query: str, orchestrator_query: str | None) -> list[tuple[str, str]]:
-    """At most three distinct representations, original always first."""
+def _followup_additions(raw_user_message: str, subject: str) -> str:
+    """Keep new subject qualifiers while discarding conversational search glue."""
+    glue = {
+        "and", "anything", "dans", "do", "en", "et", "find", "for", "in", "les", "local", "locales", "locaux",
+        "mail", "mails", "mes", "my", "nothing", "rien", "source", "sources", "the", "tu", "you",
+        "trouves", "trouver", "vos", "your", "can", "could", "check", "documents", "document",
+    }
+    subject_terms = set(_canonical(subject).split())
+    additions = [word for word in re.findall(r"[\wÀ-ÿ0-9-]+", raw_user_message)
+                 if _canonical(word) not in glue and _canonical(word) not in subject_terms and len(_canonical(word)) >= 3]
+    return " ".join(additions)
+
+
+def resolve_retrieval_query(*, raw_user_message: str, orchestrator_query: str, history: list[dict[str, Any]] | None = None) -> str:
+    """Resolve a follow-up to its subject without a second model invocation.
+
+    The orchestrator's standalone subject is the stable base; the current turn
+    can only append explicit, non-conversational qualifiers (for example a name).
+    History is intentionally accepted as execution context, while subject
+    resolution stays deterministic and does not reinterpret free-form prose.
+    """
+    del history  # The plan was built from compact history; avoid a second semantic pass here.
+    subject = orchestrator_query.strip()
+    additions = _followup_additions(raw_user_message, subject)
+    return " ".join(part for part in (subject, additions) if part).strip()
+
+
+def build_retrieval_queries(*, original_query: str, orchestrator_query: str | None, resolved_query: str | None = None, follow_up: bool = False) -> list[tuple[str, str]]:
+    """Build contextual variants; literal wording is retained only for autonomous turns."""
+    base = resolved_query or orchestrator_query or original_query
     options: list[tuple[str, str | None]] = [
-        ("original", original_query),
-        ("normalized", normalized_query(original_query)),
-        ("orchestrator", orchestrator_query),
+        *(([("resolved_subject", base), ("normalized_resolved_subject", normalized_query(base)), ("orchestrator", orchestrator_query)] if follow_up else
+          [("original", original_query), ("normalized", normalized_query(original_query)), ("orchestrator", orchestrator_query)])),
     ]
     seen: set[str] = set()
     result: list[tuple[str, str]] = []

@@ -10,7 +10,7 @@ if "api" not in sys.modules:
     package.__path__ = [str(_BACK_ROOT / "api")]
     sys.modules["api"] = package
 
-from api.multi_query_retrieval import build_retrieval_queries, reciprocal_rank_fusion  # noqa: E402
+from api.multi_query_retrieval import build_retrieval_queries, reciprocal_rank_fusion, resolve_retrieval_query  # noqa: E402
 
 
 def _chunk(uid, document):
@@ -44,3 +44,25 @@ def test_rrf_preserves_candidate_found_only_by_original_wording():
 def test_duplicate_rewrites_do_not_trigger_duplicate_searches():
     queries = build_retrieval_queries(original_query="Model 3725 maximum temperature", orchestrator_query="Model 3725 maximum temperature")
     assert [kind for kind, _ in queries] == ["original"]
+
+
+def test_followup_uses_resolved_subject_not_literal_conversational_wording():
+    resolved = resolve_retrieval_query(
+        raw_user_message="Do you find anything in my local sources?",
+        orchestrator_query="Project Orion",
+        history=[{"role": "user", "content": "What is Project Orion?"}],
+    )
+    queries = build_retrieval_queries(
+        original_query="Do you find anything in my local sources?", orchestrator_query="Project Orion",
+        resolved_query=resolved, follow_up=True,
+    )
+    assert resolved == "Project Orion"
+    assert queries == [("resolved_subject", "Project Orion")]
+
+
+def test_followup_preserves_explicit_new_name_filter():
+    resolved = resolve_retrieval_query(
+        raw_user_message="And in Pierre's emails?", orchestrator_query="Project Orion", history=[],
+    )
+    assert "Project Orion" in resolved
+    assert "Pierre" in resolved

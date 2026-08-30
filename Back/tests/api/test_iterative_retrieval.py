@@ -37,6 +37,29 @@ def test_current_state_prioritizes_latest_state_changing_evidence():
     assert rounds[0]["action"]["type"] == "SEARCH"
 
 
+def test_weak_general_evidence_cannot_hide_direct_subject_candidate():
+    unrelated = _row("newsletter", "newsletter-1", "Weekly product newsletter.", source="file")
+    matching = _row("orion-pdf", "orion-1", "Project Orion is the programme described here.", source="pdf")
+    matching["title"] = "Guide de Project Orion"
+    evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.9, unrelated), (0.5, matching)], initial_evidence=[(0.9, unrelated)],
+        corpus=[unrelated, matching], query="What is Project Orion?", semantics="general_document_question",
+    )
+    assert rounds[0]["sufficiency"]["sufficient"] is False
+    assert rounds[0]["candidate_leads"][0]["document_id"] == "orion-pdf"
+    assert any(meta["document_id"] == "orion-pdf" for _, meta in evidence)
+    assert decision.sufficient is True
+
+
+def test_weak_general_evidence_without_direct_candidate_is_not_sufficient():
+    unrelated = _row("newsletter", "newsletter-1", "Weekly product newsletter.", source="file")
+    _evidence, _rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.9, unrelated)], initial_evidence=[(0.9, unrelated)], corpus=[unrelated],
+        query="What is Project Orion?", semantics="general_document_question",
+    )
+    assert decision.sufficient is False
+
+
 def test_decision_lead_outside_initial_evidence_blocks_sufficiency_and_is_followed():
     submitted = _row("request", "jan10", "Request submitted.", date="2026-01-10T00:00:00Z")
     waiting = _row("request", "jan15", "Request is still waiting.", date="2026-01-15T00:00:00Z", order=1)

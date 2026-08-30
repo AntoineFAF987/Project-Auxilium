@@ -36,8 +36,10 @@ from .orchestration import (
 from .orchestration_debug import record_snapshot
 from .response_trace import ResponseTraceStore
 from .iterative_retrieval import run_iterative_evidence_retrieval
-from .multi_query_retrieval import build_retrieval_queries, reciprocal_rank_fusion
+from .multi_query_retrieval import build_retrieval_queries, reciprocal_rank_fusion, resolve_retrieval_query
+from .catalog_probe import probe_document_catalog
 from .chats_db import create_chat, append_message
+from .source_references import references_for_blocks
 from auth_ms import verify_ms_token
 
 # --- Anti-429: concurrence + retries ---
@@ -1208,6 +1210,18 @@ def run_answer_pipeline(
             })
 
     if orchestration_plan is not None and not orchestration_plan.needs_retrieval:
+        catalog_probe = None
+        if orchestration_plan.intent == "general_question":
+            catalog_probe = probe_document_catalog(q, getattr(idx, "corpus", None))
+            trace("catalog_probe", catalog_probe.trace())
+            if catalog_probe.strong_match:
+                orchestration_plan = orchestration_plan.model_copy(update={
+                    "intent": "document_question", "needs_retrieval": True, "retrieval_query": q,
+                    "response_strategy": "answer",
+                })
+        else:
+            trace("catalog_probe", {"executed": False, "strong_match": False, "reason": "intent_not_general_question", "timing_ms": 0.0})
+    if orchestration_plan is not None and not orchestration_plan.needs_retrieval:
         conversational = orchestration_plan.response_strategy == "ask_for_missing_information"
         try:
             ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink,
@@ -1301,11 +1315,12 @@ def run_answer_pipeline(
             # An explicit source mode remains authoritative; an empty
             # intersection must not accidentally mean "all sources" to idx.search.
             allowed_sources = {"__no_matching_source__"}
-    retrieval_queries = (
-        build_retrieval_queries(original_query=q, orchestrator_query=orchestration_plan.retrieval_query)
-        if orchestration_plan else [("original", q_eff)]
-    )
-    trace("retrieval_input", {"original_query": q, "orchestrator_query": orchestration_plan.retrieval_query if orchestration_plan else None, "q_eff": q_eff, "q_eff_source": "orchestrator_query" if orchestration_plan else ("condensed_query" if should_condense else "original_query"), "retrieval_queries": [{"type": kind, "query": query} for kind, query in retrieval_queries], "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": orchestration_plan.source_types if orchestration_plan else [], "temporal_constraints": [item.model_dump(mode="json") for item in orchestration_plan.temporal_constraints] if orchestration_plan else [], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
+    follow_up = bool(orchestration_plan and orchestration_plan.intent == "refine_previous_search" and orchestration_plan.reuse_previous_subject)
+    resolved_retrieval_query = resolve_retrieval_query(raw_user_message=q, orchestrator_query=orchestration_plan.retrieval_query or q, history=hist) if follow_up else None
+    retrieval_queries = build_retrieval_queries(original_query=q, orchestrator_query=orchestration_plan.retrieval_query, resolved_query=resolved_retrieval_query, follow_up=follow_up) if orchestration_plan else [("original", q_eff)]
+    if resolved_retrieval_query:
+        q_eff = resolved_retrieval_query
+    trace("retrieval_input", {"raw_user_message": q, "resolved_retrieval_query": resolved_retrieval_query, "follow_up_retrieval": follow_up, "original_query": q, "orchestrator_query": orchestration_plan.retrieval_query if orchestration_plan else None, "q_eff": q_eff, "q_eff_source": "resolved_retrieval_query" if resolved_retrieval_query else ("orchestrator_query" if orchestration_plan else ("condensed_query" if should_condense else "original_query")), "retrieval_queries": [{"type": kind, "query": query} for kind, query in retrieval_queries], "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": orchestration_plan.source_types if orchestration_plan else [], "temporal_constraints": [item.model_dump(mode="json") for item in orchestration_plan.temporal_constraints] if orchestration_plan else [], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
     _log_event(request_id, {"event": "rag_search_start", "q_eff": q_eff, "should_condense": should_condense, "hist_len": len(hist), "orchestrated": orchestration_plan is not None})
 
     retrieval_started = time.perf_counter()
@@ -1617,14 +1632,7 @@ def run_answer_pipeline(
             chosen = chosen or (blocks or [])
         else:
             chosen = (blocks or [])
-        tmp = [{"path": b[1]["path"], "chunk": b[1]["chunk_id"]} for b in chosen]
-        seen, uniq = set(), []
-        for s in tmp:
-            p = s.get("path")
-            if p and p not in seen:
-                seen.add(p)
-                uniq.append(s)
-        sources = [{"path": s["path"], "chunk": -1} for s in uniq]
+        sources = references_for_blocks(chosen)
     else:
         sources = []
 
