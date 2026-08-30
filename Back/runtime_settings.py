@@ -91,6 +91,18 @@ class FeatureSettings(_FrozenSettings):
     faithfulness_strict_only: bool = True
 
 
+class OrchestratorSettings(_FrozenSettings):
+    enabled: bool = False
+    model: str | None = None
+    timeout: int = Field(default=8, ge=1, le=30)
+    history_max_messages: int = Field(default=6, ge=4, le=8)
+
+
+class DebugSettings(_FrozenSettings):
+    response_trace: bool = True
+    response_trace_limit: int = Field(default=20, ge=1, le=100)
+
+
 class GenerationSettings(_FrozenSettings):
     provider: Literal["mistral", "openai"] = "mistral"
     model: str = "mistral-small-latest"
@@ -139,6 +151,8 @@ class RuntimeSettings(_FrozenSettings):
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     thresholds: ThresholdSettings = Field(default_factory=ThresholdSettings)
     features: FeatureSettings = Field(default_factory=FeatureSettings)
+    orchestrator: OrchestratorSettings = Field(default_factory=OrchestratorSettings)
+    debug: DebugSettings = Field(default_factory=DebugSettings)
     generation: GenerationSettings = Field(default_factory=GenerationSettings)
     timeouts: TimeoutSettings = Field(default_factory=TimeoutSettings)
     rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
@@ -291,6 +305,8 @@ def _runtime_payload(config: Mapping[str, Any]) -> dict[str, Any]:
             }.items()
             if source in rag
         },
+        "orchestrator": dict(config.get("orchestrator") or {}),
+        "debug": dict(config.get("debug") or {}),
         "generation": {
             target: llm[source]
             for target, source in {
@@ -350,6 +366,9 @@ _ENV_PATHS: dict[str, tuple[str, str]] = {
     "AUXILIUM_ENABLE_RERANKER": ("features", "enable_reranker"),
     "AUXILIUM_ENABLE_WEB_SEARCH": ("features", "enable_web_search"),
     "AUXILIUM_ENABLE_QUERY_CONDENSATION": ("features", "enable_query_condensation"),
+    "AUXILIUM_ORCHESTRATOR_ENABLED": ("orchestrator", "enabled"),
+    "AUXILIUM_ORCHESTRATOR_MODEL": ("orchestrator", "model"),
+    "AUXILIUM_ORCHESTRATOR_TIMEOUT": ("orchestrator", "timeout"),
     "AUXILIUM_ENABLE_QUERY_EXPANSION": ("features", "enable_query_expansion"),
     "AUXILIUM_ENABLE_POST_GENERATION_REVIEW": ("features", "enable_post_generation_review"),
     "AUXILIUM_ENABLE_FAITHFULNESS_CHECK": ("features", "enable_faithfulness_check"),

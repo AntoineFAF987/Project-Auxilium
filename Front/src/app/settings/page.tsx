@@ -21,10 +21,18 @@ import {
   saveSelectedEmailFolders,
   getSelectedDirectories,
   saveSelectedDirectories,
+  getOrchestratorDebugConfig,
+  testOrchestratorPlan,
+  type OrchestratorDebugConfig,
+  type OrchestratorDebugPlan,
+  listResponseTraces,
+  getResponseTrace,
+  type ResponseTraceSummary,
+  type ResponseTrace,
 } from "../lib/configApi";
 
 type Provider = "mistral" | "openai";
-type SettingsTab = "language" | "llm" | "dirs" | "emails";
+type SettingsTab = "language" | "llm" | "dirs" | "emails" | "orchestrator";
 
 const PROVIDER_MODELS: Record<Provider, string[]> = {
   mistral: ["mistral-small-latest"],
@@ -57,6 +65,13 @@ export default function SettingsPage() {
   const [selectedFolders, setSelectedFolders] = useState<string[]>([]);
   const [newMailFolder, setNewMailFolder] = useState("");
   const [loadingEmails, setLoadingEmails] = useState(false);
+  const [orchestratorDebug, setOrchestratorDebug] = useState<OrchestratorDebugConfig | null>(null);
+  const [orchestratorMessage, setOrchestratorMessage] = useState("");
+  const [orchestratorHistory, setOrchestratorHistory] = useState("[]");
+  const [orchestratorResult, setOrchestratorResult] = useState<OrchestratorDebugPlan | null>(null);
+  const [orchestratorLoading, setOrchestratorLoading] = useState(false);
+  const [responseTraces, setResponseTraces] = useState<ResponseTraceSummary[]>([]);
+  const [selectedTrace, setSelectedTrace] = useState<ResponseTrace | null>(null);
 
   useEffect(() => {
     setPendingLanguage(language);
@@ -99,6 +114,19 @@ export default function SettingsPage() {
         setMsg(`Email load failed: ${String(e?.message || e)}`);
       } finally {
         setLoadingEmails(false);
+      }
+    })();
+  }, [getTokens, tab]);
+
+  useEffect(() => {
+    if (tab !== "orchestrator") return;
+    (async () => {
+      try {
+        const { accessToken } = await getTokens();
+        setOrchestratorDebug(await getOrchestratorDebugConfig(accessToken));
+        setResponseTraces(await listResponseTraces(accessToken));
+      } catch (e: any) {
+        setMsg(`Orchestrator debug load failed: ${String(e?.message || e)}`);
       }
     })();
   }, [getTokens, tab]);
@@ -236,6 +264,7 @@ export default function SettingsPage() {
     { key: "llm", label: t("llm") },
     { key: "dirs", label: t("directories") },
     { key: "emails", label: t("emails") },
+    { key: "orchestrator", label: "Orchestrator Debug" },
   ];
 
   const languages: { key: UILanguage; label: string }[] = [
@@ -670,6 +699,49 @@ export default function SettingsPage() {
                   {msg && <div className="text-sm opacity-80 mt-3">{msg}</div>}
                 </>
               )}
+            </section>
+          )}
+
+          {tab === "orchestrator" && (
+            <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-sm space-y-5">
+              <div>
+                <h2 className="text-lg font-semibold">Orchestrator Debug</h2>
+                <p className="text-sm text-[var(--muted-text)]">Inspecte le plan sans lancer de recherche ni générer de réponse.</p>
+              </div>
+              {!orchestratorDebug ? <div className="text-sm text-[var(--muted-text)]">{t("loading")}</div> : <>
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div><span className="opacity-70">Enabled</span><div className="font-medium">{String(orchestratorDebug.enabled)}</div></div>
+                  <div><span className="opacity-70">Provider</span><div className="font-medium">{orchestratorDebug.provider}</div></div>
+                  <div><span className="opacity-70">Model</span><div className="font-medium break-all">{orchestratorDebug.model}</div></div>
+                  <div><span className="opacity-70">Timeout</span><div className="font-medium">{orchestratorDebug.timeout}s</div></div>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between"><h3 className="font-medium">System Prompt</h3><button onClick={() => navigator.clipboard.writeText(orchestratorDebug.system_prompt)} className="px-2 py-1 text-xs rounded border border-[var(--border)] cursor-pointer">Copy</button></div>
+                  <textarea readOnly value={orchestratorDebug.system_prompt} className="w-full h-48 p-3 font-mono text-xs rounded-lg border border-[var(--border)] bg-[var(--muted)]" />
+                </div>
+                <div className="space-y-3 border-t border-[var(--border)] pt-4">
+                  <h3 className="font-medium">Test Orchestrator</h3>
+                  <textarea value={orchestratorMessage} onChange={(e) => setOrchestratorMessage(e.target.value)} placeholder="Message utilisateur" className="w-full min-h-20 p-3 rounded-lg border border-[var(--border)] bg-[var(--surface)]" />
+                  <textarea value={orchestratorHistory} onChange={(e) => setOrchestratorHistory(e.target.value)} placeholder='Historique récent JSON, ex. [{"role":"user","content":"..."}]' className="w-full min-h-24 p-3 font-mono text-xs rounded-lg border border-[var(--border)] bg-[var(--surface)]" />
+                  <button disabled={orchestratorLoading || !orchestratorMessage.trim()} onClick={async () => {
+                    setOrchestratorLoading(true); setMsg(null);
+                    try {
+                      const history = JSON.parse(orchestratorHistory || "[]");
+                      if (!Array.isArray(history)) throw new Error("L'historique doit être un tableau JSON.");
+                      const { accessToken } = await getTokens();
+                      setOrchestratorResult(await testOrchestratorPlan(orchestratorMessage, history, accessToken));
+                    } catch (e: any) { setMsg(`Orchestrator test failed: ${String(e?.message || e)}`); }
+                    finally { setOrchestratorLoading(false); }
+                  }} className="px-4 py-2 rounded-lg bg-[var(--primary)] text-[var(--primary-foreground)] disabled:opacity-50 cursor-pointer">{orchestratorLoading ? "Generating…" : "Generate plan"}</button>
+                  {orchestratorResult && <pre className="max-h-80 overflow-auto p-3 text-xs rounded-lg bg-[var(--muted)] border border-[var(--border)]">{JSON.stringify(orchestratorResult, null, 2)}</pre>}
+                </div>
+                <div className="space-y-3 border-t border-[var(--border)] pt-4">
+                  <div className="flex items-center justify-between"><h3 className="font-medium">Response Trace</h3><button onClick={async () => { const { accessToken } = await getTokens(); setResponseTraces(await listResponseTraces(accessToken)); }} className="px-2 py-1 text-xs rounded border border-[var(--border)] cursor-pointer">Refresh</button></div>
+                  <div className="space-y-2 max-h-40 overflow-auto">{responseTraces.map((item) => <button key={item.request_id} onClick={async () => { const { accessToken } = await getTokens(); setSelectedTrace(await getResponseTrace(item.request_id, accessToken)); }} className="w-full text-left p-2 rounded border border-[var(--border)] text-xs hover:bg-[var(--muted)]"><div className="font-mono">{item.request_id}</div><div className="truncate opacity-70">{item.original_user_message}</div></button>)}</div>
+                  {selectedTrace && <details open><summary className="cursor-pointer font-medium">Timeline JSON</summary><pre className="mt-2 max-h-96 overflow-auto p-3 text-xs rounded-lg bg-[var(--muted)] border border-[var(--border)]">{JSON.stringify(selectedTrace, null, 2)}</pre></details>}
+                </div>
+              </>}
+              {msg && <div className="text-sm opacity-80">{msg}</div>}
             </section>
           )}
         </main>

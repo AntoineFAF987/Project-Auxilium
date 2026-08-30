@@ -51,6 +51,7 @@ from rag_core.faithfulness import (
     ClaimVerification,
     FaithfulnessReview,
 )
+from api.orchestration import OrchestrationPlan
 
 
 class _Cache:
@@ -358,8 +359,10 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertIsNotNone(result.abstention_reason)
 
     def test_general_mode_skips_retrieval(self):
+        from api import answer_pipeline as pipeline
+
         body = AskIn(q="Explique le principe général", source_mode="general")
-        with self._patch_pipeline():
+        with self._patch_pipeline(), patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": False})):
             result = run_answer_pipeline(body, _request())
 
         self.assertEqual(result.answer, "Réponse générale contrôlée.")
@@ -405,6 +408,95 @@ class AnswerPipelineTests(unittest.TestCase):
             self.index.search_calls[0][0],
             "durée de conservation de la politique",
         )
+
+    def test_orchestrated_conversation_skips_retrieval(self):
+        from api import answer_pipeline as pipeline
+
+        plan = OrchestrationPlan(intent="conversation", needs_retrieval=False, response_strategy="ask_for_missing_information")
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+        ):
+            result = run_answer_pipeline(AskIn(q="J'ai reçu une question."), _request())
+
+        self.assertEqual(self.index.search_calls, [])
+        self.assertEqual(result.validations["orchestration_needs_retrieval"], False)
+
+    def test_orchestrated_query_is_retrieved_without_condensation(self):
+        from api import answer_pipeline as pipeline
+
+        plan = OrchestrationPlan(
+            intent="refine_previous_search", needs_retrieval=True,
+            retrieval_query="demande autonome discutée dans les emails",
+            use_history=True, source_types=["email"], source_type_provenance={"email": "explicit"}, response_strategy="answer",
+        )
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+            patch.object(pipeline, "_condense_question") as condense,
+        ):
+            run_answer_pipeline(AskIn(q="Regarde les plus récents", source_mode="auto"), _request())
+
+        self.assertEqual(self.index.search_calls[0][0], plan.retrieval_query)
+        # The message itself did not select emails, so a planner-proposed
+        # source scope cannot become a hard filter.
+        self.assertIsNone(self.index.search_calls[0][1]["allowed_sources"])
+        condense.assert_not_called()
+
+    def test_enabled_orchestrator_precedes_legacy_semantic_shortcuts_for_documentary_followups(self):
+        from api import answer_pipeline as pipeline
+        from api.response_trace import ResponseTraceStore
+
+        plans = [
+            OrchestrationPlan(intent="document_question", needs_retrieval=True, retrieval_query="status of the request", response_strategy="answer"),
+            OrchestrationPlan(intent="refine_previous_search", needs_retrieval=True, retrieval_query="response received on Tuesday about the request", use_history=True, reuse_previous_subject=True, response_strategy="answer"),
+            OrchestrationPlan(intent="refine_previous_search", needs_retrieval=True, retrieval_query="verify the status of the request", use_history=True, reuse_previous_subject=True, response_strategy="answer"),
+            OrchestrationPlan(intent="refine_previous_search", needs_retrieval=True, retrieval_query="documents concerning the status of the request", use_history=True, reuse_previous_subject=True, response_strategy="answer"),
+        ]
+        trace_store = ResponseTraceStore()
+        messages = [
+            "Has my request been accepted?",
+            "I think I received an answer on Tuesday.",
+            "Please verify it.",
+            "Search the documents about it.",
+        ]
+        history = []
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "RESPONSE_TRACE_ENABLED", True),
+            patch.object(pipeline, "RESPONSE_TRACES", trace_store),
+            patch.object(pipeline, "_run_orchestration", side_effect=plans) as orchestrate,
+            patch.object(pipeline, "classify_smalltalk_semantic", return_value="insult") as smalltalk,
+        ):
+            for message in messages:
+                result = run_answer_pipeline(AskIn(q=message, history=history), _request())
+                trace = trace_store.get(result.request_id)
+                self.assertIn("orchestrator_input", trace["stages"])
+                self.assertIn("orchestration", trace["stages"])
+                self.assertIn("retrieval_input", trace["stages"])
+                self.assertIn("retrieval", trace["stages"])
+                self.assertNotIn("legacy_bypass", trace["stages"])
+                history.extend([{"role": "user", "content": message}, {"role": "assistant", "content": result.answer}])
+
+        self.assertEqual(orchestrate.call_count, len(messages))
+        smalltalk.assert_not_called()
+        self.assertEqual(len(self.index.search_calls), len(messages))
+
+    def test_invalid_orchestration_falls_back_to_legacy_pipeline(self):
+        from api import answer_pipeline as pipeline
+
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", side_effect=ValueError("invalid plan")),
+        ):
+            result = run_answer_pipeline(AskIn(q="Question locale", source_mode="local"), _request())
+
+        self.assertEqual(result.mode, "STRICT(local)")
+        self.assertEqual(len(self.index.search_calls), 1)
 
     def test_retrieval_parameters_and_order_are_preserved(self):
         from api import answer_pipeline as pipeline
@@ -945,6 +1037,7 @@ class AnswerPipelineTests(unittest.TestCase):
         index = _Index([self.chunk], [0.9])
         with (
             self._patch_pipeline(index=index),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": False})),
             patch.object(pipeline, "classify_smalltalk_semantic", return_value="greeting"),
             patch.object(pipeline, "_try_get_auth_ids", return_value=("tenant-1", "user-1")),
             patch.object(pipeline, "create_chat") as create,

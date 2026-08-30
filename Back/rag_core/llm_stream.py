@@ -4,6 +4,7 @@ ask_mistral_with_context_stream — Version streaming pour affichage progressif
 """
 from typing import List, Dict, Iterator, Optional
 from .affect import detect_mood
+from .capability_contract import LOCAL_SOURCE_CAPABILITY_EN, LOCAL_SOURCE_CAPABILITY_FR
 from runtime_settings import get_runtime_settings
 from .llm_providers import stream_from_payload
 
@@ -226,7 +227,7 @@ def ask_mistral_with_context_stream(
         ]
         rules += _style_rules()
         if not context_text or not context_text.strip():
-            rules.append("Si la question demande des faits précis sans source fournie, dis-le plutôt que de deviner.")
+            rules.append(LOCAL_SOURCE_CAPABILITY_FR)
         else:
             rules += [
                 "Utilise UNIQUEMENT le CONTEXTE fourni ; n'invente jamais une conclusion ou un fait absent.",
@@ -252,7 +253,7 @@ def ask_mistral_with_context_stream(
         ]
         rules += _style_rules()
         if not context_text or not context_text.strip():
-            rules.append("If precise facts are requested and no source is provided, say so rather than guessing.")
+            rules.append(LOCAL_SOURCE_CAPABILITY_EN)
         else:
             rules += [
                 "Answer ONLY from the provided CONTEXT; never invent a conclusion or fact that is absent.",

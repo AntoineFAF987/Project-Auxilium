@@ -27,6 +27,35 @@ def test_sync_strict_prompt_requires_facts_before_a_caveat_for_direct_evidence()
     assert 'réponds exactement : "Je ne sais pas"' not in prompt
 
 
+def test_sync_general_prompt_distinguishes_missing_results_from_source_access():
+    captured = {}
+
+    with patch("rag_core.llm.generate_from_payload", side_effect=lambda payload: captured.update(payload) or "ok"):
+        assert ask_mistral_with_context("Question factuelle", "", history=[]) == "ok"
+
+    prompt = _system_message(captured)
+    assert "sources locales indexées" in prompt
+    assert "absence d'accès" in prompt
+
+
+def test_streaming_general_prompt_uses_the_same_local_source_capability_contract():
+    sync_captured = {}
+    stream_captured = {}
+
+    with patch("rag_core.llm.generate_from_payload", side_effect=lambda payload: sync_captured.update(payload) or "ok"):
+        assert ask_mistral_with_context("Question factuelle", "", history=[]) == "ok"
+    with patch("rag_core.llm_stream.stream_from_payload", side_effect=lambda payload: stream_captured.update(payload) or iter(["ok"])):
+        assert list(ask_mistral_with_context_stream("Question factuelle", "", history=[])) == ["ok"]
+
+    sync_prompt = _system_message(sync_captured)
+    stream_prompt = _system_message(stream_captured)
+    capability = "Auxilium peut rechercher dans ses sources locales indexées"
+    assert capability in sync_prompt
+    assert capability in stream_prompt
+    assert "absence d'accès" in sync_prompt
+    assert "absence d'accès" in stream_prompt
+
+
 def test_streaming_strict_prompt_keeps_the_same_partial_evidence_contract():
     captured = {}
 

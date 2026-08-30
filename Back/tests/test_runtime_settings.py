@@ -30,6 +30,7 @@ class RuntimeSettingsLoadingTests(unittest.TestCase):
         self.assertEqual(settings.generation.max_tokens, 1200)
         self.assertFalse(settings.features.enable_post_generation_review)
         self.assertFalse(settings.features.enable_faithfulness_check)
+        self.assertFalse(settings.orchestrator.enabled)
 
     def test_config_file_values_override_defaults(self):
         from runtime_settings import load_runtime_settings
@@ -59,6 +60,17 @@ class RuntimeSettingsLoadingTests(unittest.TestCase):
         self.assertEqual(settings.generation.model, "custom-model")
         self.assertEqual(settings.generation.temperature, 0.3)
         self.assertEqual(settings.generation.max_tokens, 777)
+
+    def test_orchestrator_has_its_own_opt_in_configuration(self):
+        from runtime_settings import load_runtime_settings
+
+        settings = load_runtime_settings(
+            config_data={"orchestrator": {"enabled": True, "model": "planner-model", "timeout": 7}},
+            env={},
+        )
+        self.assertTrue(settings.orchestrator.enabled)
+        self.assertEqual(settings.orchestrator.model, "planner-model")
+        self.assertEqual(settings.orchestrator.timeout, 7)
 
     def test_environment_values_override_the_config_file(self):
         from runtime_settings import load_runtime_settings

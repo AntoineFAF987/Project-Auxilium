@@ -28,6 +28,13 @@ from rag_core.faithfulness import (
 from rag_core.llm_stream import ask_mistral_with_context_stream
 from rag_core.turn_type import classify_turn
 from runtime_settings import get_runtime_settings
+from .orchestration import (
+    OrchestrationPlan, OrchestrationPlanOutputError, build_prompt, compact_history,
+    explain_candidate_rejection, filter_retrieval_candidates, plan_once,
+    sanitize_plan_for_retrieval,
+)
+from .orchestration_debug import record_snapshot
+from .response_trace import ResponseTraceStore
 from .chats_db import create_chat, append_message
 from auth_ms import verify_ms_token
 
@@ -220,6 +227,9 @@ HISTORY_MAX_TURNS = _RUNTIME_SETTINGS.conversation.history_max_turns
 REPLY_HISTORY_MAX_TURNS = _RUNTIME_SETTINGS.conversation.reply_history_max_turns
 WEB_MAX_CHARS = _RUNTIME_SETTINGS.conversation.web_max_chars
 WEB_RESULT_K = _RUNTIME_SETTINGS.conversation.web_result_k
+ORCHESTRATOR_SETTINGS = _RUNTIME_SETTINGS.orchestrator
+RESPONSE_TRACE_ENABLED = _RUNTIME_SETTINGS.debug.response_trace
+RESPONSE_TRACES = ResponseTraceStore(_RUNTIME_SETTINGS.debug.response_trace_limit)
 
 LLM_SEM = threading.Semaphore(4)  # limite d'appels LLM en parallèle
 
@@ -244,6 +254,24 @@ def _safe_llm(fn, *args, **kwargs):
         raise HTTPException(status_code=429, detail="Serveur occupé, réessaie dans 1–2 secondes.")
     try:
         return _call_llm_with_retries(fn, *args, **kwargs)
+    finally:
+        LLM_SEM.release()
+
+
+def _run_orchestration(q: str, history: List[Dict]) -> OrchestrationPlan:
+    """One planner call only: no retry loop and no retrieval side effect."""
+    if not LLM_SEM.acquire(timeout=5):
+        raise RuntimeError("orchestrator_busy")
+    try:
+        return plan_once(
+            q,
+            # Keep enough alternating user/assistant turns to retain the
+            # substantive subject before a terse source-selection follow-up.
+            history[-max(ORCHESTRATOR_SETTINGS.history_max_messages, 6):],
+            lambda prompt, **kwargs: _with_timeout(ask_mistral_with_context, prompt, **kwargs),
+            model=ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model,
+            timeout=ORCHESTRATOR_SETTINGS.timeout,
+        )
     finally:
         LLM_SEM.release()
 
@@ -876,6 +904,13 @@ def run_answer_pipeline(
     request_id = str(uuid.uuid4())
     validations: Dict[str, Any] = {}
     q = validate_answer_request(body)
+    trace_started = time.perf_counter()
+    if RESPONSE_TRACE_ENABLED:
+        RESPONSE_TRACES.start(request_id, {"original_user_message": q, "mode": body.source_mode or "auto", "conversation_id": body.thread_id})
+
+    def trace(stage: str, data: Dict[str, Any]) -> None:
+        if RESPONSE_TRACE_ENABLED:
+            RESPONSE_TRACES.stage(request_id, stage, data)
 
     # The visible conversation lifecycle is independent from the response path:
     # persist the user turn before processing, then persist exactly one completed
@@ -912,7 +947,9 @@ def run_answer_pipeline(
                 # Keep the HTTP/SSE result available even if its assistant write fails.
                 pass
         persisted_chat_id = chat_id if user_turn_persisted else result.chat_id
-        return replace(result, chat_id=(persisted_chat_id or None))
+        final = replace(result, chat_id=(persisted_chat_id or None))
+        trace("answer", {"final_answer": final.answer, "mode": final.mode, "sources": final.sources, "total_ms": round((time.perf_counter() - trace_started) * 1000, 1)})
+        return final
 
     # --- Historique & thread ---
     if body.reply_history:
@@ -921,6 +958,8 @@ def run_answer_pipeline(
     else:
         raw_hist: List[Dict] = [{"role": m.role, "content": m.content} for m in (body.history or [])]
         hist = trim_history(raw_hist, max_turns=HISTORY_MAX_TURNS)
+
+    trace("request", {"history_used": hist, "orchestrator_enabled": ORCHESTRATOR_SETTINGS.enabled, "provider": _RUNTIME_SETTINGS.generation.provider, "orchestrator_model": ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model, "generation_model": _RUNTIME_SETTINGS.generation.model})
 
     thread_id = (body.thread_id or "default").strip() or "default"
     _touch_session(thread_id)
@@ -950,7 +989,7 @@ def run_answer_pipeline(
         allowed_sources = {"web"}
 
     # --- Roleplay on/off ---
-    trig = detect_roleplay_trigger(hist, q)
+    trig = None if ORCHESTRATOR_SETTINGS.enabled else detect_roleplay_trigger(hist, q)
     if trig is True:
         _set_roleplay(thread_id, True)
     elif trig is False:
@@ -958,7 +997,7 @@ def run_answer_pipeline(
     roleplay_active = _get_roleplay(thread_id)
 
     # Roleplay actif (et pas factuel) -> réponse courte roleplay
-    if roleplay_active and (not looks_factual(q)):
+    if (not ORCHESTRATOR_SETTINGS.enabled) and roleplay_active and (not looks_factual(q)):
         try:
             ans = _generate_answer(
                 q, "", history=hist, token_sink=token_sink,
@@ -972,10 +1011,10 @@ def run_answer_pipeline(
 
     # --- Small talk rapide ---
     try:
-        skind = classify_smalltalk_semantic(q, idx.embed_model)
+        skind = "" if ORCHESTRATOR_SETTINGS.enabled else classify_smalltalk_semantic(q, idx.embed_model)
     except Exception:
         skind = ""
-    if skind:
+    if (not ORCHESTRATOR_SETTINGS.enabled) and skind:
         try:
             ans = _generate_answer(
                 q, reply_preamble, history=hist, token_sink=token_sink,
@@ -988,7 +1027,7 @@ def run_answer_pipeline(
             raise HTTPException(status_code=500, detail=f"LLM error: {e}")
 
     # --- Suivi "explique" après équation précédente ---
-    if _is_explain_followup(q) and sess.get("last_math"):
+    if (not ORCHESTRATOR_SETTINGS.enabled) and _is_explain_followup(q) and sess.get("last_math"):
         math_ans = _solve_math(sess["last_math"], detailed=True, timeout_sec=MATH_TIMEOUT_SEC)
         if math_ans:
             sess["no_context_once"] = True
@@ -996,7 +1035,7 @@ def run_answer_pipeline(
             return finalize_result(_result(answer=math_ans, sources=[], request_id=request_id))
 
     # --- Maths directes ---
-    if _looks_like_equation(q):
+    if (not ORCHESTRATOR_SETTINGS.enabled) and _looks_like_equation(q):
         math_ans = _solve_math(q, detailed=True, timeout_sec=MATH_TIMEOUT_SEC)
         if math_ans:
             sess["last_math"] = q
@@ -1005,7 +1044,7 @@ def run_answer_pipeline(
             return finalize_result(_result(answer=math_ans, sources=[], request_id=request_id))
 
     # --- Mode "general" forcé par l'utilisateur ---
-    if mode_in == "general":
+    if (not ORCHESTRATOR_SETTINGS.enabled) and mode_in == "general":
         try:
             ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink)
             return finalize_result(_result(answer=ans, sources=[], mode="GENERAL(no-context)", ctx_len=len(reply_preamble), request_id=request_id))
@@ -1014,9 +1053,82 @@ def run_answer_pipeline(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"LLM error: {e}")
 
+    # One-shot orchestration is opt-in. Any failure falls through to the
+    # unchanged legacy path; it never prevents a user request from completing.
+    orchestration_plan: Optional[OrchestrationPlan] = None
+    raw_orchestration_plan: Optional[OrchestrationPlan] = None
+    orchestration_ms: Optional[float] = None
+    if ORCHESTRATOR_SETTINGS.enabled:
+        started = time.perf_counter()
+        try:
+            trace("orchestrator_input", {"system_prompt": build_prompt(q, hist).split("\nCURRENT_DATE_UTC:", 1)[0], "user_message": q, "history": hist, "active_subject_candidates": compact_history(hist).get("active_subject_candidates", [])})
+            raw_orchestration_plan = _run_orchestration(q, hist)
+            sanitized_plan = sanitize_plan_for_retrieval(raw_orchestration_plan, user_message=q)
+            orchestration_plan = sanitized_plan.plan
+            orchestration_ms = round((time.perf_counter() - started) * 1000, 1)
+            constraints_count = len(orchestration_plan.temporal_constraints) + sum(
+                bool(value) for value in orchestration_plan.metadata_constraints.model_dump().values()
+            )
+            _log_event(request_id, {
+                "event": "orchestration", "orchestration_ms": orchestration_ms,
+                "orchestration_intent": orchestration_plan.intent,
+                "orchestration_needs_retrieval": orchestration_plan.needs_retrieval,
+                "orchestration_use_history": orchestration_plan.use_history,
+                "orchestration_reuse_previous_subject": orchestration_plan.reuse_previous_subject,
+                # Preserve observability without exposing a sensitive standalone query.
+                "orchestration_query": hashlib.sha256((orchestration_plan.retrieval_query or "").encode("utf-8")).hexdigest()[:12] if orchestration_plan.retrieval_query else None,
+                "orchestration_constraints_count": constraints_count,
+            })
+            record_snapshot(raw_orchestration_plan, orchestration_ms=orchestration_ms, fallback_used=False)
+            trace("orchestration", {
+                "raw_orchestration_plan": raw_orchestration_plan.model_dump(mode="json"),
+                "validated_orchestration_plan": orchestration_plan.model_dump(mode="json"),
+                "constraints": {
+                    "hard_filters": sanitized_plan.hard_filters,
+                    "soft_preferences": sanitized_plan.soft_preferences,
+                    "removed": sanitized_plan.removed_constraints,
+                },
+                "orchestration_latency_ms": orchestration_ms,
+                "fallback_used": False,
+                "validation_error": None,
+                "validation_error_details": None,
+                "raw_model_output": raw_orchestration_plan._raw_model_output,
+            })
+        except Exception as exc:
+            orchestration_ms = round((time.perf_counter() - started) * 1000, 1)
+            _log_event(request_id, {"event": "orchestration_fallback", "orchestration_ms": orchestration_ms, "reason": type(exc).__name__})
+            record_snapshot(None, orchestration_ms=orchestration_ms, fallback_used=True)
+            trace("orchestration", {
+                "raw_orchestration_plan": None,
+                "validated_orchestration_plan": None,
+                "constraints": {"hard_filters": [], "soft_preferences": [], "removed": []},
+                "orchestration_latency_ms": orchestration_ms,
+                "fallback_used": True,
+                "validation_error": type(exc).__name__,
+                "validation_error_details": exc.validation_error_details if isinstance(exc, OrchestrationPlanOutputError) else None,
+                "raw_model_output": exc.raw_model_output if isinstance(exc, OrchestrationPlanOutputError) else None,
+            })
+
+    if orchestration_plan is not None and not orchestration_plan.needs_retrieval:
+        conversational = orchestration_plan.response_strategy == "ask_for_missing_information"
+        try:
+            ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink,
+                                   conversational_mode=conversational, max_tokens=160 if conversational else None)
+            return finalize_result(_result(
+                answer=ans, sources=[], request_id=request_id, route_mode="general",
+                mode="GENERAL(orchestrated-conversation)" if conversational else "GENERAL(orchestrated)",
+                ctx_len=len(reply_preamble),
+                validations={"orchestration_intent": orchestration_plan.intent,
+                             "orchestration_needs_retrieval": False, "evidence_mode": "none"},
+            ))
+        except FuturesTimeout:
+            raise HTTPException(status_code=504, detail="LLM timeout")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"LLM error: {e}")
+
     # Decide whether this turn is answerable now before rewriting or searching.
-    turn_decision = classify_turn(q, idx.embed_model, hist)
-    turn_type = turn_decision.turn_type
+    turn_decision = classify_turn(q, idx.embed_model, hist) if orchestration_plan is None else None
+    turn_type = turn_decision.turn_type if turn_decision else "orchestrated"
     if turn_type == "conversational_continuation":
         _log_event(request_id, {
             "event": "ask", "turn_type": turn_type, "q_eff": q,
@@ -1044,8 +1156,8 @@ def run_answer_pipeline(
     # TIER 0 amélioration: condensation de question avec historique
     # Désactiver si historique trop court (risque de dérive) - compter messages utilisateur uniquement
     user_msg_count_for_condense = len([m for m in hist if m.get("role") == "user"])
-    should_condense = (hist and user_msg_count_for_condense >= 2 and ENABLE_CONDENSATION)
-    q_eff = _condense_question(hist, q) if should_condense else q
+    should_condense = (hist and user_msg_count_for_condense >= 2 and ENABLE_CONDENSATION and orchestration_plan is None)
+    q_eff = orchestration_plan.retrieval_query if orchestration_plan else (_condense_question(hist, q) if should_condense else q)
 
     # Protection: si question très vague (<30 chars pure question) ET pas assez d'historique => forcer GENERAL
     # Questions typiques: "Comment ça marche ?", "Pourquoi ?", "Explique", "How does it work?"
@@ -1056,7 +1168,7 @@ def run_answer_pipeline(
     )
     # Compter UNIQUEMENT les messages utilisateur dans l'historique (pas les réponses assistant)
     user_msg_count = len([m for m in hist if m.get("role") == "user"])
-    if is_vague_question and user_msg_count < 2:
+    if is_vague_question and user_msg_count < 2 and orchestration_plan is None:
         # Pas assez de contexte conversationnel pour ancrer la recherche => GENERAL direct
         _log_event(request_id, {"event": "vague_question_fallback", "q": q, "user_msg_count": user_msg_count})
         try:
@@ -1084,8 +1196,17 @@ def run_answer_pipeline(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"LLM error: {e}")
 
-    _log_event(request_id, {"event": "rag_search_start", "q_eff": q_eff, "should_condense": should_condense, "hist_len": len(hist)})
+    if orchestration_plan and orchestration_plan.source_types:
+        planned_sources = set(orchestration_plan.source_types)
+        allowed_sources = planned_sources if allowed_sources is None else (allowed_sources & planned_sources)
+        if not allowed_sources:
+            # An explicit source mode remains authoritative; an empty
+            # intersection must not accidentally mean "all sources" to idx.search.
+            allowed_sources = {"__no_matching_source__"}
+    trace("retrieval_input", {"original_query": q, "orchestrator_query": orchestration_plan.retrieval_query if orchestration_plan else None, "q_eff": q_eff, "q_eff_source": "orchestrator_query" if orchestration_plan else ("condensed_query" if should_condense else "original_query"), "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": orchestration_plan.source_types if orchestration_plan else [], "temporal_constraints": [item.model_dump(mode="json") for item in orchestration_plan.temporal_constraints] if orchestration_plan else [], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
+    _log_event(request_id, {"event": "rag_search_start", "q_eff": q_eff, "should_condense": should_condense, "hist_len": len(hist), "orchestrated": orchestration_plan is not None})
 
+    retrieval_started = time.perf_counter()
     prelim, ce_scores = idx.search(
         q_eff,
         retrieve_k=RETRIEVE_K,
@@ -1094,6 +1215,12 @@ def run_answer_pipeline(
         use_rerank=ENABLE_RERANKER,
         allowed_sources=allowed_sources,
     )
+    before_constraints = len(prelim)
+    rejected_candidates = []
+    if orchestration_plan:
+        rejected_candidates = [{"filename": meta.get("file"), "source": meta.get("source"), "score": score, **reason} for score, meta in prelim if (reason := explain_candidate_rejection(meta, orchestration_plan))]
+        prelim = filter_retrieval_candidates(prelim, orchestration_plan)
+    trace("retrieval", {"retrieval_ms": round((time.perf_counter() - retrieval_started) * 1000, 1), "idx_search_candidates": before_constraints, "after_constraint_filter": len(prelim), "initial_candidates": [{"filename": meta.get("file"), "source": meta.get("source"), "score": score, "document_metadata": meta.get("document_metadata") or {}} for score, meta in prelim[:20]], "rejected_candidates": rejected_candidates[:20]})
     prelim_hits = len(prelim)
     fused = fuse_contiguous_passages(prelim, gap=FUSE_ADJACENT_GAP)
     blocks = clip_context_blocks(fused, max_chars=MAX_CONTEXT_CHARS, keep=FINAL_K)
@@ -1108,6 +1235,7 @@ def run_answer_pipeline(
         q, blocks, guard_ok=bool(gated_ok), context_is_relevant=context_is_relevant, overlap=overlap,
     )
     evidence_mode = evidence_decision.mode
+    trace("evidence", {"evidence_mode": evidence_mode, "evidence_mode_reason": evidence_decision.reason, "context_is_relevant": evidence_decision.context_is_relevant, "context_relevance_reason": evidence_decision.context_relevance_reason, "morphological_topic_overlap": evidence_decision.morphological_topic_overlap, "guard_ok": bool(gated_ok), "strict_local_ok": evidence_mode in {"direct", "related"}, "final_context_blocks": [{"metadata": meta, "score": score, "text": meta.get("text")} for score, meta in blocks]})
 
     # Only the evidence decision controls whether local blocks are usable.
     strict_local_ok = evidence_mode in {"direct", "related"}
@@ -1127,6 +1255,8 @@ def run_answer_pipeline(
                         use_rerank=ENABLE_RERANKER,
                         allowed_sources=allowed_sources,
                     )
+                    if orchestration_plan:
+                        p2 = filter_retrieval_candidates(p2, orchestration_plan)
                     all_prelims.append(p2)
                 except Exception:
                     continue
@@ -1161,7 +1291,11 @@ def run_answer_pipeline(
     }
 
     # --- Choix du mode (règle déterministe actu ⇒ web_live, hors sujet ⇒ general) ---
-    if mode_in in {"local", "web_index", "web_live"}:
+    if orchestration_plan is not None:
+        # In this path the plan is the only authority deciding to retrieve.
+        # evidence_mode still determines whether the retrieved blocks are usable.
+        route_mode = "strict_local"
+    elif mode_in in {"local", "web_index", "web_live"}:
         route_mode = {
             "local": "strict_local",
             "web_index": "strict_local",
@@ -1279,10 +1413,13 @@ def run_answer_pipeline(
 
     # ===================== Appel LLM principal =====================
     try:
+        generation_started = time.perf_counter()
+        trace("generation_input", {"generation_mode": mode_label, "question": q, "context_length": len(context_for_llm or ""), "context": context_for_llm, "provider": _RUNTIME_SETTINGS.generation.provider, "model": _RUNTIME_SETTINGS.generation.model, "reasoning_effort": _RUNTIME_SETTINGS.generation.reasoning_effort, "system_prompt": "constructed by rag_core.llm from generation mode and evidence mode", "evidence_mode": evidence_mode if use_strict else "none"})
         answer = _generate_answer(
             q, context_for_llm, history=hist, token_sink=token_sink,
             evidence_mode=evidence_mode if use_strict else "none",
         )
+        trace("generation", {"generation_total_ms": round((time.perf_counter() - generation_started) * 1000, 1), "first_token_ms": None if token_sink is None else None})
         # Parse des citations éventuelles
         citations_idx = []
         try:
@@ -1394,8 +1531,13 @@ def run_answer_pipeline(
         "overlap": overlap,
         "guard_ok": bool(gated_ok),
         "turn_type": turn_type,
-        "turn_type_reason": turn_decision.decision_reason,
-        "turn_type_margin": getattr(turn_decision, "semantic_margin", None),
+        "turn_type_reason": turn_decision.decision_reason if turn_decision else "orchestrator_primary",
+        "turn_type_margin": getattr(turn_decision, "semantic_margin", None) if turn_decision else None,
+        "orchestration_intent": orchestration_plan.intent if orchestration_plan else None,
+        "orchestration_needs_retrieval": orchestration_plan.needs_retrieval if orchestration_plan else None,
+        "orchestration_use_history": orchestration_plan.use_history if orchestration_plan else None,
+        "orchestration_reuse_previous_subject": orchestration_plan.reuse_previous_subject if orchestration_plan else None,
+        "orchestration_ms": orchestration_ms,
         "evidence_mode": evidence_mode,
         "evidence_mode_reason": evidence_decision.reason,
         "context_is_relevant": evidence_decision.context_is_relevant,

@@ -24,6 +24,16 @@
     "max_context_chars": 12000,
     "fuse_adjacent_gap": 1
   },
+  "orchestrator": {
+    "enabled": true,
+    "model": null,
+    "timeout": 8,
+    "history_max_messages": 6
+  },
+  "debug": {
+    "response_trace": true,
+    "response_trace_limit": 20
+  },
   "graph": {
     "client_id": "9f9d4471-a297-4095-86ff-8af1173f700d",
     "authority": "https://login.microsoftonline.com/consumers",
@@ -87,8 +97,8 @@
     "per_sec": 10
   },
   "llm": {
-    "provider": "openai",
-    "model": "gpt-5.6-luna",
+    "provider": "mistral",
+    "model": "mistral-small-latest",
     "temperature": 0.6,
     "strict_temperature": 0.45,
     "top_p": 0.9,

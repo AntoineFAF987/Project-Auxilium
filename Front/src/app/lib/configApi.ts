@@ -36,6 +36,22 @@ export type AppConfig = {
   [k: string]: any;
 };
 
+export type OrchestratorDebugConfig = {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  timeout: number;
+  system_prompt: string;
+};
+
+export type OrchestratorDebugPlan = {
+  plan: Record<string, unknown> | null;
+  latency_ms: number;
+  fallback_used: boolean;
+};
+export type ResponseTraceSummary = { request_id: string; timestamp: string; original_user_message?: string; mode?: string };
+export type ResponseTrace = Record<string, unknown>;
+
 /* ================== Helpers ================== */
 
 /** Supprime les / finaux. */
@@ -138,6 +154,40 @@ export async function testLLM(llm: NonNullable<AppConfig["llm"]>, token?: string
   const data = await r.json().catch(() => ({} as any));
   if (!r.ok) throw new Error(data?.detail || `POST /config/test/llm: ${r.status} ${r.statusText}`);
   return data;
+}
+
+export async function getOrchestratorDebugConfig(token?: string): Promise<OrchestratorDebugConfig> {
+  const r = await safeFetch(`${API}/debug/orchestrator/config`, {
+    headers: authHeaders(token), cache: "no-store",
+  });
+  if (!r.ok) throw new Error(`GET /debug/orchestrator/config: ${r.status} ${r.statusText}`);
+  return r.json();
+}
+
+export async function testOrchestratorPlan(
+  message: string,
+  history: Array<{ role: "user" | "assistant"; content: string }>,
+  token?: string,
+): Promise<OrchestratorDebugPlan> {
+  const r = await safeFetch(`${API}/debug/orchestrator/plan`, {
+    method: "POST", headers: authHeaders(token),
+    body: JSON.stringify({ message, history }), timeoutMs: 20000,
+  });
+  const data = await r.json().catch(() => ({} as OrchestratorDebugPlan));
+  if (!r.ok) throw new Error((data as any)?.detail || `POST /debug/orchestrator/plan: ${r.status} ${r.statusText}`);
+  return data;
+}
+
+export async function listResponseTraces(token?: string): Promise<ResponseTraceSummary[]> {
+  const r = await safeFetch(`${API}/debug/response-traces`, { headers: authHeaders(token), cache: "no-store" });
+  if (!r.ok) throw new Error(`GET /debug/response-traces: ${r.status}`);
+  return ((await r.json()).traces || []) as ResponseTraceSummary[];
+}
+
+export async function getResponseTrace(requestId: string, token?: string): Promise<ResponseTrace> {
+  const r = await safeFetch(`${API}/debug/response-traces/${encodeURIComponent(requestId)}`, { headers: authHeaders(token), cache: "no-store" });
+  if (!r.ok) throw new Error(`GET /debug/response-traces/${requestId}: ${r.status}`);
+  return r.json();
 }
 
 /* ================== DOSSIERS LOCAUX (fichiers) ================== */

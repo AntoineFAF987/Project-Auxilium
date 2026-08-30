@@ -29,6 +29,8 @@ from .routes_directory_settings import router as directory_settings_router
 from .routes_extensions_settings import router as extensions_settings_router
 from .routes_chats import router as chats_router
 from .routes_mail_sync import router as mail_sync_router
+from .routes_orchestrator_debug import router as orchestrator_debug_router
+from .routes_response_trace import router as response_trace_router
 
 # Rate limit & config
 from .sessions import _RateLimiter
@@ -87,6 +89,8 @@ init_db()
 
 # Endpoints config
 app.include_router(config_router)
+app.include_router(orchestrator_debug_router)
+app.include_router(response_trace_router)
 
 # Paramètres → E-mails, Dossiers, Extensions
 app.include_router(email_settings_router)
