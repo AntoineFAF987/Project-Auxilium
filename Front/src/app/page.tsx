@@ -64,6 +64,8 @@ const SIDEBAR_W = 16;  // rem (w-64)
 const HISTORY_MAX = 12;
 const FOOTER_GAP_MIN = 0; // espace min au-dessus du bord (px)
 const CHAT_FOOTER_GAP = 120; // espace entre le dernier message et la barre
+const CHAT_CONTEXT_MENU_WIDTH = 252;
+const CONTEXT_MENU_GAP = 8;
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -188,8 +190,13 @@ function TrashIcon(props: React.SVGProps<SVGSVGElement>) {
 
 function ProjectIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <path d="M21 9.25V9.2C21 8.0799 21 7.51984 20.782 7.09202C20.5903 6.7157 20.2843 6.40974 19.908 6.21799C19.4802 6 18.9201 6 17.8 6L3 6M3 6L3 16.8C3 17.9201 3 18.4802 3.21799 18.908C3.40973 19.2843 3.7157 19.5903 4.09202 19.782C4.51984 20 5.0799 20 6.2 20H7M3 6L3 5.6C3 5.03995 3 4.75992 3.109 4.54601C3.20487 4.35785 3.35785 4.20487 3.54601 4.10899C3.75992 4 4.03995 4 4.6 4H9.33726C9.58185 4 9.70415 4 9.81923 4.02763C9.92127 4.05213 10.0188 4.09253 10.1083 4.14736C10.2092 4.2092 10.2957 4.29568 10.4686 4.46863L12 6M16 14L18 16M11 21V18.5L18.5 11L21 13.5L13.5 21H11Z" />
+    <svg viewBox="0 0 24 24" fill="none" {...props}>
+      <path
+        fillRule="evenodd"
+        clipRule="evenodd"
+        d="M2 6C2 4.34315 3.34315 3 5 3H7.75093C8.82997 3 9.86325 3.43595 10.6162 4.20888L9.94852 4.85927L10.6162 4.20888L11.7227 5.34484C11.911 5.53807 12.1693 5.64706 12.4391 5.64706H16.4386C18.5513 5.64706 20.281 7.28495 20.4284 9.35939C21.7878 9.88545 22.5642 11.4588 21.977 12.927L20.1542 17.4853C19.5468 19.0041 18.0759 20 16.4402 20H6C4.88522 20 3.87543 19.5427 3.15116 18.8079C2.44035 18.0867 2 17.0938 2 16V6ZM18.3829 9.17647C18.1713 8.29912 17.3812 7.64706 16.4386 7.64706H12.4391C11.6298 7.64706 10.8548 7.3201 10.2901 6.7404L9.18356 5.60444L9.89987 4.90666L9.18356 5.60444C8.80709 5.21798 8.29045 5 7.75093 5H5C4.44772 5 4 5.44772 4 6V14.4471L5.03813 11.25C5.43958 10.0136 6.59158 9.17647 7.89147 9.17647H18.3829ZM5.03034 17.7499L6.94036 11.8676C7.07417 11.4555 7.45817 11.1765 7.89147 11.1765H19.4376C19.9575 11.1765 20.3131 11.7016 20.12 12.1844L18.2972 16.7426C17.9935 17.502 17.258 18 16.4402 18H6C5.64785 18 5.31756 17.9095 5.03034 17.7499Z"
+        fill="currentColor"
+      />
     </svg>
   );
 }
@@ -665,6 +672,7 @@ export default function Page() {
   const [newProjectName, setNewProjectName] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
   const [projectCreationModalOpen, setProjectCreationModalOpen] = useState(false);
+  const [projectCreationChatId, setProjectCreationChatId] = useState<string | null>(null);
   const [projectCreationError, setProjectCreationError] = useState<string | null>(null);
   const [projectMemoryMode, setProjectMemoryMode] = useState<ProjectMemoryMode>("default");
   const [projectMemoryMenuOpen, setProjectMemoryMenuOpen] = useState(false);
@@ -713,12 +721,9 @@ export default function Page() {
 
   const [menuId, setMenuId] = useState<string | null>(null);
   const [chatMenuLocation, setChatMenuLocation] = useState<"normal" | "pinned">("normal");
-  const [menuUp, setMenuUp] = useState(false);
+  const [chatMenuPosition, setChatMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [moveMenuChatId, setMoveMenuChatId] = useState<string | null>(null);
   const [moveMenuPosition, setMoveMenuPosition] = useState<{ top: number; left: number } | null>(null);
-  const [creatingProjectForChat, setCreatingProjectForChat] = useState(false);
-  const [newProjectNameForChat, setNewProjectNameForChat] = useState("");
-  const [moveMenuError, setMoveMenuError] = useState<string | null>(null);
   const [showSrc, setShowSrc] = useState<Record<string, boolean>>({});
   const [historicalMessageIds, setHistoricalMessageIds] = useState<Set<string>>(new Set());
   const [scrolled, setScrolled] = useState(false);
@@ -848,14 +853,13 @@ export default function Page() {
           return;
         }
         setProjectCreationModalOpen(false);
+        setProjectCreationChatId(null);
         setProjectCreationError(null);
         setNewProjectName("");
         setMenuId(null);
+        setChatMenuPosition(null);
         setMoveMenuChatId(null);
         setMoveMenuPosition(null);
-        setCreatingProjectForChat(false);
-        setNewProjectNameForChat("");
-        setMoveMenuError(null);
         setProjectMenuId(null);
         setProjectMenuPosition(null);
         setDrawer(false);
@@ -885,11 +889,9 @@ export default function Page() {
       if (!t) return;
       if (t.closest(".menu-pop") || t.closest(".menu-toggle")) return;
       setMenuId(null);
+      setChatMenuPosition(null);
       setMoveMenuChatId(null);
       setMoveMenuPosition(null);
-      setCreatingProjectForChat(false);
-      setNewProjectNameForChat("");
-      setMoveMenuError(null);
       setProjectMenuId(null);
       setProjectMenuPosition(null);
     };
@@ -1031,6 +1033,7 @@ export default function Page() {
   const createProject = async () => {
     const name = newProjectName.trim();
     if (!name || creatingProject) return;
+    const chatToMove = projectCreationChatId ? chats.find((chat) => chat.id === projectCreationChatId) : null;
     setCreatingProject(true);
     setProjectCreationError(null);
     try {
@@ -1038,12 +1041,19 @@ export default function Page() {
       if (!idToken) throw new Error("Session expirée");
       const project = await projectsApi.createProject(name, idToken);
       setProjects((prev) => [project, ...prev]);
+      if (chatToMove) {
+        await chatsApi.moveChatToProject(chatToMove.id, project.id, idToken);
+        setChats((prev) => prev.map((chat) => chat.id === chatToMove.id ? { ...chat, projectId: project.id } : chat));
+        closeChatMenus();
+      } else {
+        setProjectsSectionOpen(true);
+        openProject(project.id);
+      }
       setNewProjectName("");
       setProjectCreationModalOpen(false);
+      setProjectCreationChatId(null);
       setProjectMemoryMenuOpen(false);
       setProjectMemoryMode("default");
-      setProjectsSectionOpen(true);
-      openProject(project.id);
     } catch (err: unknown) {
       setProjectCreationError(errorMessage(err) || "Impossible de créer le projet");
     } finally {
@@ -1054,6 +1064,7 @@ export default function Page() {
   const closeProjectCreationModal = () => {
     if (creatingProject) return;
     setProjectCreationModalOpen(false);
+    setProjectCreationChatId(null);
     setProjectCreationError(null);
     setProjectMemoryMenuOpen(false);
     setHoveredProjectMemoryMode(null);
@@ -1063,11 +1074,34 @@ export default function Page() {
 
   const closeChatMenus = () => {
     setMenuId(null);
+    setChatMenuPosition(null);
     setMoveMenuChatId(null);
     setMoveMenuPosition(null);
-    setCreatingProjectForChat(false);
-    setNewProjectNameForChat("");
-    setMoveMenuError(null);
+  };
+
+  const openChatContextMenu = (
+    target: HTMLButtonElement,
+    chatId: string,
+    location: "normal" | "pinned"
+  ) => {
+    const isOpen = menuId === chatId && chatMenuLocation === location;
+    if (isOpen) {
+      closeChatMenus();
+      return;
+    }
+
+    const rect = target.getBoundingClientRect();
+    const opensRight = rect.right + CONTEXT_MENU_GAP + CHAT_CONTEXT_MENU_WIDTH <= window.innerWidth - CONTEXT_MENU_GAP;
+    setChatMenuPosition({
+      top: Math.min(Math.max(CONTEXT_MENU_GAP, rect.top), Math.max(CONTEXT_MENU_GAP, window.innerHeight - 224)),
+      left: opensRight
+        ? rect.right + CONTEXT_MENU_GAP
+        : Math.max(CONTEXT_MENU_GAP, rect.left - CONTEXT_MENU_GAP - CHAT_CONTEXT_MENU_WIDTH),
+    });
+    setMoveMenuChatId(null);
+    setMoveMenuPosition(null);
+    setChatMenuLocation(location);
+    setMenuId(chatId);
   };
 
   const openMoveToProjectMenu = (target: HTMLElement, chatId: string) => {
@@ -1075,32 +1109,14 @@ export default function Page() {
     if (!mainMenu) return;
     const mainRect = mainMenu.getBoundingClientRect();
     const itemRect = target.getBoundingClientRect();
-    const menuWidth = 224;
-    const gap = 8;
+    const menuWidth = CHAT_CONTEXT_MENU_WIDTH;
+    const gap = CONTEXT_MENU_GAP;
     const opensRight = mainRect.right + gap + menuWidth <= window.innerWidth - gap;
     setMoveMenuPosition({
       top: Math.min(Math.max(gap, itemRect.top), Math.max(gap, window.innerHeight - 360)),
       left: opensRight ? mainRect.right + gap : Math.max(gap, mainRect.left - gap - menuWidth),
     });
     setMoveMenuChatId(chatId);
-    setCreatingProjectForChat(false);
-    setMoveMenuError(null);
-  };
-
-  const createProjectAndMoveChat = async (chat: StoredChat) => {
-    const name = newProjectNameForChat.trim();
-    if (!name) return;
-    try {
-      const { idToken } = await getTokens();
-      if (!idToken) throw new Error("Session expirée");
-      const project = await projectsApi.createProject(name, idToken);
-      setProjects((prev) => [project, ...prev]);
-      await chatsApi.moveChatToProject(chat.id, project.id, idToken);
-      setChats((prev) => prev.map((item) => item.id === chat.id ? { ...item, projectId: project.id } : item));
-      closeChatMenus();
-    } catch (err: unknown) {
-      setMoveMenuError(errorMessage(err) || "Impossible de créer le projet");
-    }
   };
 
   const renameProject = async (project: projectsApi.Project) => {
@@ -1234,13 +1250,13 @@ export default function Page() {
     e.stopPropagation();
     const current = chats.find((c) => c.id === id)?.title || "";
     const name = window.prompt("Nouveau nom :", current)?.trim();
-    if (!name) return setMenuId(null);
+    if (!name) return closeChatMenus();
     try {
       const { idToken } = await getTokens();
       await chatsApi.renameChat(id, name, idToken);
       await refreshChats();
     } finally {
-      setMenuId(null);
+      closeChatMenus();
     }
   };
 
@@ -1261,8 +1277,61 @@ export default function Page() {
         setReplyTarget(null);
       }
     } finally {
-      setMenuId(null);
+      closeChatMenus();
     }
+  };
+
+  const renderChatContextMenu = (chat: StoredChat) => {
+    if (!chatMenuPosition || typeof document === "undefined") return null;
+
+    return createPortal(
+      <div
+        role="menu"
+        className="menu-pop chat-context-menu fixed z-[1000] w-[252px] max-w-[calc(100vw-16px)] rounded-[20px] border border-slate-200/80 bg-white p-2 text-[var(--text)] shadow-[0_16px_40px_rgba(15,23,41,0.16)]"
+        style={chatMenuPosition}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button type="button" role="menuitem" className="flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap hover:bg-slate-100/80 cursor-pointer" onClick={(e) => renameChat(e, chat.id)}>
+          <EditIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
+          <span>Renommer</span>
+        </button>
+        <div className="my-1.5 border-t border-slate-200/80" role="separator" />
+        <button
+          type="button"
+          role="menuitem"
+          className="flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap hover:bg-slate-100/80 cursor-pointer"
+          onClick={(e) => {
+            toggleChatPinned(e, chat);
+            closeChatMenus();
+          }}
+        >
+          <PinIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
+          <span>{chat.pinned ? "Désépingler le chat" : "Épingler le chat"}</span>
+        </button>
+        <button type="button" role="menuitem" className="flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm text-red-600 whitespace-nowrap hover:bg-red-50 cursor-pointer" onClick={(e) => deleteChat(e, chat.id)}>
+          <TrashIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
+          <span>{t("delete")}</span>
+        </button>
+        <div className="my-1.5 border-t border-slate-200/80" role="separator" />
+        <button
+          type="button"
+          role="menuitem"
+          aria-haspopup="menu"
+          aria-expanded={moveMenuChatId === chat.id}
+          onMouseEnter={(e) => openMoveToProjectMenu(e.currentTarget, chat.id)}
+          onClick={(e) => {
+            e.stopPropagation();
+            openMoveToProjectMenu(e.currentTarget, chat.id);
+          }}
+          className="flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap hover:bg-slate-100/80 cursor-pointer"
+        >
+          <ProjectIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
+          <span className="flex-1">Déplacer vers le projet</span>
+          <span className="text-lg leading-none text-[var(--muted-text)]" aria-hidden="true">›</span>
+        </button>
+      </div>,
+      document.body
+    );
   };
 
   const renderChatItem = (chat: StoredChat, indent = false, menuLocation: "normal" | "pinned" = "normal") => {
@@ -1299,27 +1368,14 @@ export default function Page() {
         <button
           onClick={(e) => {
             e.stopPropagation();
-            const isOpen = menuId === chat.id;
-            const row = (e.currentTarget.closest(".chat-item") as HTMLElement) ?? (e.currentTarget.parentElement as HTMLElement);
-            setMenuUp(row ? row.getBoundingClientRect().top > window.innerHeight / 2 : false);
-            setMoveMenuChatId(null);
-            setMoveMenuPosition(null);
-            setCreatingProjectForChat(false);
-            setChatMenuLocation(menuLocation);
-            setMenuId(isOpen ? null : chat.id);
+            openChatContextMenu(e.currentTarget, chat.id, menuLocation);
           }}
           className={`menu-toggle absolute right-2 p-1 rounded text-[var(--muted-text)] hover:text-[var(--text)] hover:bg-[var(--muted)] cursor-pointer ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
           aria-label={t("moreActions")}
         >
           <svg viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor"><circle cx="4" cy="10" r="1.5" /><circle cx="10" cy="10" r="1.5" /><circle cx="16" cy="10" r="1.5" /></svg>
         </button>
-        {open && (
-          <div role="menu" className={`menu-pop chat-context-menu absolute right-2 ${menuUp ? "bottom-full mb-1" : "top-full mt-1"} w-44 rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg py-1 z-20`} onClick={(e) => e.stopPropagation()}>
-            <button className="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-[var(--muted)] cursor-pointer" onClick={(e) => renameChat(e, chat.id)} type="button"><EditIcon className="h-4 w-4" aria-hidden="true" />{t("rename")}</button>
-            <button type="button" role="menuitem" aria-haspopup="menu" aria-expanded={moveMenuChatId === chat.id} onMouseEnter={(e) => openMoveToProjectMenu(e.currentTarget, chat.id)} onClick={(e) => { e.stopPropagation(); openMoveToProjectMenu(e.currentTarget, chat.id); }} className="w-full flex items-center justify-between gap-2 text-left px-3 py-2 text-sm hover:bg-[var(--muted)] cursor-pointer"><span>Déplacer vers le projet</span><span aria-hidden="true">›</span></button>
-            <button className="w-full flex items-center gap-2 text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 cursor-pointer" onClick={(e) => deleteChat(e, chat.id)} type="button"><TrashIcon className="h-4 w-4" aria-hidden="true" />{t("delete")}</button>
-          </div>
-        )}
+        {open && renderChatContextMenu(chat)}
       </div>
     );
   };
@@ -2373,21 +2429,7 @@ export default function Page() {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            const isOpen = menuId === c.id;
-                            const row =
-                              (e.currentTarget.closest(".chat-item") as HTMLElement) ??
-                              (e.currentTarget.parentElement as HTMLElement);
-                            if (row) {
-                              const rect = row.getBoundingClientRect();
-                              setMenuUp(rect.top > window.innerHeight / 2);
-                            } else {
-                              setMenuUp(false);
-                            }
-                            setMoveMenuChatId(null);
-                            setMoveMenuPosition(null);
-                            setCreatingProjectForChat(false);
-                            setChatMenuLocation("normal");
-                            setMenuId(isOpen ? null : c.id);
+                            openChatContextMenu(e.currentTarget, c.id, "normal");
                           }}
                           className={`menu-toggle absolute right-2 p-1 rounded text-[var(--muted-text)] hover:text-[var(--text)] hover:bg-[var(--muted)] cursor-pointer ${
                             open ? "opacity-100" : "opacity-0 group-hover:opacity-100"
@@ -2400,49 +2442,7 @@ export default function Page() {
                             <circle cx="16" cy="10" r="1.5" />
                           </svg>
                         </button>
-                        {open && (
-                          <div
-                            role="menu"
-                            className={`menu-pop chat-context-menu absolute right-2 ${
-                              menuUp ? "bottom-full mb-1" : "top-full mt-1"
-                            } w-44 rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg py-1 z-20`}
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <button
-                              className="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-[var(--muted)] cursor-pointer"
-                              onClick={(e) => renameChat(e, c.id)}
-                              type="button"
-                            >
-                              {/* Remplacer icône actuelle par EditIcon */}
-                              <EditIcon className="h-4 w-4" aria-hidden="true" />
-                              {t("rename")}
-                            </button>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              aria-haspopup="menu"
-                              aria-expanded={moveMenuChatId === c.id}
-                              onMouseEnter={(e) => openMoveToProjectMenu(e.currentTarget, c.id)}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openMoveToProjectMenu(e.currentTarget, c.id);
-                              }}
-                              className="w-full flex items-center justify-between gap-2 text-left px-3 py-2 text-sm hover:bg-[var(--muted)] cursor-pointer"
-                            >
-                              <span>Déplacer vers le projet</span>
-                              <span aria-hidden="true">›</span>
-                            </button>
-                            <button
-                              className="w-full flex items-center gap-2 text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 cursor-pointer"
-                              onClick={(e) => deleteChat(e, c.id)}
-                              type="button"
-                            >
-                              {/* Remplacer icône actuelle par TrashIcon */}
-                              <TrashIcon className="h-4 w-4" aria-hidden="true" />
-                              {t("delete")}
-                            </button>
-                          </div>
-                        )}
+                        {open && renderChatContextMenu(c)}
                       </div>
                     );
                   })
@@ -2452,39 +2452,32 @@ export default function Page() {
             {moveMenuChat && moveMenuPosition && typeof document !== "undefined" && createPortal(
               <div
                 role="menu"
-                className="menu-pop fixed z-[1010] min-w-56 max-w-72 max-h-[calc(100vh-16px)] overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg py-1"
+                className="menu-pop fixed z-[1010] min-w-[252px] max-w-[calc(100vw-16px)] max-h-[calc(100vh-16px)] overflow-y-auto rounded-[20px] border border-slate-200/80 bg-white p-2 text-[var(--text)] shadow-[0_16px_40px_rgba(15,23,41,0.16)]"
                 style={moveMenuPosition}
                 onClick={(e) => e.stopPropagation()}
               >
-                {creatingProjectForChat ? (
-                  <div className="px-2 py-1.5">
-                    <input
-                      autoFocus
-                      value={newProjectNameForChat}
-                      onChange={(e) => setNewProjectNameForChat(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") createProjectAndMoveChat(moveMenuChat);
-                        if (e.key === "Escape") closeChatMenus();
-                      }}
-                      placeholder="Nom du projet"
-                      className="w-full px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--surface)] outline-none"
-                    />
-                    <div className="mt-1 flex justify-end gap-1">
-                      <button type="button" onClick={closeChatMenus} className="px-2 py-1 text-xs rounded hover:bg-[var(--muted)] cursor-pointer">Annuler</button>
-                      <button type="button" disabled={!newProjectNameForChat.trim()} onClick={() => createProjectAndMoveChat(moveMenuChat)} className="px-2 py-1 text-xs rounded hover:bg-[var(--muted)] disabled:opacity-50 cursor-pointer">Créer</button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <button type="button" role="menuitem" onClick={() => { setCreatingProjectForChat(true); setMoveMenuError(null); }} className="w-full text-left px-3 py-2 text-sm hover:bg-[var(--muted)] cursor-pointer">Nouveau projet</button>
-                    <div className="my-1 border-t border-[var(--border)]" />
-                    <button type="button" role="menuitem" onClick={() => moveChatToProject(moveMenuChat, null)} className="w-full flex items-center justify-between gap-2 text-left px-3 py-2 text-sm hover:bg-[var(--muted)] cursor-pointer"><span>Aucun projet</span>{!moveMenuChat.projectId && <span aria-label="Projet actuel">✓</span>}</button>
-                    {projects.map((project) => (
-                      <button key={project.id} type="button" role="menuitem" onClick={() => moveChatToProject(moveMenuChat, project.id)} className="w-full flex items-center justify-between gap-2 text-left px-3 py-2 text-sm hover:bg-[var(--muted)] cursor-pointer"><span className="truncate">{project.name}</span>{moveMenuChat.projectId === project.id && <span aria-label="Projet actuel">✓</span>}</button>
-                    ))}
-                  </>
-                )}
-                {moveMenuError && <div className="px-3 py-2 text-xs text-red-600">{moveMenuError}</div>}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    closeChatMenus();
+                    setProjectCreationChatId(moveMenuChat.id);
+                    setProjectCreationError(null);
+                    setNewProjectName("");
+                    setProjectMemoryMode("default");
+                    setProjectMemoryMenuOpen(false);
+                    setHoveredProjectMemoryMode(null);
+                    setProjectCreationModalOpen(true);
+                  }}
+                  className="min-h-10 w-full rounded-xl px-3 text-left text-sm whitespace-nowrap hover:bg-slate-100/80 cursor-pointer"
+                >
+                  Nouveau projet
+                </button>
+                <div className="my-1.5 border-t border-slate-200/80" role="separator" />
+                <button type="button" role="menuitem" onClick={() => moveChatToProject(moveMenuChat, null)} className="flex min-h-10 w-full items-center justify-between gap-2 rounded-xl px-3 text-left text-sm whitespace-nowrap hover:bg-slate-100/80 cursor-pointer"><span>Aucun projet</span>{!moveMenuChat.projectId && <span aria-label="Projet actuel">✓</span>}</button>
+                {projects.map((project) => (
+                  <button key={project.id} type="button" role="menuitem" onClick={() => moveChatToProject(moveMenuChat, project.id)} className="flex min-h-10 w-full items-center justify-between gap-2 rounded-xl px-3 text-left text-sm hover:bg-slate-100/80 cursor-pointer"><span className="truncate whitespace-nowrap">{project.name}</span>{moveMenuChat.projectId === project.id && <span aria-label="Projet actuel">✓</span>}</button>
+                ))}
               </div>,
               document.body
             )}
