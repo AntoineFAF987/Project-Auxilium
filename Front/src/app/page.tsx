@@ -190,13 +190,29 @@ function TrashIcon(props: React.SVGProps<SVGSVGElement>) {
 
 function ProjectIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
-    <svg viewBox="0 0 24 24" fill="none" {...props}>
-      <path
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M2 6C2 4.34315 3.34315 3 5 3H7.75093C8.82997 3 9.86325 3.43595 10.6162 4.20888L9.94852 4.85927L10.6162 4.20888L11.7227 5.34484C11.911 5.53807 12.1693 5.64706 12.4391 5.64706H16.4386C18.5513 5.64706 20.281 7.28495 20.4284 9.35939C21.7878 9.88545 22.5642 11.4588 21.977 12.927L20.1542 17.4853C19.5468 19.0041 18.0759 20 16.4402 20H6C4.88522 20 3.87543 19.5427 3.15116 18.8079C2.44035 18.0867 2 17.0938 2 16V6ZM18.3829 9.17647C18.1713 8.29912 17.3812 7.64706 16.4386 7.64706H12.4391C11.6298 7.64706 10.8548 7.3201 10.2901 6.7404L9.18356 5.60444L9.89987 4.90666L9.18356 5.60444C8.80709 5.21798 8.29045 5 7.75093 5H5C4.44772 5 4 5.44772 4 6V14.4471L5.03813 11.25C5.43958 10.0136 6.59158 9.17647 7.89147 9.17647H18.3829ZM5.03034 17.7499L6.94036 11.8676C7.07417 11.4555 7.45817 11.1765 7.89147 11.1765H19.4376C19.9575 11.1765 20.3131 11.7016 20.12 12.1844L18.2972 16.7426C17.9935 17.502 17.258 18 16.4402 18H6C5.64785 18 5.31756 17.9095 5.03034 17.7499Z"
-        fill="currentColor"
-      />
+    <svg viewBox="0 0 24 24" fill="currentColor" {...props}>
+      <path d="M18 6h-6c0-1.104-.896-2-2-2h-4c-1.654 0-3 1.346-3 3v10c0 1.654 1.346 3 3 3h12c1.654 0 3-1.346 3-3v-8c0-1.654-1.346-3-3-3zm-12 0h4c0 1.104.896 2 2 2h6c.552 0 1 .448 1 1h-14v-2c0-.552.448-1 1-1zm12 12h-12c-.552 0-1-.448-1-1v-7h14v7c0 .552-.448 1-1 1z" />
+    </svg>
+  );
+}
+
+function ProjectFolderIcon({ isOpen, className, ...props }: React.HTMLAttributes<HTMLSpanElement> & { isOpen: boolean }) {
+  return (
+    <span className={`project-folder-icon ${className ?? ""}`} data-open={isOpen} {...props}>
+      <svg className="project-folder-icon-closed" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M18 6h-6c0-1.104-.896-2-2-2h-4c-1.654 0-3 1.346-3 3v10c0 1.654 1.346 3 3 3h12c1.654 0 3-1.346 3-3v-8c0-1.654-1.346-3-3-3zm-12 0h4c0 1.104.896 2 2 2h6c.552 0 1 .448 1 1h-14v-2c0-.552.448-1 1-1zm12 12h-12c-.552 0-1-.448-1-1v-7h14v7c0 .552-.448 1-1 1z" />
+      </svg>
+      <svg className="project-folder-icon-open" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M22.3 8h-2.4c-.4-1.2-1.5-2-2.8-2h-6c0-1.1-.9-2-2-2h-4.1c-1.7 0-3 1.3-3 3v10c0 1.7 1.3 3 3 3h12c1.7 0 3.4-1.3 3.8-3l2.2-8c.1-.6-.2-1-.7-1zm-18.3 1v-2c0-.6.4-1 1-1h4c0 1.1.9 2 2 2h6c.6 0 1 .4 1 1h-11.1c-.6 0-1.1.4-1.3 1l-1.6 6.3v-7.3zm14.9 7.5c-.2.8-1.1 1.5-1.9 1.5h-12s-.4-.2-.2-.8l1.9-7c0-.1.2-.2.3-.2h13.7l-1.8 6.5z" />
+      </svg>
+    </span>
+  );
+}
+
+function NewProjectIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" {...props}>
+      <path d="M18 6h-6c0-1.104-.896-2-2-2h-4c-1.654 0-3 1.346-3 3v10c0 1.654 1.346 3 3 3h12c1.654 0 3-1.346 3-3v-8c0-1.654-1.346-3-3-3zm0 12h-12c-.552 0-1-.448-1-1v-7h4c.275 0 .5-.225.5-.5s-.225-.5-.5-.5h-4v-2c0-.552.448-1 1-1h4c0 1.104.896 2 2 2h6c.552 0 1 .448 1 1h-4c-.275 0-.5.225-.5.5s.225.5.5.5h4v7c0 .552-.448 1-1 1zM15 12h-2v-2c0-.553-.447-1-1-1s-1 .447-1 1v2h-2c-.553 0-1 .447-1 1s.447 1 1 1h2v2c0 .553.447 1 1 1s1-.447 1-1v-2h2c.553 0 1-.447 1-1s-.447-1-1-1z" />
     </svg>
   );
 }
@@ -1287,19 +1303,19 @@ export default function Page() {
     return createPortal(
       <div
         role="menu"
-        className="menu-pop chat-context-menu fixed z-[1000] w-[252px] max-w-[calc(100vw-16px)] rounded-[20px] border border-slate-200/80 bg-white p-2 text-[var(--text)] shadow-[0_16px_40px_rgba(15,23,41,0.16)]"
+        className="menu-pop theme-context-menu chat-context-menu fixed z-[1000] w-[252px] max-w-[calc(100vw-16px)] rounded-[20px] border p-2"
         style={chatMenuPosition}
         onClick={(e) => e.stopPropagation()}
       >
-        <button type="button" role="menuitem" className="flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap hover:bg-slate-100/80 cursor-pointer" onClick={(e) => renameChat(e, chat.id)}>
+        <button type="button" role="menuitem" className="theme-context-menu-item flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap cursor-pointer" onClick={(e) => renameChat(e, chat.id)}>
           <EditIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
           <span>Renommer</span>
         </button>
-        <div className="my-1.5 border-t border-slate-200/80" role="separator" />
+        <div className="theme-context-menu-separator my-1.5 border-t" role="separator" />
         <button
           type="button"
           role="menuitem"
-          className="flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap hover:bg-slate-100/80 cursor-pointer"
+          className="theme-context-menu-item flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap cursor-pointer"
           onClick={(e) => {
             toggleChatPinned(e, chat);
             closeChatMenus();
@@ -1308,11 +1324,11 @@ export default function Page() {
           <PinIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
           <span>{chat.pinned ? "Désépingler le chat" : "Épingler le chat"}</span>
         </button>
-        <button type="button" role="menuitem" className="flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm text-red-600 whitespace-nowrap hover:bg-red-50 cursor-pointer" onClick={(e) => deleteChat(e, chat.id)}>
+        <button type="button" role="menuitem" className="theme-context-menu-item theme-context-menu-item-danger flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap cursor-pointer" onClick={(e) => deleteChat(e, chat.id)}>
           <TrashIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
           <span>{t("delete")}</span>
         </button>
-        <div className="my-1.5 border-t border-slate-200/80" role="separator" />
+        <div className="theme-context-menu-separator my-1.5 border-t" role="separator" />
         <button
           type="button"
           role="menuitem"
@@ -1323,7 +1339,7 @@ export default function Page() {
             e.stopPropagation();
             openMoveToProjectMenu(e.currentTarget, chat.id);
           }}
-          className="flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap hover:bg-slate-100/80 cursor-pointer"
+          className="theme-context-menu-item flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap cursor-pointer"
         >
           <ProjectIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
           <span className="flex-1">Déplacer vers le projet</span>
@@ -2222,7 +2238,7 @@ export default function Page() {
           </div>
 
           <div
-            className="flex-1 overflow-y-auto p-2 space-y-1 select-none"
+            className="sidebar-scroll flex-1 overflow-y-auto p-2 space-y-1 select-none"
             onScroll={(e) =>
               setScrolled((e.currentTarget as HTMLDivElement).scrollTop > 0)
             }
@@ -2242,7 +2258,7 @@ export default function Page() {
                       className={`chat-item group relative flex items-center gap-2 px-3 py-2 rounded-md cursor-pointer ${highlightedProjectId === project.id ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"}`}
                       onClick={() => { toggleProject(project.id); setMenuId(null); }}
                     >
-                      <ProjectIcon className="h-[18px] w-[18px] shrink-0 text-[var(--text)]" aria-hidden="true" />
+                      <ProjectFolderIcon isOpen={expandedProjectIds.has(project.id) || !!search.trim()} className="h-[18px] w-[18px] shrink-0 text-[var(--text)]" aria-hidden="true" />
                       <div className="flex-1 min-w-0 truncate text-sm text-[var(--text)]">{project.name}</div>
                       <button type="button" onClick={(e) => toggleProjectPinned(e, project)} className="shrink-0 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer" aria-label="Désépingler le projet" title="Désépingler"><PinIcon className="h-4 w-4" aria-hidden="true" /></button>
                       <button type="button" className="menu-toggle shrink-0 p-1 rounded text-[var(--muted-text)] hover:bg-[var(--muted)] cursor-pointer" onClick={(e) => {
@@ -2255,9 +2271,9 @@ export default function Page() {
                         <svg viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor"><circle cx="4" cy="10" r="1.5" /><circle cx="10" cy="10" r="1.5" /><circle cx="16" cy="10" r="1.5" /></svg>
                       </button>
                       {!projectsSectionOpen && projectMenuId === project.id && projectMenuPosition && typeof document !== "undefined" && createPortal(
-                        <div className="menu-pop fixed w-44 rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg py-1 z-50" style={projectMenuPosition} onClick={(e) => e.stopPropagation()}>
-                          <button type="button" onClick={() => renameProject(project)} className="w-full flex gap-2 px-3 py-2 text-sm text-left hover:bg-[var(--muted)] cursor-pointer"><EditIcon className="h-4 w-4" />{t("rename")}</button>
-                          <button type="button" onClick={() => deleteProject(project)} className="w-full flex gap-2 px-3 py-2 text-sm text-left text-red-600 hover:bg-red-50 cursor-pointer"><TrashIcon className="h-4 w-4" />Supprimer le projet</button>
+                        <div className="menu-pop theme-context-menu fixed w-44 rounded-lg border py-1 z-50" style={projectMenuPosition} onClick={(e) => e.stopPropagation()}>
+                          <button type="button" onClick={() => renameProject(project)} className="theme-context-menu-item w-full flex gap-2 px-3 py-2 text-sm text-left cursor-pointer"><EditIcon className="h-4 w-4" />{t("rename")}</button>
+                          <button type="button" onClick={() => deleteProject(project)} className="theme-context-menu-item theme-context-menu-item-danger w-full flex gap-2 px-3 py-2 text-sm text-left cursor-pointer"><TrashIcon className="h-4 w-4" />Supprimer le projet</button>
                         </div>, document.body
                       )}
                     </div>
@@ -2316,7 +2332,7 @@ export default function Page() {
                   return (
                     <div key={project.id}>
                       <div className={`chat-item group relative flex items-center gap-2 px-3 py-2 rounded-md cursor-pointer ${highlightedProjectId === project.id ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"}`} onClick={() => { toggleProject(project.id); setMenuId(null); }}>
-                        <ProjectIcon className="h-[18px] w-[18px] shrink-0 text-[var(--text)]" aria-hidden="true" />
+                        <ProjectFolderIcon isOpen={expanded} className="h-[18px] w-[18px] shrink-0 text-[var(--text)]" aria-hidden="true" />
                         <div className="flex-1 min-w-0 truncate text-sm text-[var(--text)]">{project.name}</div>
                         <button type="button" className="shrink-0 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer" onClick={(e) => toggleProjectPinned(e, project)} aria-label={project.pinned ? "Désépingler le projet" : "Épingler le projet"} title={project.pinned ? "Désépingler" : "Épingler"}>
                           <PinIcon className="h-4 w-4" aria-hidden="true" />
@@ -2335,9 +2351,9 @@ export default function Page() {
                           <svg viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor"><circle cx="4" cy="10" r="1.5" /><circle cx="10" cy="10" r="1.5" /><circle cx="16" cy="10" r="1.5" /></svg>
                         </button>
                         {open && projectMenuPosition && typeof document !== "undefined" && createPortal(
-                          <div className="menu-pop fixed w-44 rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg py-1 z-50" style={projectMenuPosition} onClick={(e) => e.stopPropagation()}>
-                            <button type="button" onClick={() => renameProject(project)} className="w-full flex gap-2 px-3 py-2 text-sm text-left hover:bg-[var(--muted)] cursor-pointer"><EditIcon className="h-4 w-4" />{t("rename")}</button>
-                            <button type="button" onClick={() => deleteProject(project)} className="w-full flex gap-2 px-3 py-2 text-sm text-left text-red-600 hover:bg-red-50 cursor-pointer"><TrashIcon className="h-4 w-4" />Supprimer le projet</button>
+                          <div className="menu-pop theme-context-menu fixed w-44 rounded-lg border py-1 z-50" style={projectMenuPosition} onClick={(e) => e.stopPropagation()}>
+                            <button type="button" onClick={() => renameProject(project)} className="theme-context-menu-item w-full flex gap-2 px-3 py-2 text-sm text-left cursor-pointer"><EditIcon className="h-4 w-4" />{t("rename")}</button>
+                            <button type="button" onClick={() => deleteProject(project)} className="theme-context-menu-item theme-context-menu-item-danger w-full flex gap-2 px-3 py-2 text-sm text-left cursor-pointer"><TrashIcon className="h-4 w-4" />Supprimer le projet</button>
                           </div>,
                           document.body
                         )}
@@ -2452,7 +2468,7 @@ export default function Page() {
             {moveMenuChat && moveMenuPosition && typeof document !== "undefined" && createPortal(
               <div
                 role="menu"
-                className="menu-pop fixed z-[1010] min-w-[252px] max-w-[calc(100vw-16px)] max-h-[calc(100vh-16px)] overflow-y-auto rounded-[20px] border border-slate-200/80 bg-white p-2 text-[var(--text)] shadow-[0_16px_40px_rgba(15,23,41,0.16)]"
+                className="menu-pop theme-context-menu fixed z-[1010] min-w-[252px] max-w-[calc(100vw-16px)] max-h-[calc(100vh-16px)] overflow-y-auto rounded-[20px] border p-2"
                 style={moveMenuPosition}
                 onClick={(e) => e.stopPropagation()}
               >
@@ -2469,14 +2485,14 @@ export default function Page() {
                     setHoveredProjectMemoryMode(null);
                     setProjectCreationModalOpen(true);
                   }}
-                  className="min-h-10 w-full rounded-xl px-3 text-left text-sm whitespace-nowrap hover:bg-slate-100/80 cursor-pointer"
+                  className="theme-context-menu-item flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap cursor-pointer"
                 >
+                  <NewProjectIcon className="h-[22px] w-[22px] shrink-0" aria-hidden="true" />
                   Nouveau projet
                 </button>
-                <div className="my-1.5 border-t border-slate-200/80" role="separator" />
-                <button type="button" role="menuitem" onClick={() => moveChatToProject(moveMenuChat, null)} className="flex min-h-10 w-full items-center justify-between gap-2 rounded-xl px-3 text-left text-sm whitespace-nowrap hover:bg-slate-100/80 cursor-pointer"><span>Aucun projet</span>{!moveMenuChat.projectId && <span aria-label="Projet actuel">✓</span>}</button>
+                <div className="theme-context-menu-separator my-1.5 border-t" role="separator" />
                 {projects.map((project) => (
-                  <button key={project.id} type="button" role="menuitem" onClick={() => moveChatToProject(moveMenuChat, project.id)} className="flex min-h-10 w-full items-center justify-between gap-2 rounded-xl px-3 text-left text-sm hover:bg-slate-100/80 cursor-pointer"><span className="truncate whitespace-nowrap">{project.name}</span>{moveMenuChat.projectId === project.id && <span aria-label="Projet actuel">✓</span>}</button>
+                  <button key={project.id} type="button" role="menuitem" onClick={() => moveChatToProject(moveMenuChat, project.id)} className="theme-context-menu-item flex min-h-10 w-full items-center justify-between gap-2 rounded-xl px-3 text-left text-sm cursor-pointer"><span className="truncate whitespace-nowrap">{project.name}</span>{moveMenuChat.projectId === project.id && <span aria-label="Projet actuel">✓</span>}</button>
                 ))}
               </div>,
               document.body
