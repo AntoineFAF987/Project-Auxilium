@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException, Path, Request
 from pydantic import BaseModel, Field
 
-from .chats_db import create_project, delete_project, get_project, list_projects, rename_project
+from .chats_db import create_project, delete_project, get_project, list_projects, rename_project, set_project_pinned
 from .routes_chats import _try_get_auth_ids
 
 router = APIRouter()
@@ -12,12 +14,14 @@ class ProjectCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
 
 
-class ProjectUpdate(ProjectCreate):
-    pass
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=120)
+    pinned: Optional[bool] = None
 
 
 class ProjectResponse(ProjectCreate):
     id: str
+    pinned: bool = False
     created_at: str
     updated_at: str
 
@@ -54,7 +58,13 @@ def api_get_project(project_id: str = Path(..., min_length=1), request: Request 
 @router.patch("/projects/{project_id}", response_model=ProjectResponse)
 def api_update_project(project_id: str, body: ProjectUpdate, request: Request = None):
     tenant_id, user_id = _try_get_auth_ids(request)
-    project = rename_project(tenant_id, user_id, project_id, _project_name(body.name))
+    if body.name is None and body.pinned is None:
+        raise HTTPException(status_code=400, detail="Aucune modification demandee")
+    project = get_project(tenant_id, user_id, project_id)
+    if body.name is not None:
+        project = rename_project(tenant_id, user_id, project_id, _project_name(body.name))
+    if project and body.pinned is not None:
+        project = set_project_pinned(tenant_id, user_id, project_id, body.pinned)
     if not project:
         raise HTTPException(status_code=404, detail="Projet introuvable")
     return project

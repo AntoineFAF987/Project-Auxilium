@@ -54,7 +54,8 @@ type Message = {
   caveat?: PostGenerationReview;
 };
 
-type StoredChat = { id: string; createdAt: string; title: string; messages: Message[]; projectId?: string | null; optimistic?: boolean };
+type StoredChat = { id: string; createdAt: string; title: string; messages: Message[]; projectId?: string | null; pinned?: boolean; optimistic?: boolean };
+type ProjectMemoryMode = "default" | "project_only";
 
 const HEADER_H = 64;   // h-16
 const FOOTER_H = 92;   // hauteur de la barre d’input
@@ -185,6 +186,54 @@ function TrashIcon(props: React.SVGProps<SVGSVGElement>) {
   );
 }
 
+function ProjectIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M21 9.25V9.2C21 8.0799 21 7.51984 20.782 7.09202C20.5903 6.7157 20.2843 6.40974 19.908 6.21799C19.4802 6 18.9201 6 17.8 6L3 6M3 6L3 16.8C3 17.9201 3 18.4802 3.21799 18.908C3.40973 19.2843 3.7157 19.5903 4.09202 19.782C4.51984 20 5.0799 20 6.2 20H7M3 6L3 5.6C3 5.03995 3 4.75992 3.109 4.54601C3.20487 4.35785 3.35785 4.20487 3.54601 4.10899C3.75992 4 4.03995 4 4.6 4H9.33726C9.58185 4 9.70415 4 9.81923 4.02763C9.92127 4.05213 10.0188 4.09253 10.1083 4.14736C10.2092 4.2092 10.2957 4.29568 10.4686 4.46863L12 6M16 14L18 16M11 21V18.5L18.5 11L21 13.5L13.5 21H11Z" />
+    </svg>
+  );
+}
+
+function PinIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" {...props}>
+      <path fillRule="evenodd" clipRule="evenodd" d="M17.1218 1.87023C15.7573 0.505682 13.4779 0.76575 12.4558 2.40261L9.61062 6.95916C9.61033 6.95965 9.60913 6.96167 9.6038 6.96549C9.59728 6.97016 9.58336 6.97822 9.56001 6.9848C9.50899 6.99916 9.44234 6.99805 9.38281 6.97599C8.41173 6.61599 6.74483 6.22052 5.01389 6.87251C4.08132 7.22378 3.61596 8.03222 3.56525 8.85243C3.51687 9.63502 3.83293 10.4395 4.41425 11.0208L7.94975 14.5563L1.26973 21.2363C0.879206 21.6269 0.879206 22.26 1.26973 22.6506C1.66025 23.0411 2.29342 23.0411 2.68394 22.6506L9.36397 15.9705L12.8995 19.5061C13.4808 20.0874 14.2853 20.4035 15.0679 20.3551C15.8881 20.3044 16.6966 19.839 17.0478 18.9065C17.6998 17.1755 17.3043 15.5086 16.9444 14.5375C16.9223 14.478 16.9212 14.4114 16.9355 14.3603C16.9421 14.337 16.9502 14.3231 16.9549 14.3165C16.9587 14.3112 16.9606 14.31 16.9611 14.3098L21.5177 11.4645C23.1546 10.4424 23.4147 8.16307 22.0501 6.79853L17.1218 1.87023ZM14.1523 3.46191C14.493 2.91629 15.2528 2.8296 15.7076 3.28445L20.6359 8.21274C21.0907 8.66759 21.0041 9.42737 20.4584 9.76806L15.9019 12.6133C14.9572 13.2032 14.7469 14.3637 15.0691 15.2327C15.3549 16.0037 15.5829 17.1217 15.1762 18.2015C15.1484 18.2752 15.1175 18.3018 15.0985 18.3149C15.0743 18.3316 15.0266 18.3538 14.9445 18.3589C14.767 18.3699 14.5135 18.2916 14.3137 18.0919L5.82846 9.6066C5.62872 9.40686 5.55046 9.15333 5.56144 8.97583C5.56651 8.8937 5.58877 8.84605 5.60548 8.82181C5.61855 8.80285 5.64516 8.7719 5.71886 8.74414C6.79869 8.33741 7.91661 8.56545 8.68762 8.85128C9.55668 9.17345 10.7171 8.96318 11.3071 8.01845L14.1523 3.46191Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function PinnedChatIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M7.50977 19.8018C8.83126 20.5639 10.3645 21 11.9996 21C16.9702 21 21 16.9706 21 12C21 7.02944 16.9706 3 12 3C7.02944 3 3 7.02944 3 12C3 13.6351 3.43604 15.1684 4.19819 16.4899L4.20114 16.495C4.27448 16.6221 4.31146 16.6863 4.32821 16.7469C4.34401 16.804 4.34842 16.8554 4.34437 16.9146C4.34003 16.9781 4.3186 17.044 4.27468 17.1758L3.50586 19.4823L3.50489 19.4853C3.34268 19.9719 3.26157 20.2152 3.31938 20.3774C3.36979 20.5187 3.48169 20.6303 3.62305 20.6807C3.78482 20.7384 4.02705 20.6577 4.51155 20.4962L4.51758 20.4939L6.82405 19.7251C6.95537 19.6813 7.02214 19.6591 7.08559 19.6548C7.14475 19.6507 7.19578 19.6561 7.25293 19.6719C7.31368 19.6887 7.37783 19.7257 7.50563 19.7994L7.50977 19.8018Z" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M7.5 9.5L12 14L16.5 9.5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function PlusIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M4 12H20M12 4V20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function LightbulbIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M9 18h6M10 21h4M8.5 14.5A6 6 0 1 1 15.5 14.5c-.8.7-1.3 1.6-1.4 2.5h-4.2c-.1-.9-.6-1.8-1.4-2.5Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function ChatTitle({ title }: { title: string }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLSpanElement>(null);
@@ -209,6 +258,7 @@ function ChatTitle({ title }: { title: string }) {
     <div
       ref={viewportRef}
       className="chat-title-viewport"
+      data-overflow={overflowAmount > 0}
       title={title}
       onMouseEnter={measureOverflow}
       onFocus={measureOverflow}
@@ -603,10 +653,22 @@ export default function Page() {
   const [chats, setChats] = useState<StoredChat[]>([]);
   const [projects, setProjects] = useState<projectsApi.Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [highlightedProjectId, setHighlightedProjectId] = useState<string | null>(null);
+  const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(() => new Set());
+  const [showAllChatsForProjects, setShowAllChatsForProjects] = useState<Set<string>>(() => new Set());
+  const [pinnedSectionOpen, setPinnedSectionOpen] = useState(true);
+  const [projectsSectionOpen, setProjectsSectionOpen] = useState(true);
+  const [chatsSectionOpen, setChatsSectionOpen] = useState(true);
+  const projectCollapseResetTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [projectsError, setProjectsError] = useState<string | null>(null);
   const [newProjectName, setNewProjectName] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
+  const [projectCreationModalOpen, setProjectCreationModalOpen] = useState(false);
+  const [projectCreationError, setProjectCreationError] = useState<string | null>(null);
+  const [projectMemoryMode, setProjectMemoryMode] = useState<ProjectMemoryMode>("default");
+  const [projectMemoryMenuOpen, setProjectMemoryMenuOpen] = useState(false);
+  const [hoveredProjectMemoryMode, setHoveredProjectMemoryMode] = useState<ProjectMemoryMode | null>(null);
   const [projectMenuId, setProjectMenuId] = useState<string | null>(null);
   const [projectMenuPosition, setProjectMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [chatId, setChatId] = useState<string | null>(null);
@@ -650,6 +712,7 @@ export default function Page() {
   const [searchFocus, setSearchFocus] = useState(false);
 
   const [menuId, setMenuId] = useState<string | null>(null);
+  const [chatMenuLocation, setChatMenuLocation] = useState<"normal" | "pinned">("normal");
   const [menuUp, setMenuUp] = useState(false);
   const [moveMenuChatId, setMoveMenuChatId] = useState<string | null>(null);
   const [moveMenuPosition, setMoveMenuPosition] = useState<{ top: number; left: number } | null>(null);
@@ -758,6 +821,7 @@ export default function Page() {
           title: c.title,
           createdAt: c.created_at,
           projectId: c.project_id ?? null,
+          pinned: !!c.pinned,
           messages: [],
         }));
         setChats(converted);
@@ -778,6 +842,14 @@ export default function Page() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        if (projectMemoryMenuOpen) {
+          setProjectMemoryMenuOpen(false);
+          setHoveredProjectMemoryMode(null);
+          return;
+        }
+        setProjectCreationModalOpen(false);
+        setProjectCreationError(null);
+        setNewProjectName("");
         setMenuId(null);
         setMoveMenuChatId(null);
         setMoveMenuPosition(null);
@@ -804,7 +876,7 @@ export default function Page() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [input, loading, messages]);
+  }, [input, loading, messages, projectMemoryMenuOpen]);
 
   useEffect(() => {
     if (!menuId && !projectMenuId) return;
@@ -850,6 +922,7 @@ export default function Page() {
           title: c.title,
           createdAt: c.created_at,
           projectId: c.project_id ?? null,
+          pinned: !!c.pinned,
           messages: [],
         }));
         // Conserver les entrées optimistes non encore remontées
@@ -891,7 +964,54 @@ export default function Page() {
 
   const openProject = (projectId: string | null) => {
     setSelectedProjectId(projectId);
+    setHighlightedProjectId(projectId);
     newChat();
+  };
+
+  const toggleProject = (projectId: string) => {
+    setSelectedProjectId(projectId);
+    setHighlightedProjectId(projectId);
+    const isExpanded = expandedProjectIds.has(projectId);
+    const pendingReset = projectCollapseResetTimers.current[projectId];
+    if (pendingReset) {
+      clearTimeout(pendingReset);
+      delete projectCollapseResetTimers.current[projectId];
+    }
+    setExpandedProjectIds((previous) => {
+      const next = new Set(previous);
+      if (isExpanded) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+    if (isExpanded) {
+      projectCollapseResetTimers.current[projectId] = setTimeout(() => {
+        setShowAllChatsForProjects((previous) => {
+          const next = new Set(previous);
+          next.delete(projectId);
+          return next;
+        });
+        delete projectCollapseResetTimers.current[projectId];
+      }, 240);
+    } else {
+      setShowAllChatsForProjects((previous) => {
+        const next = new Set(previous);
+        next.delete(projectId);
+        return next;
+      });
+    }
+  };
+
+  const toggleProjectsSection = () => {
+    if (projectsSectionOpen) {
+      setNewProjectName("");
+    }
+    setProjectsSectionOpen((previous) => !previous);
+  };
+
+  const preventSidebarNativeInteraction = (event: React.MouseEvent<HTMLElement>) => {
+    const target = event.target as HTMLElement;
+    if (target.closest("input, textarea, [contenteditable='true']")) return;
+    event.preventDefault();
   };
 
   const refreshProjects = async () => {
@@ -910,18 +1030,35 @@ export default function Page() {
 
   const createProject = async () => {
     const name = newProjectName.trim();
-    if (!name) return;
+    if (!name || creatingProject) return;
+    setCreatingProject(true);
+    setProjectCreationError(null);
     try {
       const { idToken } = await getTokens();
       if (!idToken) throw new Error("Session expirée");
       const project = await projectsApi.createProject(name, idToken);
       setProjects((prev) => [project, ...prev]);
       setNewProjectName("");
-      setCreatingProject(false);
+      setProjectCreationModalOpen(false);
+      setProjectMemoryMenuOpen(false);
+      setProjectMemoryMode("default");
+      setProjectsSectionOpen(true);
       openProject(project.id);
     } catch (err: unknown) {
-      setProjectsError(errorMessage(err) || "Impossible de créer le projet");
+      setProjectCreationError(errorMessage(err) || "Impossible de créer le projet");
+    } finally {
+      setCreatingProject(false);
     }
+  };
+
+  const closeProjectCreationModal = () => {
+    if (creatingProject) return;
+    setProjectCreationModalOpen(false);
+    setProjectCreationError(null);
+    setProjectMemoryMenuOpen(false);
+    setHoveredProjectMemoryMode(null);
+    setProjectMemoryMode("default");
+    setNewProjectName("");
   };
 
   const closeChatMenus = () => {
@@ -988,14 +1125,40 @@ export default function Page() {
       const { idToken } = await getTokens();
       if (!idToken) throw new Error("Session expirée");
       await projectsApi.deleteProject(project.id, idToken);
+      const pendingReset = projectCollapseResetTimers.current[project.id];
+      if (pendingReset) clearTimeout(pendingReset);
+      delete projectCollapseResetTimers.current[project.id];
       setProjects((prev) => prev.filter((item) => item.id !== project.id));
       setChats((prev) => prev.map((chat) => chat.projectId === project.id ? { ...chat, projectId: null } : chat));
+      setExpandedProjectIds((previous) => {
+        const next = new Set(previous);
+        next.delete(project.id);
+        return next;
+      });
+      setShowAllChatsForProjects((previous) => {
+        const next = new Set(previous);
+        next.delete(project.id);
+        return next;
+      });
+      if (highlightedProjectId === project.id) setHighlightedProjectId(null);
       if (selectedProjectId === project.id) openProject(null);
     } catch (err: unknown) {
       setProjectsError(errorMessage(err) || "Impossible de supprimer le projet");
     } finally {
       setProjectMenuId(null);
       setProjectMenuPosition(null);
+    }
+  };
+
+  const toggleProjectPinned = async (event: React.MouseEvent, project: projectsApi.Project) => {
+    event.stopPropagation();
+    try {
+      const { idToken } = await getTokens();
+      if (!idToken) throw new Error("Session expirée");
+      const updated = await projectsApi.setProjectPinned(project.id, !project.pinned, idToken);
+      setProjects((previous) => previous.map((item) => item.id === updated.id ? updated : item));
+    } catch (err: unknown) {
+      setProjectsError(errorMessage(err) || "Impossible de modifier l’épinglage du projet");
     }
   };
 
@@ -1012,6 +1175,18 @@ export default function Page() {
     }
   };
 
+  const toggleChatPinned = async (event: React.MouseEvent, chat: StoredChat) => {
+    event.stopPropagation();
+    try {
+      const { idToken } = await getTokens();
+      if (!idToken) throw new Error("Session expirée");
+      await chatsApi.setChatPinned(chat.id, !chat.pinned, idToken);
+      setChats((previous) => previous.map((item) => item.id === chat.id ? { ...item, pinned: !item.pinned } : item));
+    } catch (err: unknown) {
+      console.error("Impossible de modifier l’épinglage de la discussion", err);
+    }
+  };
+
   const loadChat = async (c: StoredChat) => {
     try {
       const { idToken } = await getTokens();
@@ -1019,6 +1194,7 @@ export default function Page() {
       const converted = serverMessages.map((m) => ({ id: m.id, role: m.role, content: m.content, sources: m.sources } as Message));
       setChatId(c.id);
       setSelectedProjectId(c.projectId ?? null);
+      setHighlightedProjectId(null);
       setMessages(converted);
       setHistoricalMessageIds(new Set(converted.filter((m) => m.role === "assistant").map((m) => m.id)));
       setShowSrc({});
@@ -1089,15 +1265,82 @@ export default function Page() {
     }
   };
 
+  const renderChatItem = (chat: StoredChat, indent = false, menuLocation: "normal" | "pinned" = "normal") => {
+    const active = chatId === chat.id;
+    const open = menuId === chat.id && chatMenuLocation === menuLocation;
+    const disabled = !!chat.optimistic;
+    return (
+      <div
+        key={chat.id}
+        onClick={() => {
+          if (disabled) {
+            alert(language === "en" ? "Conversation pending: send a message to create it." : "Conversation en attente: envoyez un message pour la creer.");
+            return;
+          }
+          loadChat(chat);
+        }}
+        className={`chat-item group relative w-full flex items-center justify-between gap-2 py-2 pr-3 rounded-md cursor-pointer ${indent ? "pl-8" : "px-3"} ${active ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"}`}
+        title={chat.title}
+      >
+        {chat.pinned && <PinnedChatIcon className="h-[17px] w-[17px] shrink-0 text-[var(--muted-text)]" aria-hidden="true" />}
+        <div className={`flex min-w-0 flex-1 items-center text-sm text-[var(--text)] ${open ? "pr-12" : "group-hover:pr-12"}`}>
+          <ChatTitle title={chat.title} />
+          {disabled && <span className="ml-1 shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted-text)] align-middle">{t("pending")}</span>}
+        </div>
+        <button
+          type="button"
+          onClick={(e) => toggleChatPinned(e, chat)}
+          className="absolute right-8 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer"
+          aria-label={chat.pinned ? "Désépingler la discussion" : "Épingler la discussion"}
+          title={chat.pinned ? "Désépingler" : "Épingler"}
+        >
+          <PinIcon className="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            const isOpen = menuId === chat.id;
+            const row = (e.currentTarget.closest(".chat-item") as HTMLElement) ?? (e.currentTarget.parentElement as HTMLElement);
+            setMenuUp(row ? row.getBoundingClientRect().top > window.innerHeight / 2 : false);
+            setMoveMenuChatId(null);
+            setMoveMenuPosition(null);
+            setCreatingProjectForChat(false);
+            setChatMenuLocation(menuLocation);
+            setMenuId(isOpen ? null : chat.id);
+          }}
+          className={`menu-toggle absolute right-2 p-1 rounded text-[var(--muted-text)] hover:text-[var(--text)] hover:bg-[var(--muted)] cursor-pointer ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+          aria-label={t("moreActions")}
+        >
+          <svg viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor"><circle cx="4" cy="10" r="1.5" /><circle cx="10" cy="10" r="1.5" /><circle cx="16" cy="10" r="1.5" /></svg>
+        </button>
+        {open && (
+          <div role="menu" className={`menu-pop chat-context-menu absolute right-2 ${menuUp ? "bottom-full mb-1" : "top-full mt-1"} w-44 rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg py-1 z-20`} onClick={(e) => e.stopPropagation()}>
+            <button className="w-full flex items-center gap-2 text-left px-3 py-2 text-sm hover:bg-[var(--muted)] cursor-pointer" onClick={(e) => renameChat(e, chat.id)} type="button"><EditIcon className="h-4 w-4" aria-hidden="true" />{t("rename")}</button>
+            <button type="button" role="menuitem" aria-haspopup="menu" aria-expanded={moveMenuChatId === chat.id} onMouseEnter={(e) => openMoveToProjectMenu(e.currentTarget, chat.id)} onClick={(e) => { e.stopPropagation(); openMoveToProjectMenu(e.currentTarget, chat.id); }} className="w-full flex items-center justify-between gap-2 text-left px-3 py-2 text-sm hover:bg-[var(--muted)] cursor-pointer"><span>Déplacer vers le projet</span><span aria-hidden="true">›</span></button>
+            <button className="w-full flex items-center gap-2 text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 cursor-pointer" onClick={(e) => deleteChat(e, chat.id)} type="button"><TrashIcon className="h-4 w-4" aria-hidden="true" />{t("delete")}</button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const visibleChats = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return chats.filter((c) => (selectedProjectId ? c.projectId === selectedProjectId : !c.projectId));
+    if (!q) return chats;
     return chats.filter(
       (c) =>
         (c.title || "").toLowerCase().includes(q) ||
         (c.messages || []).some((m) => (m.content || "").toLowerCase().includes(q))
     );
-  }, [search, chats, selectedProjectId]);
+  }, [search, chats]);
+
+  const chatsWithoutProject = useMemo(
+    () => visibleChats.filter((chat) => !chat.projectId && !chat.pinned),
+    [visibleChats]
+  );
+
+  const pinnedProjects = useMemo(() => projects.filter((project) => project.pinned), [projects]);
+  const pinnedChats = useMemo(() => chats.filter((chat) => chat.pinned), [chats]);
 
   const moveMenuChat = useMemo(
     () => chats.find((chat) => chat.id === moveMenuChatId) ?? null,
@@ -1879,7 +2122,7 @@ export default function Page() {
             <div className="px-2 pb-2">
               <button
                 onClick={newChat}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-[var(--text)] hover:bg-[var(--muted)] transition-all duration-200 cursor-pointer border border-transparent hover:border-[var(--border)]"
+                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-[var(--text)] hover:bg-[var(--muted)] transition-colors duration-200 cursor-pointer"
               >
                 <NewChatIcon className="h-5 w-5 text-[var(--text)]" aria-hidden="true" />
                 <span className="font-medium">{t("newDiscussion")}</span>
@@ -1895,7 +2138,7 @@ export default function Page() {
                   onBlur={() => setSearchFocus(false)}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder={t("searchChatPlaceholder")}
-                  className="w-full pl-9 pr-8 py-2 text-sm border border-[var(--border)] rounded-lg outline-none focus:border-[color-mix(in oklab, var(--border) 40%, var(--primary) 60%)] bg-[var(--surface)] text-[var(--text)]"
+                  className="w-full pl-9 pr-8 py-2 text-sm border-0 rounded-full outline-none bg-[var(--surface)] text-[var(--text)] focus:bg-[var(--muted)] focus:shadow-sm transition-colors"
                 />
                 <svg viewBox="0 0 24 24" className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-[var(--muted-text)]" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <circle cx="11" cy="11" r="7" />
@@ -1923,82 +2166,176 @@ export default function Page() {
           </div>
 
           <div
-            className="flex-1 overflow-y-auto p-2 space-y-1"
+            className="flex-1 overflow-y-auto p-2 space-y-1 select-none"
             onScroll={(e) =>
               setScrolled((e.currentTarget as HTMLDivElement).scrollTop > 0)
             }
+            onContextMenu={preventSidebarNativeInteraction}
+            onDoubleClick={preventSidebarNativeInteraction}
           >
-            <section className="mb-3">
-              <div className="px-3 py-2 text-sm font-semibold text-[var(--text)] tracking-wider">Projets</div>
-              {creatingProject ? (
-                <div className="px-2 flex gap-1">
-                  <input
-                    autoFocus
-                    value={newProjectName}
-                    onChange={(e) => setNewProjectName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") createProject();
-                      if (e.key === "Escape") { setCreatingProject(false); setNewProjectName(""); }
-                    }}
-                    placeholder="Nom du projet"
-                    className="min-w-0 flex-1 px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--surface)] outline-none"
-                  />
-                  <button type="button" onClick={createProject} disabled={!newProjectName.trim()} className="px-2 text-sm rounded hover:bg-[var(--muted)] disabled:opacity-50 cursor-pointer">OK</button>
-                  <button type="button" onClick={() => { setCreatingProject(false); setNewProjectName(""); }} className="px-2 text-sm rounded hover:bg-[var(--muted)] cursor-pointer">×</button>
-                </div>
-              ) : (
-                <button type="button" onClick={() => { setCreatingProject(true); setProjectsError(null); }} className="w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm hover:bg-[var(--muted)] cursor-pointer">
-                  <span className="text-lg leading-none">+</span><span>Nouveau projet</span>
+            {(pinnedProjects.length > 0 || pinnedChats.length > 0) && (
+              <section className="mb-3">
+                <button type="button" onClick={() => setPinnedSectionOpen((open) => !open)} aria-expanded={pinnedSectionOpen} className="group flex w-full items-center rounded-md px-3 py-2 text-left text-sm font-semibold tracking-wider text-[var(--text)] cursor-pointer">
+                  <span>Épinglés</span>
+                  <ChevronDownIcon className="ml-1 h-[15px] w-[15px] shrink-0 text-[var(--muted-text)] opacity-0 transition-opacity duration-200 ease-out group-hover:opacity-100" style={{ transform: pinnedSectionOpen ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 180ms ease, opacity 200ms ease-out" }} aria-hidden="true" />
                 </button>
-              )}
-              <div className="mt-1 max-h-44 overflow-y-auto space-y-1">
-                {projects.map((project) => {
-                  const open = projectMenuId === project.id;
-                  return (
-                    <div key={project.id} className={`chat-item group relative flex items-center gap-2 px-3 py-2 rounded-md cursor-pointer ${selectedProjectId === project.id ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"}`} onClick={() => { openProject(project.id); setMenuId(null); }}>
+                {pinnedSectionOpen && <div className="mt-1 space-y-1">
+                  {pinnedProjects.map((project) => (
+                    <div
+                      key={`pinned-project-${project.id}`}
+                      className={`chat-item group relative flex items-center gap-2 px-3 py-2 rounded-md cursor-pointer ${highlightedProjectId === project.id ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"}`}
+                      onClick={() => { toggleProject(project.id); setMenuId(null); }}
+                    >
+                      <ProjectIcon className="h-[18px] w-[18px] shrink-0 text-[var(--text)]" aria-hidden="true" />
                       <div className="flex-1 min-w-0 truncate text-sm text-[var(--text)]">{project.name}</div>
-                      <button type="button" className={`menu-toggle shrink-0 p-1 rounded text-[var(--muted-text)] hover:bg-[var(--muted)] cursor-pointer ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`} onClick={(e) => {
+                      <button type="button" onClick={(e) => toggleProjectPinned(e, project)} className="shrink-0 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer" aria-label="Désépingler le projet" title="Désépingler"><PinIcon className="h-4 w-4" aria-hidden="true" /></button>
+                      <button type="button" className="menu-toggle shrink-0 p-1 rounded text-[var(--muted-text)] hover:bg-[var(--muted)] cursor-pointer" onClick={(e) => {
                         e.stopPropagation();
-                        if (open) {
-                          setProjectMenuId(null);
-                          setProjectMenuPosition(null);
-                          return;
-                        }
+                        if (projectMenuId === project.id) { setProjectMenuId(null); setProjectMenuPosition(null); return; }
                         const rect = e.currentTarget.getBoundingClientRect();
                         setProjectMenuPosition({ top: rect.bottom + 4, left: Math.max(8, rect.right - 176) });
                         setProjectMenuId(project.id);
                       }} aria-label={t("moreActions")}>
                         <svg viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor"><circle cx="4" cy="10" r="1.5" /><circle cx="10" cy="10" r="1.5" /><circle cx="16" cy="10" r="1.5" /></svg>
                       </button>
-                      {open && projectMenuPosition && typeof document !== "undefined" && createPortal(
+                      {!projectsSectionOpen && projectMenuId === project.id && projectMenuPosition && typeof document !== "undefined" && createPortal(
                         <div className="menu-pop fixed w-44 rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg py-1 z-50" style={projectMenuPosition} onClick={(e) => e.stopPropagation()}>
                           <button type="button" onClick={() => renameProject(project)} className="w-full flex gap-2 px-3 py-2 text-sm text-left hover:bg-[var(--muted)] cursor-pointer"><EditIcon className="h-4 w-4" />{t("rename")}</button>
                           <button type="button" onClick={() => deleteProject(project)} className="w-full flex gap-2 px-3 py-2 text-sm text-left text-red-600 hover:bg-red-50 cursor-pointer"><TrashIcon className="h-4 w-4" />Supprimer le projet</button>
-                        </div>,
-                        document.body
+                        </div>, document.body
                       )}
+                    </div>
+                  ))}
+                  {pinnedChats.map((chat) => renderChatItem(chat, false, "pinned"))}
+                </div>}
+              </section>
+            )}
+            <section className="mb-3">
+              <div
+                role="button"
+                tabIndex={0}
+                aria-expanded={projectsSectionOpen}
+                onClick={toggleProjectsSection}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    toggleProjectsSection();
+                  }
+                }}
+                className="group flex w-full items-center px-3 py-2 text-sm font-semibold text-[var(--text)] tracking-wider rounded-md cursor-pointer"
+              >
+                <span>Projets</span>
+                <ChevronDownIcon
+                  className="ml-1 h-[15px] w-[15px] shrink-0 text-[var(--muted-text)] opacity-0 transition-opacity duration-200 ease-out group-hover:opacity-100"
+                  style={{ transform: projectsSectionOpen ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 180ms ease, opacity 200ms ease-out" }}
+                  aria-hidden="true"
+                />
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setProjectsSectionOpen(true);
+                    setProjectCreationError(null);
+                    setProjectMemoryMode("default");
+                    setProjectMemoryMenuOpen(false);
+                    setHoveredProjectMemoryMode(null);
+                    setProjectCreationModalOpen(true);
+                  }}
+                  className="ml-auto grid h-5 w-5 place-items-center text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer"
+                  aria-label="Nouveau projet"
+                  title="Nouveau projet"
+                >
+                  <PlusIcon className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
+              {projectsSectionOpen && <>
+              <div className="mt-1 space-y-1">
+                {projects.filter((project) => !project.pinned).map((project) => {
+                  const open = projectMenuId === project.id;
+                  const projectChats = visibleChats.filter((chat) => chat.projectId === project.id && !chat.pinned);
+                  const expanded = expandedProjectIds.has(project.id) || !!search.trim();
+                  const showAll = showAllChatsForProjects.has(project.id) || !!search.trim();
+                  const initialChats = projectChats.slice(0, 5);
+                  const extraChats = projectChats.slice(5);
+                  return (
+                    <div key={project.id}>
+                      <div className={`chat-item group relative flex items-center gap-2 px-3 py-2 rounded-md cursor-pointer ${highlightedProjectId === project.id ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"}`} onClick={() => { toggleProject(project.id); setMenuId(null); }}>
+                        <ProjectIcon className="h-[18px] w-[18px] shrink-0 text-[var(--text)]" aria-hidden="true" />
+                        <div className="flex-1 min-w-0 truncate text-sm text-[var(--text)]">{project.name}</div>
+                        <button type="button" className="shrink-0 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer" onClick={(e) => toggleProjectPinned(e, project)} aria-label={project.pinned ? "Désépingler le projet" : "Épingler le projet"} title={project.pinned ? "Désépingler" : "Épingler"}>
+                          <PinIcon className="h-4 w-4" aria-hidden="true" />
+                        </button>
+                        <button type="button" className={`menu-toggle shrink-0 p-1 rounded text-[var(--muted-text)] hover:bg-[var(--muted)] cursor-pointer ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`} onClick={(e) => {
+                          e.stopPropagation();
+                          if (open) {
+                            setProjectMenuId(null);
+                            setProjectMenuPosition(null);
+                            return;
+                          }
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          setProjectMenuPosition({ top: rect.bottom + 4, left: Math.max(8, rect.right - 176) });
+                          setProjectMenuId(project.id);
+                        }} aria-label={t("moreActions")}>
+                          <svg viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor"><circle cx="4" cy="10" r="1.5" /><circle cx="10" cy="10" r="1.5" /><circle cx="16" cy="10" r="1.5" /></svg>
+                        </button>
+                        {open && projectMenuPosition && typeof document !== "undefined" && createPortal(
+                          <div className="menu-pop fixed w-44 rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg py-1 z-50" style={projectMenuPosition} onClick={(e) => e.stopPropagation()}>
+                            <button type="button" onClick={() => renameProject(project)} className="w-full flex gap-2 px-3 py-2 text-sm text-left hover:bg-[var(--muted)] cursor-pointer"><EditIcon className="h-4 w-4" />{t("rename")}</button>
+                            <button type="button" onClick={() => deleteProject(project)} className="w-full flex gap-2 px-3 py-2 text-sm text-left text-red-600 hover:bg-red-50 cursor-pointer"><TrashIcon className="h-4 w-4" />Supprimer le projet</button>
+                          </div>,
+                          document.body
+                        )}
+                      </div>
+                      <div className="project-chat-accordion" data-open={expanded}>
+                        <div className="project-chat-accordion-content">
+                          <div className="project-chat-accordion-inner space-y-1">
+                            {initialChats.map((chat) => renderChatItem(chat, true))}
+                            {showAll && extraChats.length > 0 && (
+                              <div className="project-extra-chats space-y-1">
+                                {extraChats.map((chat) => renderChatItem(chat, true))}
+                              </div>
+                            )}
+                            {!showAll && projectChats.length > 5 && (
+                              <button type="button" onClick={() => setShowAllChatsForProjects((previous) => new Set(previous).add(project.id))} className="w-full pl-8 py-1.5 text-left text-sm text-[var(--muted-text)] hover:text-[var(--text)] cursor-pointer">Afficher plus</button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   );
                 })}
               </div>
               {projectsLoading && <div className="px-3 py-1 text-xs text-[var(--muted-text)]">Chargement…</div>}
               {projectsError && <button type="button" onClick={refreshProjects} className="px-3 py-1 text-xs text-red-600 text-left cursor-pointer">{projectsError} — Réessayer</button>}
+              </>}
             </section>
             {/* Titre "Chats" */}
-            <button type="button" onClick={() => { openProject(null); setMenuId(null); }} className="w-full px-3 py-2 text-left text-sm font-semibold text-[var(--text)] tracking-wider hover:bg-[var(--muted)] rounded-md cursor-pointer">
-              {t("chats")}
-            </button>
+            <div role="button" tabIndex={0} onClick={() => { setChatsSectionOpen((open) => !open); setMenuId(null); }} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setChatsSectionOpen((open) => !open); setMenuId(null); } }} aria-expanded={chatsSectionOpen} className="group flex w-full items-center rounded-md px-3 py-2 text-left text-sm font-semibold tracking-wider text-[var(--text)] cursor-pointer">
+              <span>{t("chats")}</span>
+              <ChevronDownIcon className="ml-1 h-[15px] w-[15px] shrink-0 text-[var(--muted-text)] opacity-0 transition-opacity duration-200 ease-out group-hover:opacity-100" style={{ transform: chatsSectionOpen ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 180ms ease, opacity 200ms ease-out" }} aria-hidden="true" />
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setChatsSectionOpen(true); newChat(); }}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); setChatsSectionOpen(true); newChat(); } }}
+                className="ml-auto grid h-5 w-5 place-items-center text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer"
+                aria-label="Nouvelle discussion"
+                title="Nouvelle discussion"
+              >
+                <NewChatIcon className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
             
             {useMemo(() => {
+              if (!chatsSectionOpen) return null;
               const list =
-                visibleChats.length === 0 ? (
+                chatsWithoutProject.length === 0 ? (
                   <div className="px-3 py-2 text-sm text-[var(--muted-text)]">
                     {t("noResults")}
                   </div>
                 ) : (
-                  visibleChats.map((c) => {
+                  chatsWithoutProject.map((c) => {
                     const active = chatId === c.id;
-                    const open = menuId === c.id;
+                    const open = menuId === c.id && chatMenuLocation === "normal";
                     const disabled = !!c.optimistic;
                     return (
                       <div
@@ -2015,7 +2352,8 @@ export default function Page() {
                         }`}
                         title={c.title}
                       >
-                        <div className={`flex min-w-0 flex-1 items-center text-sm text-[var(--text)] ${open ? "pr-6" : "group-hover:pr-6"}`}>
+                        {c.pinned && <PinnedChatIcon className="h-[17px] w-[17px] shrink-0 text-[var(--muted-text)]" aria-hidden="true" />}
+                        <div className={`flex min-w-0 flex-1 items-center text-sm text-[var(--text)] ${open ? "pr-12" : "group-hover:pr-12"}`}>
                           <ChatTitle title={c.title} />
                           {disabled && (
                             <span className="ml-1 shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted-text)] align-middle">
@@ -2023,6 +2361,15 @@ export default function Page() {
                             </span>
                           )}
                         </div>
+                        <button
+                          type="button"
+                          onClick={(e) => toggleChatPinned(e, c)}
+                          className="absolute right-8 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer"
+                          aria-label={c.pinned ? "Désépingler la discussion" : "Épingler la discussion"}
+                          title={c.pinned ? "Désépingler" : "Épingler"}
+                        >
+                          <PinIcon className="h-4 w-4" aria-hidden="true" />
+                        </button>
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -2039,6 +2386,7 @@ export default function Page() {
                             setMoveMenuChatId(null);
                             setMoveMenuPosition(null);
                             setCreatingProjectForChat(false);
+                            setChatMenuLocation("normal");
                             setMenuId(isOpen ? null : c.id);
                           }}
                           className={`menu-toggle absolute right-2 p-1 rounded text-[var(--muted-text)] hover:text-[var(--text)] hover:bg-[var(--muted)] cursor-pointer ${
@@ -2100,7 +2448,7 @@ export default function Page() {
                   })
                 );
               return list;
-            }, [visibleChats, chatId, menuId, projects])}
+            }, [chatsSectionOpen, chatsWithoutProject, chatId, menuId, projects])}
             {moveMenuChat && moveMenuPosition && typeof document !== "undefined" && createPortal(
               <div
                 role="menu"
@@ -2142,6 +2490,103 @@ export default function Page() {
             )}
           </div>
         </aside>
+
+        {projectCreationModalOpen && (
+          <div className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/30 p-3 backdrop-blur-[1px]" onClick={closeProjectCreationModal}>
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="project-creation-title"
+              className="w-full max-w-[520px] rounded-[18px] bg-[var(--surface)] p-6 shadow-2xl sm:p-7"
+              onClick={(e) => { e.stopPropagation(); setProjectMemoryMenuOpen(false); }}
+            >
+              <div className="flex items-center justify-between gap-4">
+                <h2 id="project-creation-title" className="text-xl font-semibold text-[var(--text)]">Créer un projet</h2>
+                <button type="button" onClick={closeProjectCreationModal} disabled={creatingProject} className="grid h-8 w-8 place-items-center rounded-full text-[var(--muted-text)] hover:text-[var(--text)] disabled:opacity-50 cursor-pointer" aria-label="Fermer">
+                  <CloseIcon className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="mt-7">
+                <label htmlFor="project-name" className="mb-2 block text-sm font-medium text-[var(--text)]">Nom du projet</label>
+                <div className="relative">
+                  <ProjectIcon className="pointer-events-none absolute left-3 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-[var(--muted-text)]" aria-hidden="true" />
+                  <input
+                    id="project-name"
+                    autoFocus
+                    value={newProjectName}
+                    onChange={(e) => { setNewProjectName(e.target.value); setProjectCreationError(null); }}
+                    onKeyDown={(e) => { if (e.key === "Enter") createProject(); }}
+                    placeholder="Voyage à Copenhague"
+                    className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] py-2 pl-10 pr-3 text-sm text-[var(--text)] outline-none focus:shadow-[0_0_0_2px_color-mix(in_oklab,var(--primary)_25%,transparent)]"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-5 flex gap-3 rounded-xl bg-[var(--muted)] p-4 text-sm leading-6 text-[var(--muted-text)]">
+                <LightbulbIcon className="mt-0.5 h-5 w-5 shrink-0 text-[var(--muted-text)]" aria-hidden="true" />
+                <p>Les projets permettent de regrouper les chats, les fichiers et les instructions personnalisées en un seul endroit. Utilisez-les pour accéder facilement aux travaux en cours ou pour organiser vos tâches.</p>
+              </div>
+              {projectCreationError && <p className="mt-3 text-sm text-red-600">{projectCreationError}</p>}
+
+              <div className="mt-7 flex items-center justify-between gap-4 border-t border-[var(--border)] pt-5">
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setHoveredProjectMemoryMode(null); setProjectMemoryMenuOpen((open) => !open); }}
+                    aria-haspopup="menu"
+                    aria-expanded={projectMemoryMenuOpen}
+                    className="inline-flex items-center gap-1 text-sm text-[var(--muted-text)] hover:text-[var(--text)] cursor-pointer"
+                  >
+                    {projectMemoryMode === "default" ? "Mémoire par défaut" : "Mémoire du projet seulement"}
+                    <ChevronDownIcon className="h-4 w-4 transition-transform duration-200 ease-out" style={{ transform: projectMemoryMenuOpen ? "rotate(180deg)" : "rotate(0deg)" }} aria-hidden="true" />
+                  </button>
+                  {projectMemoryMenuOpen && (
+                    <div role="menu" className="absolute top-full left-0 z-20 mt-3 w-[360px] max-w-[calc(100vw-32px)] rounded-2xl bg-[var(--surface)] p-2 shadow-xl" onClick={(e) => e.stopPropagation()} onMouseLeave={() => setHoveredProjectMemoryMode(null)}>
+                      {([
+                        {
+                          id: "default" as const,
+                          title: "Mémoire par défaut",
+                          description: "Ce projet peut accéder à la mémoire des chats hors projet, et inversement.",
+                        },
+                        {
+                          id: "project_only" as const,
+                          title: "Mémoire du projet seulement",
+                          description: "Ce projet ne peut accéder qu'à sa propre mémoire. Sa mémoire est invisible dans les conversations hors du projet. Le mode Work n’est pas disponible pour ce type de projet.",
+                        },
+                      ]).map((option) => {
+                        const selected = projectMemoryMode === option.id;
+                        const highlighted = hoveredProjectMemoryMode ? hoveredProjectMemoryMode === option.id : selected;
+                        return (
+                          <button
+                            key={option.id}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={selected}
+                            onMouseEnter={() => setHoveredProjectMemoryMode(option.id)}
+                            onClick={() => { setProjectMemoryMode(option.id); setProjectMemoryMenuOpen(false); setHoveredProjectMemoryMode(null); }}
+                            className={`w-full rounded-xl px-3 py-3 text-left cursor-pointer ${highlighted ? "bg-[var(--muted)]" : ""}`}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium text-[var(--text)]">{option.title}</div>
+                                <div className="mt-1 text-xs leading-5 text-[var(--muted-text)]">{option.description}</div>
+                              </div>
+                              {selected && <svg viewBox="0 0 24 24" className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text)]" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-label="Sélectionné"><path d="m5 12 4 4L19 6" /></svg>}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+                <button type="button" onClick={createProject} disabled={!newProjectName.trim() || creatingProject} className="rounded-full bg-[var(--primary)] px-5 py-2 text-sm font-medium text-[var(--primary-foreground)] hover:opacity-90 disabled:bg-[var(--muted-text)] disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed">
+                  {creatingProject ? "Création…" : "Créer un projet"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Main */}
         <main className="flex-1">

@@ -44,6 +44,7 @@ export type Chat = {
   id: string;
   title: string;
   project_id?: string | null;
+  pinned?: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -142,6 +143,15 @@ export async function moveChatToProject(chatId: string, projectId: string | null
     method: "PATCH",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
     body: JSON.stringify({ project_id: projectId }),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+}
+
+export async function setChatPinned(chatId: string, pinned: boolean, idToken: string): Promise<void> {
+  const r = await fetchWithTimeout(`${process.env.NEXT_PUBLIC_API_URL}/chats/${chatId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+    body: JSON.stringify({ pinned }),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
 }

@@ -249,6 +249,12 @@ html, body, aside, [class*="overflow-y-auto"], [class*="overflow-x-auto"] {
   mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 26px), transparent 100%);
 }
 
+/* Lorsque le titre défile, le même fondu masque les caractères sortant à gauche. */
+.chat-title-viewport[data-overflow="true"]:hover {
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 18px, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0%, #000 18px, #000 calc(100% - 26px), transparent 100%);
+}
+
 .chat-title-text {
   display: inline-block;
   min-width: max-content;
@@ -258,20 +264,56 @@ html, body, aside, [class*="overflow-y-auto"], [class*="overflow-x-auto"] {
   will-change: transform;
 }
 
-.chat-title-viewport:hover {
-  -webkit-mask-image: none;
-  mask-image: none;
-}
-
 .chat-title-viewport:hover .chat-title-text[data-overflow="true"] {
   transform: translateX(calc(-1 * var(--chat-title-shift)));
   transition: transform var(--chat-title-duration) linear 400ms;
 }
 
+.project-chat-accordion {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.project-chat-accordion[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+
+.project-chat-accordion-content {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.project-chat-accordion-inner {
+  padding-top: 0.25rem;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 180ms ease-out, transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.project-chat-accordion[data-open="true"] .project-chat-accordion-inner {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.project-extra-chats {
+  overflow: hidden;
+  animation: project-extra-chats-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes project-extra-chats-in {
+  from { max-height: 0; opacity: 0; transform: translateY(-4px); }
+  to { max-height: 5000px; opacity: 1; transform: translateY(0); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chat-title-text,
-  .chat-title-viewport:hover .chat-title-text[data-overflow="true"] {
+  .chat-title-viewport:hover .chat-title-text[data-overflow="true"],
+  .project-chat-accordion,
+  .project-chat-accordion-inner,
+  .project-extra-chats {
     transition: none;
+    animation: none;
     transform: translateX(0);
   }
 }

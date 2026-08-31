@@ -1,6 +1,7 @@
 export type Project = {
   id: string;
   name: string;
+  pinned?: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -18,7 +19,9 @@ async function request(path: string, idToken: string, init: RequestInit = {}) {
 export async function fetchProjects(idToken: string): Promise<Project[]> {
   const response = await request("/projects", idToken);
   const data = await response.json();
-  return Array.isArray(data?.items) ? data.items : [];
+  return Array.isArray(data?.items)
+    ? data.items.map((project: Project) => ({ ...project, pinned: !!project.pinned }))
+    : [];
 }
 
 export async function createProject(name: string, idToken: string): Promise<Project> {
@@ -27,6 +30,10 @@ export async function createProject(name: string, idToken: string): Promise<Proj
 
 export async function renameProject(projectId: string, name: string, idToken: string): Promise<Project> {
   return (await request(`/projects/${projectId}`, idToken, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) })).json();
+}
+
+export async function setProjectPinned(projectId: string, pinned: boolean, idToken: string): Promise<Project> {
+  return (await request(`/projects/${projectId}`, idToken, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pinned }) })).json();
 }
 
 export async function deleteProject(projectId: string, idToken: string): Promise<void> {

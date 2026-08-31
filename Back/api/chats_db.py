@@ -52,6 +52,8 @@ def init_db() -> None:
         chat_columns = {row["name"] for row in conn.execute("PRAGMA table_info(chats)").fetchall()}
         if "project_id" not in chat_columns:
             conn.execute("ALTER TABLE chats ADD COLUMN project_id TEXT NULL")
+        if "pinned" not in chat_columns:
+            conn.execute("ALTER TABLE chats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS projects (
@@ -59,11 +61,15 @@ def init_db() -> None:
                 tenant_id   TEXT NOT NULL,
                 user_id     TEXT NOT NULL,
                 name        TEXT NOT NULL,
+                pinned      INTEGER NOT NULL DEFAULT 0,
                 created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        project_columns = {row["name"] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
+        if "pinned" not in project_columns:
+            conn.execute("ALTER TABLE projects ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(tenant_id, user_id, updated_at);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chats_project_owner ON chats(tenant_id, user_id, project_id, deleted);")
         conn.execute(
@@ -152,7 +158,7 @@ def list_chats(tenant_id: str, user_id: str) -> List[Dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT id, title, project_id, created_at, updated_at
+            SELECT id, title, project_id, pinned, created_at, updated_at
             FROM chats
             WHERE tenant_id=? AND user_id=? AND deleted=0
             ORDER BY updated_at DESC, created_at DESC
@@ -172,17 +178,28 @@ def set_chat_project(tenant_id: str, user_id: str, chat_id: str, project_id: Opt
         return cur.rowcount > 0
 
 
+def set_chat_pinned(tenant_id: str, user_id: str, chat_id: str, pinned: bool) -> bool:
+    init_db()
+    with get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE chats SET pinned=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND tenant_id=? AND user_id=? AND deleted=0",
+            (int(pinned), chat_id, tenant_id, user_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def list_projects(tenant_id: str, user_id: str) -> List[Dict]:
     init_db()
     with get_connection() as conn:
-        rows = conn.execute("SELECT id, name, created_at, updated_at FROM projects WHERE tenant_id=? AND user_id=? ORDER BY updated_at DESC, created_at DESC", (tenant_id, user_id)).fetchall()
+        rows = conn.execute("SELECT id, name, pinned, created_at, updated_at FROM projects WHERE tenant_id=? AND user_id=? ORDER BY updated_at DESC, created_at DESC", (tenant_id, user_id)).fetchall()
     return [dict(row) for row in rows]
 
 
 def get_project(tenant_id: str, user_id: str, project_id: str) -> Optional[Dict]:
     init_db()
     with get_connection() as conn:
-        row = conn.execute("SELECT id, name, created_at, updated_at FROM projects WHERE id=? AND tenant_id=? AND user_id=?", (project_id, tenant_id, user_id)).fetchone()
+        row = conn.execute("SELECT id, name, pinned, created_at, updated_at FROM projects WHERE id=? AND tenant_id=? AND user_id=?", (project_id, tenant_id, user_id)).fetchone()
     return dict(row) if row else None
 
 
@@ -201,6 +218,17 @@ def rename_project(tenant_id: str, user_id: str, project_id: str, name: str) -> 
     init_db()
     with get_connection() as conn:
         cur = conn.execute("UPDATE projects SET name=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND tenant_id=? AND user_id=?", (name, project_id, tenant_id, user_id))
+        conn.commit()
+    return get_project(tenant_id, user_id, project_id) if cur.rowcount else None
+
+
+def set_project_pinned(tenant_id: str, user_id: str, project_id: str, pinned: bool) -> Optional[Dict]:
+    init_db()
+    with get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE projects SET pinned=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND tenant_id=? AND user_id=?",
+            (int(pinned), project_id, tenant_id, user_id),
+        )
         conn.commit()
     return get_project(tenant_id, user_id, project_id) if cur.rowcount else None
 

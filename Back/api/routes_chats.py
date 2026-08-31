@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Tuple
 from fastapi import APIRouter, HTTPException, Path, Body, Request
 
 from auth_ms import verify_ms_token
-from .chats_db import create_chat, list_chats, list_messages, append_message, rename_chat, set_chat_project, soft_delete_chat
+from .chats_db import create_chat, list_chats, list_messages, append_message, rename_chat, set_chat_project, set_chat_pinned, soft_delete_chat
 
 router = APIRouter()
 
@@ -84,7 +84,7 @@ def api_append_message(
 @router.patch("/chats/{chat_id}")
 def api_update_chat(chat_id: str, body: Dict = Body(...), request: Request = None):
     tenant_id, user_id = _try_get_auth_ids(request)
-    if "title" not in body and "project_id" not in body:
+    if "title" not in body and "project_id" not in body and "pinned" not in body:
         raise HTTPException(status_code=400, detail="Aucune modification demandee")
     ok = True
     if "title" in body:
@@ -100,6 +100,11 @@ def api_update_chat(chat_id: str, body: Dict = Body(...), request: Request = Non
             ok = set_chat_project(tenant_id, user_id, chat_id, project_id.strip() if isinstance(project_id, str) else None)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+    if ok and "pinned" in body:
+        pinned = body.get("pinned")
+        if not isinstance(pinned, bool):
+            raise HTTPException(status_code=400, detail="pinned invalide")
+        ok = set_chat_pinned(tenant_id, user_id, chat_id, pinned)
     if not ok:
         raise HTTPException(status_code=404, detail="Chat introuvable")
     return {"ok": True}
