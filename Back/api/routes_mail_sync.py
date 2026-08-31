@@ -97,9 +97,11 @@ async def sync_mails(request: Request, bt: BackgroundTasks):
 
 def _rebuild_index_after_sync():
     # Recompute roots to include the flattened emails directory when folders are selected
+    print("[AUTO_SYNC] index_rebuild_start")
     with idx_lock:
         idx.roots = _recompute_roots_with_flat_emails()
         idx.rebuild_incremental()
+    print("[AUTO_SYNC] index_rebuild_end")
 
 def _do_sync_job(tenant_id: str, user_id: str, bearer_token: Optional[str], folders: List[str]):
     _set_status(tenant_id, user_id, status="running")

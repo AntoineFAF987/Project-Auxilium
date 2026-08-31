@@ -1,13 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import RequireAuth from "./RequireAuth";
 import { useAuth } from "./useAuth";
 import { useLanguage } from "./i18n";
 import { setTheme } from "./providers";
 import * as chatsApi from "./lib/chatsApi";
+import * as projectsApi from "./lib/projectsApi";
 import { checkBackendHealth } from "./lib/healthCheck";
 import ThinkingIndicator from "./components/ThinkingIndicator";
+import { FolderIcon, getSourceFileKind, SourceFileIcon } from "./components/SourceFileIcon";
 
 // === LaTeX ===
 import TeX from "@matejmazur/react-katex";
@@ -51,7 +54,7 @@ type Message = {
   caveat?: PostGenerationReview;
 };
 
-type StoredChat = { id: string; createdAt: string; title: string; messages: Message[]; optimistic?: boolean };
+type StoredChat = { id: string; createdAt: string; title: string; messages: Message[]; projectId?: string | null; optimistic?: boolean };
 
 const HEADER_H = 64;   // h-16
 const FOOTER_H = 92;   // hauteur de la barre d’input
@@ -60,6 +63,8 @@ const SIDEBAR_W = 16;  // rem (w-64)
 const HISTORY_MAX = 12;
 const FOOTER_GAP_MIN = 0; // espace min au-dessus du bord (px)
 const CHAT_FOOTER_GAP = 120; // espace entre le dernier message et la barre
+
+const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 
 /* ---------------- Icônes ---------------- */
@@ -177,6 +182,41 @@ function TrashIcon(props: React.SVGProps<SVGSVGElement>) {
       <line x1="10" y1="11" x2="10" y2="17" />
       <line x1="14" y1="11" x2="14" y2="17" />
     </svg>
+  );
+}
+
+function ChatTitle({ title }: { title: string }) {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [overflowAmount, setOverflowAmount] = useState(0);
+
+  const measureOverflow = () => {
+    requestAnimationFrame(() => {
+      const viewport = viewportRef.current;
+      const text = textRef.current;
+      if (!viewport || !text) return;
+      setOverflowAmount(Math.max(0, text.scrollWidth - viewport.clientWidth));
+    });
+  };
+
+  const duration = Math.max(900, Math.min(5000, 700 + overflowAmount * 18));
+  const style = {
+    "--chat-title-shift": `${overflowAmount}px`,
+    "--chat-title-duration": `${duration}ms`,
+  } as React.CSSProperties;
+
+  return (
+    <div
+      ref={viewportRef}
+      className="chat-title-viewport"
+      title={title}
+      onMouseEnter={measureOverflow}
+      onFocus={measureOverflow}
+    >
+      <span ref={textRef} className="chat-title-text" data-overflow={overflowAmount > 0} style={style}>
+        {title}
+      </span>
+    </div>
   );
 }
 
@@ -561,6 +601,14 @@ export default function Page() {
   const { t, language } = useLanguage();
   const [messages, setMessages] = useState<Message[]>([]);
   const [chats, setChats] = useState<StoredChat[]>([]);
+  const [projects, setProjects] = useState<projectsApi.Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [projectMenuId, setProjectMenuId] = useState<string | null>(null);
+  const [projectMenuPosition, setProjectMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [chatId, setChatId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -603,7 +651,13 @@ export default function Page() {
 
   const [menuId, setMenuId] = useState<string | null>(null);
   const [menuUp, setMenuUp] = useState(false);
-  const [showSrc, setShowSrc] = useState<Record<number, boolean>>({});
+  const [moveMenuChatId, setMoveMenuChatId] = useState<string | null>(null);
+  const [moveMenuPosition, setMoveMenuPosition] = useState<{ top: number; left: number } | null>(null);
+  const [creatingProjectForChat, setCreatingProjectForChat] = useState(false);
+  const [newProjectNameForChat, setNewProjectNameForChat] = useState("");
+  const [moveMenuError, setMoveMenuError] = useState<string | null>(null);
+  const [showSrc, setShowSrc] = useState<Record<string, boolean>>({});
+  const [historicalMessageIds, setHistoricalMessageIds] = useState<Set<string>>(new Set());
   const [scrolled, setScrolled] = useState(false);
 
   // État de santé du serveur backend
@@ -694,22 +748,29 @@ export default function Page() {
     (async () => {
       try {
         if (!account) return;
+        setProjectsLoading(true);
+        setProjectsError(null);
         const { idToken } = await getTokens();
         if (!idToken) return;
-        const serverChats = await chatsApi.fetchChats(idToken);
+        const [serverChats, serverProjects] = await Promise.all([chatsApi.fetchChats(idToken), projectsApi.fetchProjects(idToken)]);
         const converted: StoredChat[] = serverChats.map((c) => ({
           id: c.id,
           title: c.title,
           createdAt: c.created_at,
+          projectId: c.project_id ?? null,
           messages: [],
         }));
         setChats(converted);
+        setProjects(serverProjects);
       } catch (e: any) {
         console.error("[init] chargement chats serveur KO:", e);
+        setProjectsError("Impossible de charger les projets");
         const msg = String(e?.message || e);
         if (msg.includes("Failed to fetch") || msg.includes("Erreur réseau")) {
           console.warn("Le serveur backend ne semble pas accessible. Vérifiez qu'il est démarré.");
         }
+      } finally {
+        setProjectsLoading(false);
       }
     })();
   }, [account]);
@@ -718,6 +779,13 @@ export default function Page() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setMenuId(null);
+        setMoveMenuChatId(null);
+        setMoveMenuPosition(null);
+        setCreatingProjectForChat(false);
+        setNewProjectNameForChat("");
+        setMoveMenuError(null);
+        setProjectMenuId(null);
+        setProjectMenuPosition(null);
         setDrawer(false);
         setReplyTarget(null);
       }
@@ -739,16 +807,23 @@ export default function Page() {
   }, [input, loading, messages]);
 
   useEffect(() => {
-    if (!menuId) return;
+    if (!menuId && !projectMenuId) return;
     const onOutside = (e: PointerEvent) => {
       const t = e.target as HTMLElement | null;
       if (!t) return;
       if (t.closest(".menu-pop") || t.closest(".menu-toggle")) return;
       setMenuId(null);
+      setMoveMenuChatId(null);
+      setMoveMenuPosition(null);
+      setCreatingProjectForChat(false);
+      setNewProjectNameForChat("");
+      setMoveMenuError(null);
+      setProjectMenuId(null);
+      setProjectMenuPosition(null);
     };
     document.addEventListener("pointerdown", onOutside, true);
     return () => document.removeEventListener("pointerdown", onOutside, true);
-  }, [menuId]);
+  }, [menuId, projectMenuId]);
 
   useEffect(() => {
     const el = inputRef.current;
@@ -774,6 +849,7 @@ export default function Page() {
           id: c.id,
           title: c.title,
           createdAt: c.created_at,
+          projectId: c.project_id ?? null,
           messages: [],
         }));
         // Conserver les entrées optimistes non encore remontées
@@ -813,16 +889,141 @@ export default function Page() {
     // si elle n'est pas encore indexée côté serveur (race condition)
   };
 
+  const openProject = (projectId: string | null) => {
+    setSelectedProjectId(projectId);
+    newChat();
+  };
+
+  const refreshProjects = async () => {
+    setProjectsLoading(true);
+    setProjectsError(null);
+    try {
+      const { idToken } = await getTokens();
+      if (!idToken) return;
+      setProjects(await projectsApi.fetchProjects(idToken));
+    } catch (err: unknown) {
+      setProjectsError(errorMessage(err) || "Impossible de charger les projets");
+    } finally {
+      setProjectsLoading(false);
+    }
+  };
+
+  const createProject = async () => {
+    const name = newProjectName.trim();
+    if (!name) return;
+    try {
+      const { idToken } = await getTokens();
+      if (!idToken) throw new Error("Session expirée");
+      const project = await projectsApi.createProject(name, idToken);
+      setProjects((prev) => [project, ...prev]);
+      setNewProjectName("");
+      setCreatingProject(false);
+      openProject(project.id);
+    } catch (err: unknown) {
+      setProjectsError(errorMessage(err) || "Impossible de créer le projet");
+    }
+  };
+
+  const closeChatMenus = () => {
+    setMenuId(null);
+    setMoveMenuChatId(null);
+    setMoveMenuPosition(null);
+    setCreatingProjectForChat(false);
+    setNewProjectNameForChat("");
+    setMoveMenuError(null);
+  };
+
+  const openMoveToProjectMenu = (target: HTMLElement, chatId: string) => {
+    const mainMenu = target.closest(".chat-context-menu");
+    if (!mainMenu) return;
+    const mainRect = mainMenu.getBoundingClientRect();
+    const itemRect = target.getBoundingClientRect();
+    const menuWidth = 224;
+    const gap = 8;
+    const opensRight = mainRect.right + gap + menuWidth <= window.innerWidth - gap;
+    setMoveMenuPosition({
+      top: Math.min(Math.max(gap, itemRect.top), Math.max(gap, window.innerHeight - 360)),
+      left: opensRight ? mainRect.right + gap : Math.max(gap, mainRect.left - gap - menuWidth),
+    });
+    setMoveMenuChatId(chatId);
+    setCreatingProjectForChat(false);
+    setMoveMenuError(null);
+  };
+
+  const createProjectAndMoveChat = async (chat: StoredChat) => {
+    const name = newProjectNameForChat.trim();
+    if (!name) return;
+    try {
+      const { idToken } = await getTokens();
+      if (!idToken) throw new Error("Session expirée");
+      const project = await projectsApi.createProject(name, idToken);
+      setProjects((prev) => [project, ...prev]);
+      await chatsApi.moveChatToProject(chat.id, project.id, idToken);
+      setChats((prev) => prev.map((item) => item.id === chat.id ? { ...item, projectId: project.id } : item));
+      closeChatMenus();
+    } catch (err: unknown) {
+      setMoveMenuError(errorMessage(err) || "Impossible de créer le projet");
+    }
+  };
+
+  const renameProject = async (project: projectsApi.Project) => {
+    const name = window.prompt("Nouveau nom :", project.name)?.trim();
+    if (!name) return;
+    try {
+      const { idToken } = await getTokens();
+      if (!idToken) throw new Error("Session expirée");
+      const updated = await projectsApi.renameProject(project.id, name, idToken);
+      setProjects((prev) => prev.map((item) => item.id === updated.id ? updated : item));
+    } catch (err: unknown) {
+      setProjectsError(errorMessage(err) || "Impossible de renommer le projet");
+    } finally {
+      setProjectMenuId(null);
+      setProjectMenuPosition(null);
+    }
+  };
+
+  const deleteProject = async (project: projectsApi.Project) => {
+    if (!window.confirm(`Supprimer le projet « ${project.name} » ? Ses discussions seront conservées hors projet.`)) return;
+    try {
+      const { idToken } = await getTokens();
+      if (!idToken) throw new Error("Session expirée");
+      await projectsApi.deleteProject(project.id, idToken);
+      setProjects((prev) => prev.filter((item) => item.id !== project.id));
+      setChats((prev) => prev.map((chat) => chat.projectId === project.id ? { ...chat, projectId: null } : chat));
+      if (selectedProjectId === project.id) openProject(null);
+    } catch (err: unknown) {
+      setProjectsError(errorMessage(err) || "Impossible de supprimer le projet");
+    } finally {
+      setProjectMenuId(null);
+      setProjectMenuPosition(null);
+    }
+  };
+
+  const moveChatToProject = async (chat: StoredChat, projectId: string | null) => {
+    try {
+      const { idToken } = await getTokens();
+      if (!idToken) throw new Error("Session expirée");
+      await chatsApi.moveChatToProject(chat.id, projectId, idToken);
+      setChats((prev) => prev.map((item) => item.id === chat.id ? { ...item, projectId } : item));
+    } catch (err: unknown) {
+      alert(`Impossible de déplacer la discussion : ${errorMessage(err)}`);
+    } finally {
+      closeChatMenus();
+    }
+  };
+
   const loadChat = async (c: StoredChat) => {
     try {
       const { idToken } = await getTokens();
       const serverMessages = await chatsApi.fetchChatMessages(c.id, idToken);
-      const converted = serverMessages.map((m) => ({ id: m.id, role: m.role, content: m.content } as Message));
+      const converted = serverMessages.map((m) => ({ id: m.id, role: m.role, content: m.content, sources: m.sources } as Message));
       setChatId(c.id);
+      setSelectedProjectId(c.projectId ?? null);
       setMessages(converted);
+      setHistoricalMessageIds(new Set(converted.filter((m) => m.role === "assistant").map((m) => m.id)));
       setShowSrc({});
       setInput("");
-      setMenuId(null);
+      closeChatMenus();
       setReplyTarget(null);
       // NE PAS appeler refreshChats() ici : race condition possible avec les entrées récemment créées
       requestAnimationFrame(() =>
@@ -878,7 +1079,8 @@ export default function Page() {
       if (chatId === id) {
         setChatId(null);
         setMessages([]);
-        setShowSrc({});
+    setShowSrc({});
+    setHistoricalMessageIds(new Set());
         setInput("");
         setReplyTarget(null);
       }
@@ -889,13 +1091,18 @@ export default function Page() {
 
   const visibleChats = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return chats;
+    if (!q) return chats.filter((c) => (selectedProjectId ? c.projectId === selectedProjectId : !c.projectId));
     return chats.filter(
       (c) =>
         (c.title || "").toLowerCase().includes(q) ||
         (c.messages || []).some((m) => (m.content || "").toLowerCase().includes(q))
     );
-  }, [search, chats]);
+  }, [search, chats, selectedProjectId]);
+
+  const moveMenuChat = useMemo(
+    () => chats.find((chat) => chat.id === moveMenuChatId) ?? null,
+    [chats, moveMenuChatId]
+  );
 
   const displayName = (account?.name ?? account?.username ?? t("user")).trim();
   const displayEmail = account?.username ?? "";
@@ -993,6 +1200,7 @@ export default function Page() {
           id: tid,
           createdAt: new Date().toISOString(),
           title,
+          projectId: selectedProjectId,
           messages: [],
           optimistic: true,
         };
@@ -1017,6 +1225,7 @@ export default function Page() {
           history: historyRecent,
           reply_history,
           thread_id: tid,
+          project_id: selectedProjectId,
           source_mode: sourceMode,
           reply_to: newUserMsg.replyTo
             ? {
@@ -1030,7 +1239,9 @@ export default function Page() {
       });
 
       if (!r.ok) {
-        const errText = await r.text();
+        await r.text();
+        const httpRequestId = r.headers.get("X-Request-ID");
+        const errText = `⚠️ Une erreur est survenue avant le démarrage du stream.${httpRequestId ? `\nRéférence : ${httpRequestId}` : ""}`;
         const next = [
           ...nextUser,
           {
@@ -1120,7 +1331,8 @@ export default function Page() {
               if (parsed.chat_id) finalChatId = String(parsed.chat_id);
             } else if (parsed.type === 'error') {
               // Gestion des erreurs spécifiques
-              const errorMsg = parsed.error || 'Erreur inconnue';
+              const requestId = typeof parsed.request_id === "string" ? parsed.request_id : "";
+              const errorMsg = `Une erreur est survenue pendant la génération.${requestId ? ` Référence : ${requestId}` : ""}`;
               if (errorMsg.includes('429') || errorMsg.toLowerCase().includes('rate') || errorMsg.toLowerCase().includes('quota')) {
                 accumulatedContent = "⏳ **Limite de requêtes atteinte**\n\nL'API Mistral a temporairement bloqué les requêtes (trop de demandes ou quota dépassé).\n\n**Solutions :**\n• Attendez quelques minutes et réessayez\n• Vérifiez votre quota sur la plateforme Mistral AI";
               } else {
@@ -1249,12 +1461,13 @@ export default function Page() {
 
   // Copier un message
   async function copyMessage(text: string, id: string) {
+    const plainText = text.replace(/\*\*([\s\S]*?)\*\*/g, "$1");
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(plainText);
     } catch {
       // fallback très rare
       const ta = document.createElement("textarea");
-      ta.value = text;
+      ta.value = plainText;
       document.body.appendChild(ta);
       ta.select();
       document.execCommand("copy");
@@ -1715,10 +1928,66 @@ export default function Page() {
               setScrolled((e.currentTarget as HTMLDivElement).scrollTop > 0)
             }
           >
+            <section className="mb-3">
+              <div className="px-3 py-2 text-sm font-semibold text-[var(--text)] tracking-wider">Projets</div>
+              {creatingProject ? (
+                <div className="px-2 flex gap-1">
+                  <input
+                    autoFocus
+                    value={newProjectName}
+                    onChange={(e) => setNewProjectName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") createProject();
+                      if (e.key === "Escape") { setCreatingProject(false); setNewProjectName(""); }
+                    }}
+                    placeholder="Nom du projet"
+                    className="min-w-0 flex-1 px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--surface)] outline-none"
+                  />
+                  <button type="button" onClick={createProject} disabled={!newProjectName.trim()} className="px-2 text-sm rounded hover:bg-[var(--muted)] disabled:opacity-50 cursor-pointer">OK</button>
+                  <button type="button" onClick={() => { setCreatingProject(false); setNewProjectName(""); }} className="px-2 text-sm rounded hover:bg-[var(--muted)] cursor-pointer">×</button>
+                </div>
+              ) : (
+                <button type="button" onClick={() => { setCreatingProject(true); setProjectsError(null); }} className="w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm hover:bg-[var(--muted)] cursor-pointer">
+                  <span className="text-lg leading-none">+</span><span>Nouveau projet</span>
+                </button>
+              )}
+              <div className="mt-1 max-h-44 overflow-y-auto space-y-1">
+                {projects.map((project) => {
+                  const open = projectMenuId === project.id;
+                  return (
+                    <div key={project.id} className={`chat-item group relative flex items-center gap-2 px-3 py-2 rounded-md cursor-pointer ${selectedProjectId === project.id ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"}`} onClick={() => { openProject(project.id); setMenuId(null); }}>
+                      <div className="flex-1 min-w-0 truncate text-sm text-[var(--text)]">{project.name}</div>
+                      <button type="button" className={`menu-toggle shrink-0 p-1 rounded text-[var(--muted-text)] hover:bg-[var(--muted)] cursor-pointer ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`} onClick={(e) => {
+                        e.stopPropagation();
+                        if (open) {
+                          setProjectMenuId(null);
+                          setProjectMenuPosition(null);
+                          return;
+                        }
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        setProjectMenuPosition({ top: rect.bottom + 4, left: Math.max(8, rect.right - 176) });
+                        setProjectMenuId(project.id);
+                      }} aria-label={t("moreActions")}>
+                        <svg viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor"><circle cx="4" cy="10" r="1.5" /><circle cx="10" cy="10" r="1.5" /><circle cx="16" cy="10" r="1.5" /></svg>
+                      </button>
+                      {open && projectMenuPosition && typeof document !== "undefined" && createPortal(
+                        <div className="menu-pop fixed w-44 rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg py-1 z-50" style={projectMenuPosition} onClick={(e) => e.stopPropagation()}>
+                          <button type="button" onClick={() => renameProject(project)} className="w-full flex gap-2 px-3 py-2 text-sm text-left hover:bg-[var(--muted)] cursor-pointer"><EditIcon className="h-4 w-4" />{t("rename")}</button>
+                          <button type="button" onClick={() => deleteProject(project)} className="w-full flex gap-2 px-3 py-2 text-sm text-left text-red-600 hover:bg-red-50 cursor-pointer"><TrashIcon className="h-4 w-4" />Supprimer le projet</button>
+                        </div>,
+                        document.body
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {projectsLoading && <div className="px-3 py-1 text-xs text-[var(--muted-text)]">Chargement…</div>}
+              {projectsError && <button type="button" onClick={refreshProjects} className="px-3 py-1 text-xs text-red-600 text-left cursor-pointer">{projectsError} — Réessayer</button>}
+            </section>
             {/* Titre "Chats" */}
-            <div className="px-3 py-2 text-sm font-semibold text-[var(--text)] tracking-wider">
+            <button type="button" onClick={() => { openProject(null); setMenuId(null); }} className="w-full px-3 py-2 text-left text-sm font-semibold text-[var(--text)] tracking-wider hover:bg-[var(--muted)] rounded-md cursor-pointer">
               {t("chats")}
-            </div>
+            </button>
             
             {useMemo(() => {
               const list =
@@ -1746,10 +2015,10 @@ export default function Page() {
                         }`}
                         title={c.title}
                       >
-                        <div className="flex-1 min-w-0 truncate text-sm text-[var(--text)]">
-                          {c.title}{" "}
+                        <div className={`flex min-w-0 flex-1 items-center text-sm text-[var(--text)] ${open ? "pr-6" : "group-hover:pr-6"}`}>
+                          <ChatTitle title={c.title} />
                           {disabled && (
-                            <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted-text)] align-middle">
+                            <span className="ml-1 shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted-text)] align-middle">
                               {t("pending")}
                             </span>
                           )}
@@ -1767,9 +2036,12 @@ export default function Page() {
                             } else {
                               setMenuUp(false);
                             }
+                            setMoveMenuChatId(null);
+                            setMoveMenuPosition(null);
+                            setCreatingProjectForChat(false);
                             setMenuId(isOpen ? null : c.id);
                           }}
-                          className={`menu-toggle shrink-0 p-1 rounded text-[var(--muted-text)] hover:text-[var(--text)] hover:bg-[var(--muted)] cursor-pointer ${
+                          className={`menu-toggle absolute right-2 p-1 rounded text-[var(--muted-text)] hover:text-[var(--text)] hover:bg-[var(--muted)] cursor-pointer ${
                             open ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                           }`}
                           aria-label={t("moreActions")}
@@ -1782,7 +2054,8 @@ export default function Page() {
                         </button>
                         {open && (
                           <div
-                            className={`menu-pop absolute right-2 ${
+                            role="menu"
+                            className={`menu-pop chat-context-menu absolute right-2 ${
                               menuUp ? "bottom-full mb-1" : "top-full mt-1"
                             } w-44 rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg py-1 z-20`}
                             onClick={(e) => e.stopPropagation()}
@@ -1795,6 +2068,21 @@ export default function Page() {
                               {/* Remplacer icône actuelle par EditIcon */}
                               <EditIcon className="h-4 w-4" aria-hidden="true" />
                               {t("rename")}
+                            </button>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              aria-haspopup="menu"
+                              aria-expanded={moveMenuChatId === c.id}
+                              onMouseEnter={(e) => openMoveToProjectMenu(e.currentTarget, c.id)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openMoveToProjectMenu(e.currentTarget, c.id);
+                              }}
+                              className="w-full flex items-center justify-between gap-2 text-left px-3 py-2 text-sm hover:bg-[var(--muted)] cursor-pointer"
+                            >
+                              <span>Déplacer vers le projet</span>
+                              <span aria-hidden="true">›</span>
                             </button>
                             <button
                               className="w-full flex items-center gap-2 text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 cursor-pointer"
@@ -1812,7 +2100,46 @@ export default function Page() {
                   })
                 );
               return list;
-            }, [visibleChats, chatId, menuId])}
+            }, [visibleChats, chatId, menuId, projects])}
+            {moveMenuChat && moveMenuPosition && typeof document !== "undefined" && createPortal(
+              <div
+                role="menu"
+                className="menu-pop fixed z-[1010] min-w-56 max-w-72 max-h-[calc(100vh-16px)] overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg py-1"
+                style={moveMenuPosition}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {creatingProjectForChat ? (
+                  <div className="px-2 py-1.5">
+                    <input
+                      autoFocus
+                      value={newProjectNameForChat}
+                      onChange={(e) => setNewProjectNameForChat(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") createProjectAndMoveChat(moveMenuChat);
+                        if (e.key === "Escape") closeChatMenus();
+                      }}
+                      placeholder="Nom du projet"
+                      className="w-full px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--surface)] outline-none"
+                    />
+                    <div className="mt-1 flex justify-end gap-1">
+                      <button type="button" onClick={closeChatMenus} className="px-2 py-1 text-xs rounded hover:bg-[var(--muted)] cursor-pointer">Annuler</button>
+                      <button type="button" disabled={!newProjectNameForChat.trim()} onClick={() => createProjectAndMoveChat(moveMenuChat)} className="px-2 py-1 text-xs rounded hover:bg-[var(--muted)] disabled:opacity-50 cursor-pointer">Créer</button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <button type="button" role="menuitem" onClick={() => { setCreatingProjectForChat(true); setMoveMenuError(null); }} className="w-full text-left px-3 py-2 text-sm hover:bg-[var(--muted)] cursor-pointer">Nouveau projet</button>
+                    <div className="my-1 border-t border-[var(--border)]" />
+                    <button type="button" role="menuitem" onClick={() => moveChatToProject(moveMenuChat, null)} className="w-full flex items-center justify-between gap-2 text-left px-3 py-2 text-sm hover:bg-[var(--muted)] cursor-pointer"><span>Aucun projet</span>{!moveMenuChat.projectId && <span aria-label="Projet actuel">✓</span>}</button>
+                    {projects.map((project) => (
+                      <button key={project.id} type="button" role="menuitem" onClick={() => moveChatToProject(moveMenuChat, project.id)} className="w-full flex items-center justify-between gap-2 text-left px-3 py-2 text-sm hover:bg-[var(--muted)] cursor-pointer"><span className="truncate">{project.name}</span>{moveMenuChat.projectId === project.id && <span aria-label="Projet actuel">✓</span>}</button>
+                    ))}
+                  </>
+                )}
+                {moveMenuError && <div className="px-3 py-2 text-xs text-red-600">{moveMenuError}</div>}
+              </div>,
+              document.body
+            )}
           </div>
         </aside>
 
@@ -1877,6 +2204,7 @@ export default function Page() {
                     const isUser = m.role === "user";
                     const hasSrc = !isUser && (m.sources?.length ?? 0) > 0;
                     const isLast = i === messages.length - 1;
+                    const isHistoricalAnswer = !isUser && historicalMessageIds.has(m.id);
 
                     const renderSource = (s: Source, key: number) => {
                       const isWeb = s.type === "web" || /^https?:\/\//i.test(s.path || "");
@@ -1898,6 +2226,8 @@ export default function Page() {
                       }
                       const unavailable = s.type === "local_file" && !s.exists;
                       const folder = (s.folder_path || "").split(/[\\/]+/).filter(Boolean).slice(-3).join(" > ");
+                      const sourceDisplayName = s.display_name || s.path || "Source locale";
+                      const sourceFileKind = getSourceFileKind(sourceDisplayName);
                       const triggerSourceAction = async (action: "open_file" | "reveal_in_folder") => {
                         if (!s.document_id || unavailable) return;
                         const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/sources/open`, {
@@ -1910,23 +2240,46 @@ export default function Page() {
                         }
                       };
                       return (
-                        <li key={key} className="list-none rounded-lg border border-[var(--border)] px-3 py-2">
-                          <div className="font-medium" title={s.origin_path || undefined}>{s.display_name || s.path || "Source locale"}</div>
-                          {folder && <div className="text-xs text-[var(--muted-text)] mt-0.5">{folder}</div>}
+                        <li key={key} className="list-none">
+                          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 sm:flex-nowrap">
+                            <div className="min-w-0 flex-1 basis-48">
+                              <div className="truncate font-medium" title={sourceDisplayName}>{sourceDisplayName}</div>
+                              {folder && <div className="mt-0.5 truncate text-xs text-[var(--muted-text)]" title={folder}>{folder}</div>}
                           {unavailable ? (
                             <div className="text-xs text-amber-600 dark:text-amber-300 mt-1">Source introuvable à son emplacement d&apos;origine</div>
-                          ) : s.type === "local_file" ? (
-                            <div className="mt-2 flex gap-2">
-                              <button onClick={() => triggerSourceAction("open_file")} className="text-xs underline hover:opacity-80">Ouvrir</button>
-                              <button onClick={() => triggerSourceAction("reveal_in_folder")} className="text-xs underline hover:opacity-80">Afficher dans le dossier</button>
+                          ) : null}
+                            </div>
+                          {s.type === "local_file" ? (
+                            <div className="ml-auto flex shrink-0 items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => triggerSourceAction("open_file")}
+                                disabled={unavailable}
+                                title={unavailable ? "Source introuvable" : "Ouvrir le fichier"}
+                                aria-label="Ouvrir le fichier"
+                                className="inline-flex h-10 w-10 items-center justify-center rounded-lg text-[var(--foreground)] transition-colors duration-150 hover:bg-[var(--muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                <SourceFileIcon kind={sourceFileKind} className="h-[22px] w-[22px]" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => triggerSourceAction("reveal_in_folder")}
+                                disabled={unavailable}
+                                title={unavailable ? "Source introuvable" : "Afficher dans le dossier"}
+                                aria-label="Afficher dans le dossier"
+                                className="inline-flex h-10 w-10 items-center justify-center rounded-lg text-[var(--muted-text)] transition-colors duration-150 hover:bg-[var(--muted)] hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                <FolderIcon className="h-[22px] w-[22px]" />
+                              </button>
                             </div>
                           ) : null}
+                          </div>
                         </li>
                       );
                     };
 
                     return (
-                      <div key={m.id || i} className={`group flex ${isUser ? "justify-end" : "justify-start"} relative`}>
+                      <div key={m.id || i} className={`group ${isUser ? "" : "assistant-message"} flex ${isUser ? "justify-end" : "justify-start"} relative`}>
                         <div className={isUser ? "max-w-[75%]" : "w-full"}>
                           {/* Encart "en réponse à ..." */}
                           {m.replyTo && (
@@ -2028,7 +2381,7 @@ export default function Page() {
                                 const pretty = labelMap[inner] ?? labelMap[raw] ?? inner;
 
                                 return (
-                                  <div className="mt-3 text-xs px-4">
+                                  <div className="source-controls mt-3 px-4 text-xs" data-active={!isHistoricalAnswer}>
                                     <div
                                       className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg shadow-sm"
                                       style={{ background: bg, borderLeft: border, color: "var(--text)" }}
@@ -2054,26 +2407,28 @@ export default function Page() {
 
                           {/* Sources éventuelles */}
                           {hasSrc && (
-                            <div className="mt-3 text-left px-4">
+                            <div className="source-controls mt-3 px-4 text-left" data-active={!isHistoricalAnswer}>
+                              <div className="source-controls-inner">
                               <button
-                                onClick={() => setShowSrc((p) => ({ ...p, [i]: !p[i] }))}
+                                onClick={() => setShowSrc((p) => ({ ...p, [m.id]: !p[m.id] }))}
                                 className="inline-flex items-center gap-1 text-sm text-[var(--muted-text)] hover:text-[var(--text)] cursor-pointer"
-                                aria-expanded={!!showSrc[i]}
+                                aria-expanded={!!showSrc[m.id]}
                               >
                                 <span>
-                                  {showSrc[i] ? t("hideSources") : t("showSources")}
+                                  {showSrc[m.id] ? t("hideSources") : t("showSources")}
                                 </span>
-                                <svg className={`h-4 w-4 transition-transform ${showSrc[i] ? "rotate-180" : ""}`} viewBox="0 0 20 20" fill="currentColor">
+                                <svg className={`h-4 w-4 transition-transform ${showSrc[m.id] ? "rotate-180" : ""}`} viewBox="0 0 20 20" fill="currentColor">
                                   <path d="M5.23 7.21a.75.75 0 011.06.02L10 10.94l3.71-3.71a.75.75 0 111.06 1.06l-4.24 4.24a.75.75 0 01-1.06 0L5.21 8.29a.75.75 0 01.02-1.08z" />
                                 </svg>
                               </button>
-                              {showSrc[i] && (
+                              {showSrc[m.id] && (
                                 <div className="mt-2 rounded-xl border border-[var(--border)] bg-[color-mix(in oklab, var(--surface) 60%, transparent 40%)] p-3 text-sm text-[var(--text)]">
                                   <ul className="list-disc pl-5 space-y-1">
                                     {m.sources!.map((s, j) => renderSource(s, j))}
                                   </ul>
                                 </div>
                               )}
+                              </div>
                             </div>
                           )}
 

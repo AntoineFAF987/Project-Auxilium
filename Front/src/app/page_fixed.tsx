@@ -977,13 +977,14 @@ export default function Page() {
       });
 
       if (!r.ok) {
-        const errText = await r.text();
+        await r.text();
+        const httpRequestId = r.headers.get("X-Request-ID");
         const next = [
           ...nextUser,
           {
             id: crypto.randomUUID(),
             role: "assistant",
-            content: `⚠️ ${errText || r.statusText || "Erreur API"}`,
+            content: `⚠️ Une erreur est survenue avant le démarrage du stream.${httpRequestId ? `\nRéférence : ${httpRequestId}` : ""}`,
           } as Message,
         ];
         setMessages(next);
@@ -1065,12 +1066,20 @@ export default function Page() {
               }
             } else if (parsed.type === 'error') {
               // Gestion des erreurs spécifiques
+              const requestId = typeof parsed.request_id === "string" ? parsed.request_id : "";
+              accumulatedContent = `⚠️ Une erreur est survenue pendant la génération.${requestId ? `\nRéférence : ${requestId}` : ""}`;
+              /*
+               * Le backend ne transmet volontairement aucun détail technique.
+               * On conserve cette branche pour terminer proprement la lecture.
+               */
+              /*
               const errorMsg = parsed.error || 'Erreur inconnue';
               if (errorMsg.includes('429') || errorMsg.toLowerCase().includes('rate') || errorMsg.toLowerCase().includes('quota')) {
                 accumulatedContent = "⏳ **Limite de requêtes atteinte**\n\nL'API Mistral a temporairement bloqué les requêtes (trop de demandes ou quota dépassé).\n\n**Solutions :**\n• Attendez quelques minutes et réessayez\n• Vérifiez votre quota sur la plateforme Mistral AI";
               } else {
                 accumulatedContent = `⚠️ **Erreur :** ${errorMsg}`;
               }
+              */
               // Mettre à jour avec le message d'erreur formaté
               setMessages((prev) => {
                 const updated = [...prev];
@@ -1125,7 +1134,7 @@ export default function Page() {
           {
             id: crypto.randomUUID(),
             role: "assistant",
-            content: `⚠️ Erreur réseau: ${String(e)}`,
+            content: "⚠️ Une erreur réseau est survenue pendant le stream.",
           } as Message,
         ];
         setMessages(next);
@@ -1180,12 +1189,13 @@ export default function Page() {
 
   // Copier un message
   async function copyMessage(text: string, id: string) {
+    const plainText = text.replace(/\*\*([\s\S]*?)\*\*/g, "$1");
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(plainText);
     } catch {
       // fallback très rare
       const ta = document.createElement("textarea");
-      ta.value = text;
+      ta.value = plainText;
       document.body.appendChild(ta);
       ta.select();
       document.execCommand("copy");

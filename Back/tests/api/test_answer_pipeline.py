@@ -4,11 +4,14 @@ import sys
 import types
 import unittest
 import uuid
+from datetime import datetime, timezone
 from contextlib import ExitStack, nullcontext
+from enum import Enum
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from fastapi import HTTPException, Request
+from pydantic import BaseModel
 
 
 # Les tests unitaires ne doivent ni charger le singleton d'index ni télécharger
@@ -1214,6 +1217,35 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(append.call_args_list[1].args[3], "assistant")
         self.assertEqual(append.call_args_list[1].args[4], result.answer)
 
+    def test_assistant_persistence_failure_is_logged_and_result_survives(self):
+        from api import answer_pipeline as pipeline
+
+        streamed = []
+        def append_with_failure(*args, **kwargs):
+            if args[3] == "assistant":
+                raise RuntimeError("sqlite unavailable")
+
+        with (
+            self._patch_pipeline(post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(pipeline, "_try_get_auth_ids", return_value=("tenant-1", "user-1")),
+            patch.object(pipeline, "create_chat"),
+            patch.object(pipeline, "append_message", side_effect=append_with_failure),
+            patch.object(pipeline, "_safe_llm_stream", return_value=iter(["Réponse complète"])),
+            patch("builtins.print") as printed,
+        ):
+            result = run_answer_pipeline(
+                AskIn(q="Question locale", source_mode="local", thread_id="chat-persist"),
+                _request("/ask/stream"),
+                token_sink=streamed.append,
+            )
+
+        self.assertEqual(result.answer, "Réponse complète")
+        logs = "\n".join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn('"event": "stream_error"', logs)
+        self.assertIn('"stage": "message_persistence"', logs)
+        self.assertIn("sqlite unavailable", logs)
+
+
     def test_processing_error_keeps_the_already_persisted_user_turn(self):
         from api import answer_pipeline as pipeline
 
@@ -1326,6 +1358,69 @@ class TransportParityTests(unittest.TestCase):
         self.assertEqual(done["review"]["caveat_type"], "PARTIAL_EVIDENCE")
         self.assertIn("event: caveat", stream)
         self.assertEqual(shared.call_count, 2)
+
+    def test_sse_exception_after_response_start_is_safe_and_logged(self):
+        from api import routes_ask
+
+        def pipeline(_body, _request, *, token_sink=None):
+            token_sink("Avant erreur")
+            raise RuntimeError("secret backend detail")
+
+        with patch.object(routes_ask, "run_answer_pipeline", side_effect=pipeline), patch("builtins.print") as printed:
+            response = asyncio.run(routes_ask.ask_stream(AskIn(q="Question"), _request("/ask/stream")))
+            stream = asyncio.run(self._collect(response))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('"type": "error"', stream)
+        self.assertIn('"request_id": "', stream)
+        self.assertIn("Une erreur interne est survenue", stream)
+        self.assertNotIn("secret backend detail", stream)
+        logs = "\n".join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn('"event": "stream_error"', logs)
+        self.assertIn('"error_type": "RuntimeError"', logs)
+        self.assertIn("secret backend detail", logs)
+
+    def test_sse_done_serialization_failure_is_logged_as_sse_emit(self):
+        from api import routes_ask
+
+        result = AnswerPipelineResult(answer="Réponse", request_id="result-id", review=PostGenerationReview())
+        original_sse = routes_ask._sse
+
+        def failing_sse(payload, event=None):
+            if payload.get("type") == "done":
+                raise ValueError("done emit failed")
+            return original_sse(payload, event)
+
+        with patch.object(routes_ask, "run_answer_pipeline", return_value=result), patch.object(routes_ask, "_sse", side_effect=failing_sse), patch("builtins.print") as printed:
+            response = asyncio.run(routes_ask.ask_stream(AskIn(q="Question"), _request("/ask/stream")))
+            stream = asyncio.run(self._collect(response))
+
+        self.assertIn('"type": "error"', stream)
+        logs = "\n".join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn('"stage": "sse_emit"', logs)
+        self.assertIn("done emit failed", logs)
+
+    def test_json_safe_supports_standard_payload_types(self):
+        from api.diagnostics import json_safe
+
+        class Kind(Enum):
+            PDF = "pdf"
+
+        class Metadata(BaseModel):
+            name: str
+
+        value = json_safe({
+            "path": Path("C:/docs/policy.pdf"),
+            "when": datetime(2026, 8, 28, tzinfo=timezone.utc),
+            "kind": Kind.PDF,
+            "model": Metadata(name="policy"),
+            "set": {"a", "b"},
+            "tuple": (1, 2),
+        })
+        json.dumps(value)
+        self.assertEqual(Path(value["path"]), Path("C:/docs/policy.pdf"))
+        self.assertEqual(value["kind"], "pdf")
+        self.assertEqual(value["model"], {"name": "policy"})
 
     def test_sse_emits_generation_fragments_before_post_generation_caveat(self):
         from api import routes_ask

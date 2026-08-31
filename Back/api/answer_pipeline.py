@@ -40,6 +40,7 @@ from .multi_query_retrieval import build_retrieval_queries, reciprocal_rank_fusi
 from .catalog_probe import probe_document_catalog
 from .chats_db import create_chat, append_message
 from .source_references import references_for_blocks
+from .diagnostics import current_request_id, log_event, log_stream_error, set_stage
 from auth_ms import verify_ms_token
 
 # --- Anti-429: concurrence + retries ---
@@ -369,33 +370,48 @@ def _generate_answer(
     *,
     history: List[Dict],
     token_sink: Optional[Callable[[str], None]] = None,
+    diagnostic_stage_sink: Optional[Callable[[str], None]] = None,
     **kwargs,
 ) -> str:
     """Genere en sync ou transmet chaque fragment au transport SSE."""
 
-    if token_sink is None:
-        return _safe_llm(
-            ask_mistral_with_context,
-            question,
-            context_text=context_text,
-            history=history,
-            timeout=LLM_TIMEOUT_SEC,
-            **kwargs,
-        )
+    set_stage("generation")
+    if diagnostic_stage_sink:
+        diagnostic_stage_sink("generation")
+    request_id = current_request_id()
+    if request_id:
+        log_event(request_id, "generation_start")
 
-    parts: List[str] = []
-    for chunk in _safe_llm_stream(
-        ask_mistral_with_context_stream,
-        question,
-        context_text=context_text,
-        history=history,
-        **kwargs,
-    ):
-        text = str(chunk or "")
-        if text:
-            parts.append(text)
-            token_sink(text)
-    return "".join(parts)
+    try:
+        if token_sink is None:
+            answer = _safe_llm(
+                ask_mistral_with_context,
+                question,
+                context_text=context_text,
+                history=history,
+                timeout=LLM_TIMEOUT_SEC,
+                **kwargs,
+            )
+        else:
+            parts: List[str] = []
+            for chunk in _safe_llm_stream(
+                ask_mistral_with_context_stream,
+                question,
+                context_text=context_text,
+                history=history,
+                **kwargs,
+            ):
+                text = str(chunk or "")
+                if text:
+                    parts.append(text)
+                    token_sink(text)
+            answer = "".join(parts)
+    except Exception:
+        raise
+
+    if request_id:
+        log_event(request_id, "generation_end")
+    return answer
 
 def _local_index_ready() -> bool:
     try:
@@ -976,7 +992,8 @@ def run_answer_pipeline(
     *,
     token_sink: Optional[Callable[[str], None]] = None,
 ) -> AnswerPipelineResult:
-    request_id = str(uuid.uuid4())
+    request_id = current_request_id() or str(uuid.uuid4())
+    set_stage("unknown")
     validations: Dict[str, Any] = {}
     q = validate_answer_request(body)
     trace_started = time.perf_counter()
@@ -998,7 +1015,7 @@ def run_answer_pipeline(
         try:
             title = (q[:60] + "…") if len(q) > 60 else q
             chat_id = chat_id or str(uuid.uuid4())
-            create_chat(tenant_id, user_id, title=title or "Nouveau chat", chat_id=chat_id)
+            create_chat(tenant_id, user_id, title=title or "Nouveau chat", chat_id=chat_id, project_id=body.project_id)
             append_message(tenant_id, user_id, chat_id, "user", q, meta={"request_id": request_id})
             user_turn_persisted = True
         except Exception:
@@ -1009,6 +1026,8 @@ def run_answer_pipeline(
     def finalize_result(result: AnswerPipelineResult) -> AnswerPipelineResult:
         """Persist one complete assistant message after any successful path."""
         if tenant_id and user_id and user_turn_persisted:
+            log_event(request_id, "message_persistence_start")
+            set_stage("message_persistence")
             try:
                 append_message(
                     tenant_id,
@@ -1016,11 +1035,13 @@ def run_answer_pipeline(
                     chat_id,
                     "assistant",
                     result.answer,
-                    meta={"mode": result.mode, "review": result.review.to_dict(), "request_id": request_id},
+                    meta={"mode": result.mode, "review": result.review.to_dict(), "request_id": request_id, "sources": result.sources},
                 )
-            except Exception:
+            except Exception as exc:
+                log_stream_error(request_id, "message_persistence", exc)
                 # Keep the HTTP/SSE result available even if its assistant write fails.
-                pass
+            else:
+                log_event(request_id, "message_persistence_end")
         persisted_chat_id = chat_id if user_turn_persisted else result.chat_id
         final = replace(result, chat_id=(persisted_chat_id or None))
         trace("answer", {"final_answer": final.answer, "mode": final.mode, "sources": final.sources, "total_ms": round((time.perf_counter() - trace_started) * 1000, 1)})
@@ -1139,6 +1160,7 @@ def run_answer_pipeline(
         started = time.perf_counter()
         try:
             trace("orchestrator_input", {"system_prompt": build_prompt(q, hist).split("\nCURRENT_DATE_UTC:", 1)[0], "user_message": q, "history": hist, "active_subject_candidates": compact_history(hist).get("active_subject_candidates", [])})
+            set_stage("orchestration")
             raw_orchestration_plan = _run_orchestration(q, hist)
             sanitized_plan = sanitize_plan_for_retrieval(raw_orchestration_plan, user_message=q)
             orchestration_plan = sanitized_plan.plan
@@ -1212,6 +1234,7 @@ def run_answer_pipeline(
     if orchestration_plan is not None and not orchestration_plan.needs_retrieval:
         catalog_probe = None
         if orchestration_plan.intent == "general_question":
+            set_stage("catalog_probe")
             catalog_probe = probe_document_catalog(q, getattr(idx, "corpus", None))
             trace("catalog_probe", catalog_probe.trace())
             if catalog_probe.strong_match:
@@ -1321,6 +1344,7 @@ def run_answer_pipeline(
     if resolved_retrieval_query:
         q_eff = resolved_retrieval_query
     trace("retrieval_input", {"raw_user_message": q, "resolved_retrieval_query": resolved_retrieval_query, "follow_up_retrieval": follow_up, "original_query": q, "orchestrator_query": orchestration_plan.retrieval_query if orchestration_plan else None, "q_eff": q_eff, "q_eff_source": "resolved_retrieval_query" if resolved_retrieval_query else ("orchestrator_query" if orchestration_plan else ("condensed_query" if should_condense else "original_query")), "retrieval_queries": [{"type": kind, "query": query} for kind, query in retrieval_queries], "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": orchestration_plan.source_types if orchestration_plan else [], "temporal_constraints": [item.model_dump(mode="json") for item in orchestration_plan.temporal_constraints] if orchestration_plan else [], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
+    set_stage("retrieval")
     _log_event(request_id, {"event": "rag_search_start", "q_eff": q_eff, "should_condense": should_condense, "hist_len": len(hist), "orchestrated": orchestration_plan is not None})
 
     retrieval_started = time.perf_counter()
@@ -1349,6 +1373,7 @@ def run_answer_pipeline(
     # before evidence_mode/generation. It follows only existing corpus links.
     retrieval_rounds = []
     if orchestration_plan is not None:
+        set_stage("iterative_retrieval")
         blocks, retrieval_rounds, iterative_sufficiency = run_iterative_evidence_retrieval(
             candidate_pool=prelim,
             initial_evidence=blocks,
@@ -1558,6 +1583,7 @@ def run_answer_pipeline(
     try:
         generation_started = time.perf_counter()
         trace("generation_input", {"generation_mode": mode_label, "question": q, "context_length": len(context_for_llm or ""), "context": context_for_llm, "provider": _RUNTIME_SETTINGS.generation.provider, "model": _RUNTIME_SETTINGS.generation.model, "reasoning_effort": _RUNTIME_SETTINGS.generation.reasoning_effort, "system_prompt": "constructed by rag_core.llm from generation mode and evidence mode", "evidence_mode": evidence_mode if use_strict else "none"})
+        set_stage("generation")
         answer = _generate_answer(
             q, context_for_llm, history=hist, token_sink=token_sink,
             evidence_mode=evidence_mode if use_strict else "none",
@@ -1632,6 +1658,7 @@ def run_answer_pipeline(
             chosen = chosen or (blocks or [])
         else:
             chosen = (blocks or [])
+        set_stage("source_serialization")
         sources = references_for_blocks(chosen)
     else:
         sources = []

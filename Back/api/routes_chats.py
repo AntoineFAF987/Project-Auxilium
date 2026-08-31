@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Tuple
 from fastapi import APIRouter, HTTPException, Path, Body, Request
 
 from auth_ms import verify_ms_token
-from .chats_db import create_chat, list_chats, list_messages, append_message, rename_chat, soft_delete_chat
+from .chats_db import create_chat, list_chats, list_messages, append_message, rename_chat, set_chat_project, soft_delete_chat
 
 router = APIRouter()
 
@@ -42,8 +42,14 @@ def api_create_chat(body: Dict = Body(default_factory=dict), request: Request = 
     title = (body.get("title") or "").strip() or None
     # Optionnel: permettre au client de fournir un id (pour concilier avec /ask.thread_id)
     provided_id = (body.get("id") or body.get("chat_id") or "").strip() or None
-    chat_id = create_chat(tenant_id, user_id, title, chat_id=provided_id)
-    return {"id": chat_id, "title": title or "Nouveau chat"}
+    project_id = body.get("project_id")
+    if project_id is not None and (not isinstance(project_id, str) or not project_id.strip()):
+        raise HTTPException(status_code=400, detail="project_id invalide")
+    try:
+        chat_id = create_chat(tenant_id, user_id, title, chat_id=provided_id, project_id=project_id.strip() if isinstance(project_id, str) else None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"id": chat_id, "title": title or "Nouveau chat", "project_id": project_id.strip() if isinstance(project_id, str) else None}
 
 @router.get("/chats/{chat_id}/messages")
 def api_list_messages(chat_id: str = Path(..., min_length=1), request: Request = None):
@@ -76,12 +82,24 @@ def api_append_message(
     return {"id": mid}
 
 @router.patch("/chats/{chat_id}")
-def api_rename_chat(chat_id: str, body: Dict = Body(...), request: Request = None):
+def api_update_chat(chat_id: str, body: Dict = Body(...), request: Request = None):
     tenant_id, user_id = _try_get_auth_ids(request)
-    title = (body.get("title") or "").strip()
-    if not title:
-        raise HTTPException(status_code=400, detail="Titre vide")
-    ok = rename_chat(tenant_id, user_id, chat_id, title)
+    if "title" not in body and "project_id" not in body:
+        raise HTTPException(status_code=400, detail="Aucune modification demandee")
+    ok = True
+    if "title" in body:
+        title = (body.get("title") or "").strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="Titre vide")
+        ok = rename_chat(tenant_id, user_id, chat_id, title)
+    if ok and "project_id" in body:
+        project_id = body.get("project_id")
+        if project_id is not None and (not isinstance(project_id, str) or not project_id.strip()):
+            raise HTTPException(status_code=400, detail="project_id invalide")
+        try:
+            ok = set_chat_project(tenant_id, user_id, chat_id, project_id.strip() if isinstance(project_id, str) else None)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     if not ok:
         raise HTTPException(status_code=404, detail="Chat introuvable")
     return {"ok": True}

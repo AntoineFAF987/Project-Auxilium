@@ -173,6 +173,43 @@ code, pre {
   font-family: var(--font-jetbrains-mono), "Courier New", monospace;
 }
 
+/* Source controls remain visible for fresh answers. Historical controls reveal
+   from the complete assistant-message hover/focus area without changing layout. */
+.source-controls[data-active="false"] {
+  overflow-anchor: none;
+  display: grid;
+  grid-template-rows: 0fr;
+  margin-top: 0 !important;
+  opacity: 0;
+  transform: translateY(4px);
+  pointer-events: none;
+  transition: grid-template-rows 180ms ease, margin-top 180ms ease, opacity 180ms ease, transform 180ms ease;
+}
+
+.source-controls[data-active="false"] > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.assistant-message:hover .source-controls[data-active="false"],
+.assistant-message:focus-within .source-controls[data-active="false"] {
+  grid-template-rows: 1fr;
+  margin-top: .75rem !important;
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .source-controls[data-active="false"] {
+    grid-template-rows: 1fr;
+    margin-top: .75rem !important;
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+}
+
 /* =====================================================================
    Scrollbars thémées (Firefox + WebKit)
    ===================================================================== */
@@ -203,6 +240,42 @@ html, body, aside, [class*="overflow-y-auto"], [class*="overflow-x-auto"] {
 /* =====================================================================
    Animations & styles pour l'indicateur de "Réflexion"
    ===================================================================== */
+.chat-title-viewport {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 26px), transparent 100%);
+}
+
+.chat-title-text {
+  display: inline-block;
+  min-width: max-content;
+  white-space: nowrap;
+  transform: translateX(0);
+  transition: transform 180ms ease-out;
+  will-change: transform;
+}
+
+.chat-title-viewport:hover {
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+.chat-title-viewport:hover .chat-title-text[data-overflow="true"] {
+  transform: translateX(calc(-1 * var(--chat-title-shift)));
+  transition: transform var(--chat-title-duration) linear 400ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-title-text,
+  .chat-title-viewport:hover .chat-title-text[data-overflow="true"] {
+    transition: none;
+    transform: translateX(0);
+  }
+}
+
 @keyframes dv-pulse-ring {
   0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 30%, transparent); }
   70% { box-shadow: 0 0 0 10px color-mix(in oklab, var(--primary) 0%, transparent); }

@@ -2,6 +2,7 @@
 """Adaptateurs HTTP du pipeline de reponse partage."""
 
 import json
+import traceback
 from queue import Queue
 from threading import Thread
 from typing import Iterator, Optional, Tuple
@@ -11,6 +12,7 @@ from fastapi.responses import StreamingResponse
 
 from .answer_pipeline import AnswerPipelineResult, run_answer_pipeline, validate_answer_request
 from .schemas import AskIn, AskOut
+from .diagnostics import current_stage, json_safe, log_event, log_stream_error, start_request, set_stage
 
 
 router = APIRouter()
@@ -18,7 +20,7 @@ router = APIRouter()
 
 def _sse(payload: dict, event: Optional[str] = None) -> str:
     prefix = f"event: {event}\n" if event else ""
-    return f"{prefix}data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    return f"{prefix}data: {json.dumps(json_safe(payload), ensure_ascii=False)}\n\n"
 
 
 class _CitationTailFilter:
@@ -56,11 +58,13 @@ class _CitationTailFilter:
 def _validated_sse(
     body: AskIn,
     request: Request,
+    request_id: Optional[str] = None,
 ) -> Iterator[str]:
     """Diffuse la generation, puis la revue additive et les metadonnees."""
 
     events: Queue[Tuple[str, object]] = Queue()
     citation_filter = _CitationTailFilter()
+    request_id = request_id or start_request()
 
     def token_sink(chunk: str) -> None:
         visible = citation_filter.feed(chunk)
@@ -68,6 +72,7 @@ def _validated_sse(
             events.put(("content", visible))
 
     def produce() -> None:
+        start_request(request_id)
         try:
             result = run_answer_pipeline(body, request, token_sink=token_sink)
             tail = citation_filter.finish()
@@ -75,9 +80,11 @@ def _validated_sse(
                 events.put(("content", tail))
             events.put(("result", result))
         except HTTPException as exc:
-            events.put(("http_error", exc))
+            log_stream_error(request_id, current_stage(), exc)
+            events.put(("error", {"request_id": request_id}))
         except Exception as exc:
-            events.put(("error", exc))
+            log_stream_error(request_id, current_stage(), exc)
+            events.put(("error", {"request_id": request_id}))
 
     Thread(target=produce, daemon=True).start()
     emitted_content = False
@@ -88,13 +95,13 @@ def _validated_sse(
             emitted_content = True
             yield _sse({"type": "content", "content": str(payload)})
             continue
-        if kind == "http_error":
-            exc = payload
-            assert isinstance(exc, HTTPException)
-            yield _sse({"type": "error", "error": str(exc.detail), "status_code": exc.status_code})
-            return
         if kind == "error":
-            yield _sse({"type": "error", "error": str(payload)})
+            error_payload = payload if isinstance(payload, dict) else {"request_id": request_id}
+            yield _sse({
+                "type": "error",
+                "message": "Une erreur interne est survenue pendant la génération.",
+                "request_id": error_payload.get("request_id", request_id),
+            }, event="error")
             return
 
         result = payload
@@ -104,19 +111,30 @@ def _validated_sse(
             yield _sse({"type": "content", "content": result.answer})
         if result.review.has_caveat:
             yield _sse({"type": "caveat", **result.review.to_dict()}, event="caveat")
-        yield _sse(
-            {
+        try:
+            set_stage("source_serialization")
+            safe_sources = json_safe(result.sources)
+            done_payload = {
                 "type": "done",
-                "sources": result.sources,
+                "sources": safe_sources,
                 "mode": result.mode,
                 "chat_id": result.chat_id,
-                "request_id": result.request_id,
+                "request_id": result.request_id or request_id,
                 "status": result.status,
                 "validation_performed": result.validation_performed,
                 "review": result.review.to_dict(),
                 "faithfulness_review": result.faithfulness_review,
             }
-        )
+            set_stage("sse_emit")
+            yield _sse(done_payload)
+            log_event(request_id, "stream_done")
+        except Exception as exc:
+            log_stream_error(request_id, current_stage(), exc)
+            yield _sse({
+                "type": "error",
+                "message": "Une erreur interne est survenue pendant la génération.",
+                "request_id": request_id,
+            }, event="error")
         return
 
 
@@ -132,12 +150,26 @@ async def ask_stream(body: AskIn, request: Request) -> StreamingResponse:
     """Transport SSE token par token apres les controles amont."""
 
     # Conserve le contrat HTTP historique pour les requêtes invalides.
-    validate_answer_request(body)
+    request_id = start_request()
+    log_event(request_id, "request_start", path="/ask/stream")
+    try:
+        validate_answer_request(body)
+    except Exception as exc:
+        log_event(
+            request_id,
+            "http_failure_before_stream",
+            stage="unknown",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            traceback="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        )
+        raise
     return StreamingResponse(
-        _validated_sse(body, request),
+        _validated_sse(body, request, request_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
+            "X-Request-ID": request_id,
         },
     )

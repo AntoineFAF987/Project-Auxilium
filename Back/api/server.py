@@ -28,6 +28,7 @@ from .routes_directory_settings import router as directory_settings_router
 # ✅ NOUVEAU : Extensions
 from .routes_extensions_settings import router as extensions_settings_router
 from .routes_chats import router as chats_router
+from .routes_projects import router as projects_router
 from .routes_mail_sync import router as mail_sync_router
 from .routes_orchestrator_debug import router as orchestrator_debug_router
 from .routes_response_trace import router as response_trace_router
@@ -98,6 +99,7 @@ app.include_router(email_settings_router)
 app.include_router(directory_settings_router)
 app.include_router(extensions_settings_router)  # ✅ nouveau
 app.include_router(chats_router)  # ✅ nouveau: chats persistants
+app.include_router(projects_router)
 app.include_router(mail_sync_router)  # ✅ nouveau: mail sync (delta-like)
 
 # Reste de l'API

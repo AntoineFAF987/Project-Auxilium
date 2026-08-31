@@ -24,6 +24,7 @@ class AskIn(BaseModel):
     thread_id: Optional[str] = Field(
         default=None, description="Identifiant de la conversation (fourni par le front)"
     )
+    project_id: Optional[str] = Field(default=None, description="Projet du nouveau chat, si selectionne")
     source_mode: Optional[str] = Field(
         default="auto", description="auto | local | general | web_live"
     )

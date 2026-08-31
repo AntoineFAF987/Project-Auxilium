@@ -1,6 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  turbopack: {
+    // Keep Turbopack's workspace boundary at this frontend project.
+    root: __dirname,
+  },
   async rewrites() {
     return [
       {
