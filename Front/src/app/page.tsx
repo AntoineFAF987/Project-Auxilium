@@ -11,9 +11,8 @@ import * as projectsApi from "./lib/projectsApi";
 import { checkBackendHealth } from "./lib/healthCheck";
 import ThinkingIndicator from "./components/ThinkingIndicator";
 import { FolderIcon, getSourceFileKind, SourceFileIcon } from "./components/SourceFileIcon";
+import { ResponseRenderer } from "./components/ResponseRenderer";
 
-// === LaTeX ===
-import TeX from "@matejmazur/react-katex";
 import "katex/dist/katex.min.css";
 
 /* ---------------- Types & Constantes --------------- */
@@ -361,47 +360,6 @@ function WebSearchIcon(props: React.SVGProps<SVGSVGElement>) {
       <path d="M2 12h20" />
       <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
     </svg>
-  );
-}
-
-/* ---------------- MathRenderer (LaTeX + Markdown) --------------- */
-function MathRenderer({ text }: { text: string }) {
-  // 1. Protéger les formules LaTeX
-  const latexBlocks: string[] = [];
-  let processed = text.replace(/(\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$\$[\s\S]*?\$\$|\$[^\$\n]+?\$)/g, (m) => {
-    latexBlocks.push(m);
-    return `__LATEX${latexBlocks.length - 1}__`;
-  });
-
-  // 2. Parser Markdown (gras seulement)
-  processed = processed.replace(/\*\*([^\*]+?)\*\*/g, '<strong>$1</strong>');
-
-  // 3. Découper et réinjecter LaTeX
-  const parts = processed.split(/(__LATEX\d+__)/g);
-
-  return (
-    <>
-      {parts.map((part, i) => {
-        // Réinjecter LaTeX
-        const m = part.match(/__LATEX(\d+)__/);
-        if (m) {
-          const latex = latexBlocks[parseInt(m[1])];
-          if ((latex.startsWith("\\[") && latex.endsWith("\\]")) || 
-              (latex.startsWith("$$") && latex.endsWith("$$"))) {
-            const math = latex.startsWith("\\[") ? latex.slice(2, -2) : latex.slice(2, -2);
-            return <div key={i} className="my-2"><TeX math={math} block /></div>;
-          }
-          if ((latex.startsWith("\\(") && latex.endsWith("\\)")) ||
-              (latex.startsWith("$") && latex.endsWith("$"))) {
-            const math = latex.startsWith("\\(") ? latex.slice(2, -2) : latex.slice(1, -1);
-            return <TeX key={i} math={math} />;
-          }
-        }
-        
-        // Texte avec HTML (gras)
-        return <span key={i} dangerouslySetInnerHTML={{ __html: part }} />;
-      })}
-    </>
   );
 }
 
@@ -1621,6 +1579,7 @@ export default function Page() {
   let accumulatedContent = "";
       let finalSources: Source[] = [];
       let finalMode: string | undefined = undefined;
+      let finalAnswer: string | undefined = undefined;
   let finalCaveat: PostGenerationReview | undefined = undefined;
   let finalChatId: string | null = null;
       let sseBuffer = "";
@@ -1684,6 +1643,7 @@ export default function Page() {
             } else if (parsed.type === 'done') {
               finalSources = Array.isArray(parsed.sources) ? parsed.sources : [];
               finalMode = typeof parsed.mode === 'string' ? parsed.mode : undefined;
+              finalAnswer = typeof parsed.answer === 'string' ? parsed.answer : undefined;
               if (!finalCaveat && parsed.review?.status === 'CAVEAT') {
                 finalCaveat = parsed.review as PostGenerationReview;
               }
@@ -1722,7 +1682,7 @@ export default function Page() {
       const finalMessage: Message = {
         id: tempAssistantId,
         role: "assistant",
-        content: accumulatedContent,
+        content: finalAnswer ?? accumulatedContent,
         sources: finalSources,
         caveat: finalCaveat,
         // Ne pas inclure le mode si c'est smalltalk pour éviter tout re-render
@@ -2714,6 +2674,7 @@ export default function Page() {
                       if (isWeb) {
                         return (
                           <li key={key} className="break-all">
+                            <span className="mr-2 text-xs font-medium text-[var(--muted-text)]">[{key + 1}]</span>
                             <a
                               href={s.path}
                               target="_blank"
@@ -2746,7 +2707,7 @@ export default function Page() {
                         <li key={key} className="list-none">
                           <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 sm:flex-nowrap">
                             <div className="min-w-0 flex-1 basis-48">
-                              <div className="truncate font-medium" title={sourceDisplayName}>{sourceDisplayName}</div>
+                              <div className="truncate font-medium" title={sourceDisplayName}><span className="mr-2 text-xs text-[var(--muted-text)]">[{key + 1}]</span>{sourceDisplayName}</div>
                               {folder && <div className="mt-0.5 truncate text-xs text-[var(--muted-text)]" title={folder}>{folder}</div>}
                           {unavailable ? (
                             <div className="text-xs text-amber-600 dark:text-amber-300 mt-1">Source introuvable à son emplacement d&apos;origine</div>
@@ -2819,7 +2780,7 @@ export default function Page() {
                                 {loading && i === messages.length - 1 && m.role === "assistant" && (m.content?.length ?? 0) === 0 ? (
                                   null
                                 ) : (
-                                  <MathRenderer text={m.content} />
+                                  <ResponseRenderer text={m.content} />
                                 )}
                               </div>
 

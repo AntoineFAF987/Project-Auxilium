@@ -135,6 +135,7 @@ def _validated_sse(
             safe_sources = json_safe(result.sources)
             done_payload = {
                 "type": "done",
+                "answer": result.answer,
                 "sources": safe_sources,
                 "mode": result.mode,
                 "chat_id": result.chat_id,

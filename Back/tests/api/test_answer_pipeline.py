@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import sys
 import types
 import unittest
@@ -905,20 +906,21 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assert_local_policy_source(result.sources)
         self.assertEqual(result.review.status, "OK")
 
-    def test_fresh_question_with_insufficient_local_context_can_still_ask_web(self):
+    def test_fresh_question_uses_web_directly(self):
         def llm(_fn, question, context_text="", **kwargs):
             if str(question).startswith("VERIFIEUR JSON:"):
                 return '{"ok":false,"action":"ask_web"}'
             return "Réponse générale sans source locale."
 
         body = AskIn(q="Quel est le score du match aujourd'hui ?", source_mode="auto")
-        with self._patch_pipeline(relevance=False, llm=llm, fresh=True):
+        with (
+            self._patch_pipeline(relevance=False, llm=llm, fresh=True),
+            patch("api.answer_pipeline.web_search_context", return_value="[WEB] Match source\nhttps://example.test/match\nCurrent score."),
+        ):
             result = run_answer_pipeline(body, _request())
 
-        self.assertEqual(result.answer, "Réponse générale sans source locale.")
-        self.assertEqual(result.status, "answered")
-        self.assertEqual(result.review.caveat_type, "WEB_RECOMMENDED")
-        self.assertTrue(result.review.suggest_web)
+        self.assertEqual(result.mode, "STRICT(web_live)")
+        self.assertEqual(result.sources, [{"path": "https://example.test/match", "chunk": -1}])
 
     def test_strict_answer_without_returnable_source_can_still_ask_web(self):
         sourceless_chunk = (
@@ -1120,6 +1122,296 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assert_local_policy_source(result.sources)
         self.assertEqual(result.sources[0]["display_name"], "related-reference.txt")
         self.assertNotEqual(result.status, "abstained")
+
+    def test_auto_keeps_related_local_evidence_instead_of_falling_back_to_web(self):
+        from api import answer_pipeline as pipeline
+
+        related = (0.91, {**self.chunk[1], "text": "La tropicalisation du positionneur ZX-730 est documentee."})
+        with (
+            self._patch_pipeline(
+                index=_Index([related], [0.91]),
+                context_text="[1] La tropicalisation du positionneur ZX-730 est documentee.",
+                post_review_enabled=False, faithfulness_enabled=False,
+            ),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": False})),
+            patch.object(pipeline, "_looks_fresh_news", return_value=False),
+            patch.object(pipeline, "_llm_route", side_effect=AssertionError("related local evidence must stay local")),
+            patch.object(pipeline, "web_search_context", side_effect=AssertionError("Web must not run")),
+        ):
+            result = run_answer_pipeline(AskIn(q="Peut-on tropicaliser le positionneur ZX-725 ?", source_mode="auto"), _request())
+
+        self.assertEqual(result.mode, "STRICT(local)")
+        self.assertEqual(result.route_mode, "strict_local")
+        self.assert_local_policy_source(result.sources)
+
+    def test_auto_can_fallback_to_web_only_when_local_context_is_irrelevant(self):
+        from api import answer_pipeline as pipeline
+
+        unrelated = (0.91, {**self.chunk[1], "text": "Le calendrier des conges et la facturation sont disponibles."})
+        web_context = "[WEB] Product source\nhttps://example.test/product\nTechnical information."
+        with (
+            self._patch_pipeline(
+                index=_Index([unrelated], [0.91]), relevance=False,
+                context_text="[1] Le calendrier des conges et la facturation sont disponibles.",
+                route_mode="web_live", post_review_enabled=False, faithfulness_enabled=False,
+            ),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": False})),
+            patch.object(pipeline, "_looks_fresh_news", return_value=False),
+            patch.object(pipeline, "web_search_context", return_value=web_context),
+        ):
+            result = run_answer_pipeline(AskIn(q="Peut-on tropicaliser le positionneur ZX-725 ?", source_mode="auto"), _request())
+
+        self.assertEqual(result.mode, "STRICT(web_live)")
+        self.assertEqual(result.route_mode, "web_live")
+        self.assertEqual(result.sources, [{"path": "https://example.test/product", "chunk": -1}])
+
+    def test_auto_sends_current_public_information_to_web_before_local_retrieval(self):
+        from api import answer_pipeline as pipeline
+
+        web_context = "[WEB] Fare source\nhttps://example.test/fare\nCurrent fare."
+        with (
+            self._patch_pipeline(post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": False})),
+            patch.object(pipeline, "_looks_fresh_news", return_value=True),
+            patch.object(pipeline, "web_search_context", return_value=web_context),
+        ):
+            result = run_answer_pipeline(AskIn(q="Quel est le prix actuel d'un billet entre deux villes ?", source_mode="auto"), _request())
+
+        self.assertEqual(result.mode, "STRICT(web_live)")
+        self.assertEqual(self.index.search_calls, [])
+
+    def test_auto_keeps_incomplete_internal_decision_context_local(self):
+        from api import answer_pipeline as pipeline
+
+        partial = (0.91, {**self.chunk[1], "text": "Le projet Orion a ete examine, sans decision finale consignée."})
+        with (
+            self._patch_pipeline(
+                index=_Index([partial], [0.91]),
+                context_text="[1] Le projet Orion a ete examine, sans decision finale consignée.",
+                post_review_enabled=False, faithfulness_enabled=False,
+            ),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": False})),
+            patch.object(pipeline, "_looks_fresh_news", return_value=False),
+            patch.object(pipeline, "_llm_route", side_effect=AssertionError("partial internal evidence must stay local")),
+            patch.object(pipeline, "web_search_context", side_effect=AssertionError("Web must not run")),
+        ):
+            result = run_answer_pipeline(AskIn(q="Quelle decision avons-nous prise sur le projet Orion ?", source_mode="auto"), _request())
+
+        self.assertEqual(result.mode, "STRICT(local)")
+        self.assertEqual(result.route_mode, "strict_local")
+
+    def test_auto_uses_general_for_irrelevant_non_web_question(self):
+        from api import answer_pipeline as pipeline
+
+        unrelated = (0.91, {**self.chunk[1], "text": "Le calendrier des conges est disponible."})
+        with (
+            self._patch_pipeline(
+                index=_Index([unrelated], [0.91]), relevance=False, route_mode="general",
+                context_text="[1] Le calendrier des conges est disponible.",
+                post_review_enabled=False, faithfulness_enabled=False,
+            ),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": False})),
+            patch.object(pipeline, "_looks_fresh_news", return_value=False),
+            patch.object(pipeline, "web_search_context", side_effect=AssertionError("Web must not run")),
+        ):
+            result = run_answer_pipeline(AskIn(q="Explique la difference entre deux concepts abstraits.", source_mode="auto"), _request())
+
+        self.assertTrue(result.mode.startswith("GENERAL"))
+        self.assertEqual(result.route_mode, "general")
+
+    def test_orchestrator_web_plan_keeps_active_subject_in_web_query(self):
+        from api import answer_pipeline as pipeline
+
+        plan = OrchestrationPlan(
+            intent="web_search", needs_retrieval=True,
+            retrieval_query="flights from Lyon to Los Angeles over the next six months",
+            use_history=True, reuse_previous_subject=True, response_strategy="answer",
+        )
+        web = Mock(return_value="[WEB] Flight source\nhttps://example.test/flights\nAvailable flights.")
+        with (
+            self._patch_pipeline(post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+            patch.object(pipeline, "web_search_context", web),
+        ):
+            result = run_answer_pipeline(AskIn(
+                q="Tu peux me trouver un vol pour les prochains mois depuis Lyon ?", source_mode="auto",
+                history=[
+                    {"role": "user", "content": "Los Angeles ou San Francisco pour un sejour ?"},
+                    {"role": "assistant", "content": "Los Angeles est recommande."},
+                ],
+            ), _request())
+
+        self.assertEqual(result.mode, "STRICT(web_live)")
+        self.assertEqual(self.index.search_calls, [])
+        self.assertIn("Los Angeles", web.call_args.args[0])
+        self.assertIn("Lyon", web.call_args.args[0])
+
+    def test_orchestrator_failure_recovers_active_subject_before_web_fallback(self):
+        from api import answer_pipeline as pipeline
+
+        indeed = (0.91, {**self.chunk[1], "text": "Offre d'emploi Indeed pour ingenieur commercial a Lyon."})
+        index = _Index([indeed], [0.91])
+        failed_plan = OrchestrationPlanOutputError(raw_model_output="", validation_error_details=[{"message": "empty output"}])
+        web = Mock(return_value="[WEB] Flight source\nhttps://example.test/flights\nAvailable flights.")
+        with (
+            self._patch_pipeline(
+                index=index, relevance=False, route_mode="web_live",
+                context_text="[1] Offre d'emploi Indeed pour ingenieur commercial a Lyon.",
+                post_review_enabled=False, faithfulness_enabled=False,
+            ),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", side_effect=failed_plan),
+            patch.object(pipeline, "_looks_fresh_news", return_value=False),
+            patch.object(pipeline, "classify_turn", return_value=type("Turn", (), {"turn_type": "answer_seeking", "decision_reason": "test"})()),
+            patch.object(pipeline, "web_search_context", web),
+        ):
+            result = run_answer_pipeline(AskIn(
+                q="Tu peux me trouver un vol pour les prochains mois depuis Lyon ?", source_mode="auto",
+                history=[
+                    {"role": "user", "content": "Je pars a Los Angeles cet ete."},
+                    {"role": "assistant", "content": "Destination retenue."},
+                ],
+            ), _request())
+
+        self.assertEqual(result.mode, "STRICT(web_live)")
+        self.assertIn("Los Angeles", index.search_calls[0][0])
+        self.assertIn("Los Angeles", web.call_args.args[0])
+
+    def test_lone_shared_location_does_not_make_job_offers_relevant_to_travel(self):
+        from api.answer_pipeline import _evaluate_evidence, _classify_local_context_state
+
+        jobs = [(0.91, {"text": "Offre d'emploi Indeed pour ingenieur commercial a Lyon."})]
+        decision = _evaluate_evidence(
+            "Trouve-moi un vol depuis Lyon", jobs,
+            guard_ok=True, context_is_relevant=False, overlap=1,
+        )
+        self.assertEqual(decision.mode, "none")
+        self.assertEqual(decision.context_relevance_reason, "information_need_misaligned")
+        self.assertEqual(_classify_local_context_state(decision), "irrelevant")
+
+    def test_related_product_reference_remains_relevant_but_incomplete_in_auto(self):
+        from api.answer_pipeline import _evaluate_evidence, _classify_local_context_state
+
+        technical = [(0.91, {"text": "Le Trovis 3730 peut etre tropicalise avec vernis et limites techniques."})]
+        decision = _evaluate_evidence(
+            "Peut-on tropicaliser un Trovis 3725 ?", technical,
+            guard_ok=True, context_is_relevant=True, overlap=1,
+        )
+        self.assertEqual(decision.mode, "related")
+        self.assertEqual(_classify_local_context_state(decision), "relevant_but_incomplete")
+
+    def test_partial_internal_project_context_remains_local_in_auto(self):
+        from api import answer_pipeline as pipeline
+
+        partial = (0.91, {**self.chunk[1], "text": "Le projet Alpha a ete examine, sans decision finale consignée."})
+        with (
+            self._patch_pipeline(
+                index=_Index([partial], [0.91]),
+                context_text="[1] Le projet Alpha a ete examine, sans decision finale consignée.",
+                post_review_enabled=False, faithfulness_enabled=False,
+            ),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": False})),
+            patch.object(pipeline, "_looks_fresh_news", return_value=False),
+            patch.object(pipeline, "_llm_route", side_effect=AssertionError("partial project context must remain local")),
+            patch.object(pipeline, "web_search_context", side_effect=AssertionError("Web must not run")),
+        ):
+            result = run_answer_pipeline(AskIn(q="Quelle decision a ete prise sur le projet Alpha ?", source_mode="auto"), _request())
+
+        self.assertEqual(result.mode, "STRICT(local)")
+
+    def test_local_mode_allows_web_only_for_explicit_web_request_plan(self):
+        from api import answer_pipeline as pipeline
+
+        plan = OrchestrationPlan(
+            intent="web_search", needs_retrieval=True, web_request_explicit=True,
+            retrieval_query="public information about the requested subject", response_strategy="answer",
+        )
+        with (
+            self._patch_pipeline(post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+            patch.object(pipeline, "web_search_context", return_value="[WEB] Source\nhttps://example.test/source\nPublic result."),
+        ):
+            result = run_answer_pipeline(AskIn(q="Regarde sur le web ce sujet", source_mode="local"), _request())
+
+        self.assertEqual(result.mode, "STRICT(web_live)")
+        self.assertEqual(self.index.search_calls, [])
+
+    def test_explicit_web_request_in_auto_uses_web_when_orchestrator_succeeds(self):
+        from api import answer_pipeline as pipeline
+
+        plan = OrchestrationPlan(
+            intent="web_search", needs_retrieval=True, web_request_explicit=True,
+            retrieval_query="flights from Lyon to Los Angeles in the next six months",
+            use_history=True, reuse_previous_subject=True, response_strategy="answer",
+        )
+        with (
+            self._patch_pipeline(post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+            patch.object(pipeline, "web_search_context", return_value="[WEB] Source\nhttps://example.test/flights\nFlights."),
+        ):
+            result = run_answer_pipeline(AskIn(q="Fais une recherche web plutot", source_mode="auto"), _request())
+
+        self.assertEqual(result.mode, "STRICT(web_live)")
+        self.assertEqual(self.index.search_calls, [])
+
+    def test_explicit_web_request_survives_orchestrator_timeout_with_followup_subject(self):
+        from api import answer_pipeline as pipeline
+
+        web = Mock(return_value="[WEB] Source\nhttps://example.test/flights\nFlights.")
+        with (
+            self._patch_pipeline(post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", side_effect=TimeoutError("timeout")),
+            patch.object(pipeline, "_condense_question", return_value="Recherche web de vols Lyon vers Los Angeles pour les six prochains mois."),
+            patch.object(pipeline, "web_search_context", web),
+        ):
+            result = run_answer_pipeline(AskIn(
+                q="Non mais fait une recherche web plutot", source_mode="auto",
+                history=[{"role": "user", "content": "Je cherche un vol Lyon vers Los Angeles dans les six prochains mois."}],
+            ), _request())
+
+        self.assertEqual(result.mode, "STRICT(web_live)")
+        self.assertEqual(self.index.search_calls, [])
+        self.assertIn("Lyon vers Los Angeles", web.call_args.args[0])
+
+    def test_explicit_web_request_survives_invalid_orchestrator_output(self):
+        from api import answer_pipeline as pipeline
+
+        invalid = OrchestrationPlanOutputError(raw_model_output="", validation_error_details=[{"message": "empty output"}])
+        with (
+            self._patch_pipeline(post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", side_effect=invalid),
+            patch.object(pipeline, "web_search_context", return_value="[WEB] Source\nhttps://example.test/source\nResult."),
+        ):
+            result = run_answer_pipeline(AskIn(q="Cherche sur internet ce sujet", source_mode="auto"), _request())
+
+        self.assertEqual(result.mode, "STRICT(web_live)")
+        self.assertEqual(self.index.search_calls, [])
+
+    def test_orchestrator_timeout_without_explicit_web_request_does_not_force_web(self):
+        from api import answer_pipeline as pipeline
+
+        unrelated = (0.91, {**self.chunk[1], "text": "Le calendrier des conges est disponible."})
+        with (
+            self._patch_pipeline(
+                index=_Index([unrelated], [0.91]), relevance=False, route_mode="general",
+                context_text="[1] Le calendrier des conges est disponible.",
+                post_review_enabled=False, faithfulness_enabled=False,
+            ),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", side_effect=TimeoutError("timeout")),
+            patch.object(pipeline, "_looks_fresh_news", return_value=False),
+            patch.object(pipeline, "_llm_route", return_value="general"),
+            patch.object(pipeline, "classify_turn", return_value=type("Turn", (), {"turn_type": "answer_seeking", "decision_reason": "test"})()),
+            patch.object(pipeline, "web_search_context", side_effect=AssertionError("Web must not run")),
+        ):
+            result = run_answer_pipeline(AskIn(q="Peux-tu resumer ceci ?", source_mode="auto"), _request())
+
+        self.assertTrue(result.mode.startswith("GENERAL"))
 
     def test_partial_and_chronological_evidence_reach_generation_with_sources(self):
         from api import answer_pipeline as pipeline
@@ -1450,6 +1742,55 @@ class TransportParityTests(unittest.TestCase):
         self.assertNotIn("event: caveat", stream)
         self.assertIsNone(events[-1]["faithfulness_review"])
         self.assertIsNone(events[-1]["review"]["caveat_type"])
+
+    def test_sse_done_uses_canonical_two_source_citations_after_ten_chunk_generation(self):
+        """Regression: the client must receive the remapped answer, not the draft."""
+        from api import answer_pipeline as pipeline
+        from api import routes_ask
+
+        def chunk(index, document_id):
+            return (
+                0.9,
+                {
+                    "path": f"C:/docs/{document_id}.txt",
+                    "source": "file",
+                    "file": f"{document_id}.txt",
+                    "document_id": document_id,
+                    "document_metadata": {
+                        "origin_path": f"C:/docs/{document_id}.txt",
+                        "indexed_path": f"C:/docs/{document_id}.txt",
+                    },
+                    "chunk_id": index,
+                    "text": f"Information du document {document_id}, chunk {index}.",
+                },
+            )
+
+        blocks = [chunk(index, "doc_a" if index in {1, 4} else "doc_b") for index in range(1, 11)]
+        raw_answer = "Information A. [1]Information B. [4, 10]<CITATIONS>[1,4,10]</CITATIONS>"
+        helper = AnswerPipelineTests()
+        helper.setUp()
+        with (
+            helper._patch_pipeline(
+                index=_Index(blocks, [0.9] * 10),
+                post_review_enabled=False,
+                faithfulness_enabled=False,
+                context_text="\n".join(f"[{i}] chunk" for i in range(1, 11)),
+            ),
+            patch.object(pipeline, "_safe_llm_stream", return_value=iter([raw_answer])),
+        ):
+            response = asyncio.run(routes_ask.ask_stream(AskIn(q="Question technique", source_mode="local"), _request("/ask/stream")))
+            stream = asyncio.run(self._collect(response))
+
+        events = [json.loads(line[6:]) for line in stream.splitlines() if line.startswith("data: ")]
+        done = next(event for event in events if event["type"] == "done")
+        self.assertEqual(len(done["sources"]), 2)
+        self.assertEqual(done["answer"], "Information A. [1]\n\nInformation B. [1, 2]")
+        self.assertNotIn("[4", done["answer"])
+        self.assertNotIn("10]", done["answer"])
+        self.assertNotIn("[1]Information", done["answer"])
+        visible_markers = " ".join(re.findall(r"\[[^\]]+\]", done["answer"]))
+        visible = [int(value) for value in re.findall(r"\d+", visible_markers)]
+        self.assertTrue(all(value <= len(done["sources"]) for value in visible))
 
     def test_sse_emits_public_pipeline_status_before_streamed_content(self):
         from api import routes_ask

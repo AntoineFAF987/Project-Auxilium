@@ -115,3 +115,44 @@ def references_for_blocks(blocks: Iterable[tuple[float, dict[str, Any]]]) -> lis
             seen.add(key)
         references.append(reference)
     return references
+
+
+def select_cited_references(
+    blocks: list[tuple[float, dict[str, Any]]], cited_chunk_indices: Iterable[int],
+) -> tuple[list[dict[str, Any]], dict[int, int]]:
+    """Expose documents in citation order and map RAG chunk ids to UI ids.
+
+    Context indices are chunk-based because that is what the LLM sees. The UI
+    exposes one item per document, so this is where raw chunk citations become
+    stable, user-visible source numbers.
+    """
+    requested = [int(index) for index in cited_chunk_indices if 1 <= int(index) <= len(blocks)]
+    candidate_indices = list(dict.fromkeys(requested)) or list(range(1, len(blocks) + 1))
+
+    def reference_for(index: int) -> dict[str, Any] | None:
+        refs = references_for_blocks([blocks[index - 1]])
+        return refs[0] if refs else None
+
+    def reference_key(reference: dict[str, Any]) -> str:
+        return str(reference.get("document_id") or reference.get("path") or reference.get("indexed_path") or reference.get("origin_path") or "")
+
+    references: list[dict[str, Any]] = []
+    display_by_key: dict[str, int] = {}
+    for index in candidate_indices:
+        reference = reference_for(index)
+        if reference is None:
+            continue
+        key = reference_key(reference)
+        if key and key not in display_by_key:
+            display_by_key[key] = len(references) + 1
+            references.append(reference)
+
+    chunk_to_display: dict[int, int] = {}
+    for index in range(1, len(blocks) + 1):
+        reference = reference_for(index)
+        if reference is None:
+            continue
+        visible = display_by_key.get(reference_key(reference))
+        if visible is not None:
+            chunk_to_display[index] = visible
+    return references, chunk_to_display

@@ -39,7 +39,11 @@ from .iterative_retrieval import run_iterative_evidence_retrieval
 from .multi_query_retrieval import build_retrieval_queries, reciprocal_rank_fusion, resolve_retrieval_query
 from .catalog_probe import probe_document_catalog
 from .chats_db import create_chat, append_message
-from .source_references import references_for_blocks
+from .source_references import select_cited_references
+from .answer_presentation import (
+    enforce_final_citation_contract, extract_citations_and_clean_answer,
+    remap_inline_citations, select_web_source_indices,
+)
 from .diagnostics import current_request_id, log_event, log_stream_error, set_stage
 from auth_ms import verify_ms_token
 
@@ -51,6 +55,7 @@ logger = logging.getLogger(__name__)
 
 AnswerStatus = Literal["answered", "abstained", "fallback"]
 EvidenceMode = Literal["direct", "related", "none"]
+LocalContextState = Literal["relevant_and_sufficient", "relevant_but_incomplete", "irrelevant"]
 ReviewStatus = Literal["OK", "CAVEAT"]
 CaveatType = Literal[
     "STALE_SOURCE",
@@ -361,6 +366,39 @@ def _looks_like_documentary_fallback(question: str, history: List[Dict]) -> bool
     return any(re.search(rf"\b{re.escape(marker)}\b", text) for marker in markers)
 
 
+def _recover_query_from_history(question: str, history: List[Dict]) -> str:
+    """Keep the active user subject when orchestration is unavailable.
+
+    This is intentionally deterministic: it preserves the previous user turn
+    verbatim instead of guessing entities or inventing a rewritten request.
+    """
+    for item in reversed(history or []):
+        if str(item.get("role", "")).lower() != "user":
+            continue
+        subject = " ".join(str(item.get("content", "")).split())[:350]
+        if subject and subject.casefold() != question.casefold():
+            return f"{question}\nContexte conversationnel actif : {subject}"[:700]
+    return question
+
+
+def _has_explicit_web_request(question: str) -> bool:
+    """Recognise only an unambiguous, user-requested Web source override."""
+    text = " ".join((question or "").casefold().split())
+    return bool(re.search(
+        r"\b(?:search|look|check|find|use|cherche|recherche|regarde|consulte|utilise|utiliser)\b.{0,40}"
+        r"\b(?:web|internet|online|en ligne)\b|\b(?:web|internet|online)\s+(?:search|recherche)\b",
+        text,
+    ))
+
+
+def _explicit_web_query(question: str, history: List[Dict]) -> str:
+    """Resolve an explicit Web follow-up without requiring orchestration."""
+    if not history:
+        return question
+    condensed = _condense_question(history, question)
+    return condensed if _norm(condensed) != _norm(question) else _recover_query_from_history(question, history)
+
+
 def _safe_llm_stream(fn, *args, **kwargs):
     """Itere un flux LLM sous le meme garde-fou de concurrence que les appels sync."""
 
@@ -475,9 +513,11 @@ def _check_context_relevance(question: str, context: str, threshold: float = Non
     q_words = len([w for w in question.lower().split() if len(w) > 3])
     if q_words == 0:
         return True  # question trop courte pour juger
-    # Ratio mots clés partagés / mots clés question
+    # A lexical ratio alone makes a lone shared location/person/year look
+    # relevant. Keep it only as a first gate, then require alignment with the
+    # information need itself.
     ratio = overlap / max(1, q_words)
-    return ratio >= threshold
+    return ratio >= threshold and _has_information_need_alignment(question, context)
 
 
 def _specific_anchors(text: str) -> set[str]:
@@ -544,6 +584,60 @@ def _morphological_topic_overlap(question: str, context: str) -> int:
     return related
 
 
+_INFORMATIONAL_STOPWORDS = frozenset({
+    "avec", "dans", "depuis", "pour", "sans", "sur", "vers", "entre", "mais", "plus", "moins",
+    "peux", "peut", "trouve", "trouver", "cherche", "chercher", "veux", "voudrais", "faire",
+    "quel", "quelle", "quels", "quelles", "est", "sont", "avoir", "avons", "nous", "vous",
+    "this", "that", "with", "from", "into", "about", "find", "search", "want", "need", "can",
+    "what", "which", "when", "where", "have", "been", "were", "will", "your", "their",
+})
+
+
+def _informational_terms(text: str) -> set[str]:
+    """Extract topic-bearing words while leaving identifiers to anchor handling."""
+    return {
+        token.casefold()
+        for token in re.findall(r"\b[^\W\d_]{4,}\b", text or "", flags=re.UNICODE)
+        if token.casefold() not in _INFORMATIONAL_STOPWORDS
+    }
+
+
+def _anchor_families(text: str) -> set[str]:
+    """Capture stable reference prefixes, e.g. AX-17 and AX-18 share AX."""
+    families: set[str] = set()
+    for anchor in _specific_anchors(text):
+        prefix = re.match(r"[a-z]+", anchor)
+        if prefix and len(prefix.group(0)) >= 2:
+            families.add(prefix.group(0))
+    return families
+
+
+def _has_information_need_alignment(question: str, context: str) -> bool:
+    """Require more than one coincidental entity before accepting local evidence.
+
+    Alignment is established by two shared topical terms, or by a shared topic
+    term reinforced by a morphological relation, matching reference, or model
+    family. A lone city, person, organisation, or year is therefore not enough.
+    """
+    question_terms = _informational_terms(question)
+    context_terms = _informational_terms(context)
+    exact_terms = question_terms & context_terms
+    if len(exact_terms) >= 2:
+        return True
+
+    requested = _specific_anchors(question)
+    documented = _specific_anchors(context)
+    exact_anchor = bool(requested & documented)
+    family_match = bool(_anchor_families(question) & _anchor_families(context))
+    morphology = _morphological_topic_overlap(question, context) > 0
+    if exact_terms and (exact_anchor or family_match or morphology):
+        return True
+    # A shared technical predicate plus two distinct structured references is
+    # meaningful related evidence even when the product family is expressed
+    # only numerically (for example successive model numbers).
+    return morphology and bool(requested) and bool(documented)
+
+
 def _evaluate_evidence(
     question: str,
     blocks: List[Tuple[float, Dict]],
@@ -560,7 +654,11 @@ def _evaluate_evidence(
     evidence_text = _evidence_text(blocks)
     documented = _specific_anchors(evidence_text)
     morphological_overlap = _morphological_topic_overlap(question, evidence_text)
-    relevance_reason = "lexical_relevance" if context_is_relevant else "lexical_relevance_below_threshold"
+    information_need_aligned = _has_information_need_alignment(question, evidence_text)
+    relevance_reason = (
+        "information_need_aligned" if context_is_relevant else
+        ("information_need_misaligned" if not information_need_aligned else "lexical_relevance_below_threshold")
+    )
     usable_direct_signal = bool(guard_ok or context_is_relevant or overlap >= OVERLAP_MIN)
 
     if requested and requested.issubset(documented) and usable_direct_signal:
@@ -575,11 +673,25 @@ def _evaluate_evidence(
     # A different reference can be useful only with reranker support and a
     # topical relation. Exact overlap helps, but cannot be an absolute gate:
     # equivalent requests regularly use different inflected word forms.
-    topical_relation = bool(context_is_relevant or overlap >= OVERLAP_MIN or morphological_overlap)
+    topical_relation = information_need_aligned and bool(
+        context_is_relevant or overlap >= OVERLAP_MIN or morphological_overlap
+    )
     if requested and (documented - requested) and guard_ok and topical_relation:
         return EvidenceDecision(
             "related",
             "different_anchor_with_guard_and_topic_relation",
+            context_is_relevant,
+            relevance_reason,
+            morphological_overlap,
+        )
+
+    # A topically relevant, reranker-approved context is still useful when it
+    # has no alternative model/reference identifier. It supports a cautious
+    # local answer, not an automatic Web fallback.
+    if requested and context_is_relevant and information_need_aligned and guard_ok:
+        return EvidenceDecision(
+            "related",
+            "topically_relevant_context_without_matching_anchor",
             context_is_relevant,
             relevance_reason,
             morphological_overlap,
@@ -594,6 +706,24 @@ def _evaluate_evidence(
     else:
         reason = "final_blocks_not_usable_as_evidence"
     return EvidenceDecision("none", reason, context_is_relevant, relevance_reason, morphological_overlap)
+
+
+def _classify_local_context_state(
+    decision: EvidenceDecision,
+    *,
+    retrieval_sufficient: bool | None = None,
+) -> LocalContextState:
+    """Classify local evidence for Auto routing, independently of answer completeness.
+
+    ``related`` and an incomplete iterative retrieval remain local: they can
+    establish useful facts while being unable to settle the exact question.
+    Only a context with no usable topical evidence is ``irrelevant``.
+    """
+    if decision.mode == "none":
+        return "irrelevant"
+    if decision.mode == "related" or retrieval_sufficient is False:
+        return "relevant_but_incomplete"
+    return "relevant_and_sufficient"
 
 def _condense_question(hist: List[Dict], q: str) -> str:
     """
@@ -793,8 +923,9 @@ def _llm_route(q: str, signals: dict, history: List[Dict]) -> str:
         "Règles synthétiques:\n"
         "- math si la question est une équation ou un calcul.\n"
         "- smalltalk pour conversation banale (salutations, humeur, etc.).\n"
-        "- strict_local si le contexte trouvé est pertinent (guard_ok=true ET overlap>=overlap_min).\n"
-        "- web_live si on a besoin d'info *fraîche* (actu/données qui changent vite) OU si strict_local est faux ET a_des_dates_recentes=true.\n"
+        "- strict_local si local_context_state vaut relevant_and_sufficient ou relevant_but_incomplete.\n"
+        "- web_live UNIQUEMENT si local_context_state vaut irrelevant et que la question est adaptée à une recherche Web publique ou actuelle.\n"
+        "- Une absence de réponse exacte, un modèle/référence différent(e), ou evidence_mode=related ne justifie JAMAIS web_live : réponds alors en strict_local avec prudence.\n"
         "- sinon general.\n\n"
         "Question:\n"
         f"{q}\n\n"
@@ -1061,7 +1192,9 @@ def run_answer_pipeline(
             pass
 
     def finalize_result(result: AnswerPipelineResult) -> AnswerPipelineResult:
-        """Persist one complete assistant message after any successful path."""
+        """Persist and transport only the canonical reader-facing answer."""
+        canonical_answer = enforce_final_citation_contract(result.answer, len(result.sources))
+        result = replace(result, answer=canonical_answer)
         if tenant_id and user_id and user_turn_persisted:
             log_event(request_id, "message_persistence_start")
             set_stage("message_persistence")
@@ -1193,6 +1326,7 @@ def run_answer_pipeline(
     orchestration_ms: Optional[float] = None
     orchestration_failure: dict[str, Any] | None = None
     documentary_orchestration_fallback = False
+    orchestration_failed = False
     if ORCHESTRATOR_SETTINGS.enabled:
         emit_status("identify_response_mode", "Identification du mode de réponse")
         started = time.perf_counter()
@@ -1237,6 +1371,7 @@ def run_answer_pipeline(
                 "fallback_strategy": None,
             })
         except Exception as exc:
+            orchestration_failed = True
             orchestration_ms = round((time.perf_counter() - started) * 1000, 1)
             orchestration_failure = _orchestration_failure_details(exc)
             documentary_orchestration_fallback = _looks_like_documentary_fallback(q, hist)
@@ -1244,6 +1379,9 @@ def run_answer_pipeline(
                 "conversation" if not _looks_like_documentary_fallback(q, hist) else "legacy_routing"
             )
             _log_event(request_id, {"event": "orchestration_fallback", "orchestration_ms": orchestration_ms, "reason": type(exc).__name__, "error_category": orchestration_failure["error_category"], "fallback_strategy": fallback_strategy})
+            trace("orchestration_context_recovery", {
+                "enabled": bool(hist), "recovered_query": _recover_query_from_history(q, hist),
+            })
             record_snapshot(None, orchestration_ms=orchestration_ms, fallback_used=True)
             trace("orchestration", {
                 "raw_orchestration_plan": None,
@@ -1269,7 +1407,17 @@ def run_answer_pipeline(
     # Explicit mode wins. In auto mode, the planner may explicitly choose the
     # live Web route. This branch intentionally runs before the local-index
     # readiness check and before any idx.search call.
-    web_requested = mode_in == "web_live" or (
+    explicit_web_request = _has_explicit_web_request(q)
+    local_web_override = mode_in == "local" and (
+        bool(orchestration_plan and orchestration_plan.intent == "web_search" and orchestration_plan.web_request_explicit)
+        or explicit_web_request
+    )
+    auto_live_web_request = (
+        mode_in == "auto"
+        and _looks_fresh_news(q)
+        and not _looks_like_documentary_fallback(q, hist)
+    )
+    web_requested = mode_in == "web_live" or explicit_web_request or local_web_override or auto_live_web_request or (
         mode_in == "auto" and orchestration_plan is not None and orchestration_plan.intent == "web_search"
     )
     if web_requested:
@@ -1278,7 +1426,14 @@ def run_answer_pipeline(
             and orchestration_plan.reuse_previous_subject
             and orchestration_plan.intent in {"refine_previous_search", "web_search"}
         )
-        web_query = (orchestration_plan.retrieval_query if orchestration_plan else None) or q
+        web_query = (
+            orchestration_plan.retrieval_query
+            if orchestration_plan is not None and orchestration_plan.intent == "web_search"
+            else None
+        ) or (
+            _explicit_web_query(q, hist) if explicit_web_request else
+            (_recover_query_from_history(q, hist) if orchestration_failed else q)
+        )
         if web_follow_up:
             web_query = resolve_retrieval_query(
                 raw_user_message=q, orchestrator_query=web_query, history=hist,
@@ -1323,11 +1478,9 @@ def run_answer_pipeline(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"LLM error: {e}")
 
-        citations_idx = []
-        match = re.search(r"<CITATIONS>\s*\[?([\d,\s]*)\]?\s*</CITATIONS>", answer, flags=re.IGNORECASE)
-        if match:
-            citations_idx = [int(value) for value in re.findall(r"\d+", match.group(1) or "")]
-            answer = re.sub(r"\s*<CITATIONS>.*?</CITATIONS>\s*", " ", answer, flags=re.IGNORECASE).strip()
+        answer, citations_idx = extract_citations_and_clean_answer(answer)
+        selected_web_indices, web_citation_map = select_web_source_indices(len(web_sources_list), citations_idx)
+        answer = remap_inline_citations(answer, web_citation_map)
 
         claim_review = None
         faithfulness_result = None
@@ -1343,7 +1496,7 @@ def run_answer_pipeline(
                 validations["claim_faithfulness"] = {"performed": True, **claim_review.to_dict()}
             except Exception:
                 pass
-        sources = [{"path": source["url"], "chunk": -1} for source in web_sources_list]
+        sources = [{"path": web_sources_list[index - 1]["url"], "chunk": -1} for index in selected_web_indices]
         review = PostGenerationReview()
         if ENABLE_POST_GENERATION_REVIEW:
             review = _post_generation_review(q, answer, web_text, sources, faithfulness_result, claim_review)
@@ -1425,7 +1578,15 @@ def run_answer_pipeline(
     # Désactiver si historique trop court (risque de dérive) - compter messages utilisateur uniquement
     user_msg_count_for_condense = len([m for m in hist if m.get("role") == "user"])
     should_condense = (hist and user_msg_count_for_condense >= 2 and ENABLE_CONDENSATION and orchestration_plan is None)
-    q_eff = orchestration_plan.retrieval_query if orchestration_plan else (_condense_question(hist, q) if should_condense else q)
+    if orchestration_plan:
+        q_eff = orchestration_plan.retrieval_query
+    elif orchestration_failed:
+        condensed = _condense_question(hist, q) if should_condense else q
+        # If the same provider outage also prevented condensation, retain the
+        # active subject deterministically instead of searching the raw turn.
+        q_eff = condensed if _norm(condensed) != _norm(q) else _recover_query_from_history(q, hist)
+    else:
+        q_eff = _condense_question(hist, q) if should_condense else q
 
     # Protection: si question très vague (<30 chars pure question) ET pas assez d'historique => forcer GENERAL
     # Questions typiques: "Comment ça marche ?", "Pourquoi ?", "Explique", "How does it work?"
@@ -1515,6 +1676,7 @@ def run_answer_pipeline(
     # Bounded evidence enrichment happens after the stable first retrieval and
     # before evidence_mode/generation. It follows only existing corpus links.
     retrieval_rounds = []
+    iterative_sufficiency = None
     if mode_in in {"local", "web_index"}:
         route_mode = "strict_local"
     elif orchestration_plan is not None:
@@ -1560,6 +1722,10 @@ def run_answer_pipeline(
 
     # Only the evidence decision controls whether local blocks are usable.
     strict_local_ok = evidence_mode in {"direct", "related"}
+    local_context_state = _classify_local_context_state(
+        evidence_decision,
+        retrieval_sufficient=(iterative_sufficiency.sufficient if iterative_sufficiency is not None else None),
+    )
 
     # TIER 0 amélioration: multi-query expansion si peu de hits ou faible overlap OU contexte hors sujet
     if ENABLE_EXPANSION and (not strict_local_ok or not context_is_relevant) and prelim_hits < max(4, RETRIEVE_K // 2):
@@ -1593,6 +1759,10 @@ def run_answer_pipeline(
             )
             evidence_mode = evidence_decision.mode
             strict_local_ok = evidence_mode in {"direct", "related"}
+            local_context_state = _classify_local_context_state(
+                evidence_decision,
+                retrieval_sufficient=(iterative_sufficiency.sufficient if iterative_sufficiency is not None else None),
+            )
         except Exception:
             # Fallback silencieux: on garde les résultats initiaux
             pass
@@ -1609,31 +1779,23 @@ def run_answer_pipeline(
         "looks_equation": bool(_looks_like_equation(q)),
         "smalltalk_hint": bool(skind),
         "evidence_mode": evidence_mode,
+        "local_context_state": local_context_state,
     }
 
     # --- Choix du mode (règle déterministe actu ⇒ web_live, hors sujet ⇒ general) ---
     if mode_in in {"local", "web_index"}:
         # Explicit local/indexed-source modes are never overridden by a plan.
         route_mode = "strict_local"
-    elif orchestration_plan is not None:
-        # In auto mode, the plan is the authority for the source route.
-        route_mode = "web_live" if orchestration_plan.intent == "web_search" else "strict_local"
+    elif mode_in == "auto" and local_context_state != "irrelevant":
+        # Any useful local evidence wins over an automatic Web fallback,
+        # including evidence that cannot settle the exact requested case.
+        route_mode = "strict_local"
     elif documentary_orchestration_fallback:
         route_mode = "strict_local"
-    elif mode_in in {"local", "web_index", "web_live"}:
-        route_mode = {
-            "local": "strict_local",
-            "web_index": "strict_local",
-            "web_live": "web_live"
-        }[mode_in]
     else:
-        # Si contexte hors sujet ET pas de hits solides => GENERAL direct
-        if not context_is_relevant and prelim_hits < max(3, RETRIEVE_K // 3):
-            route_mode = "general"
-        elif _looks_fresh_news(q):
-            route_mode = "web_live"
-        else:
-            route_mode = _llm_route(q, signals, hist)
+        # With irrelevant local context, the router may select Web for a
+        # public/Web-suitable question; it cannot do so for partial evidence.
+        route_mode = _llm_route(q, signals, hist)
 
     # --- Garde-fou pro : si routeur dit "general" mais local pertinent -> forcer local ---
     if route_mode == "general" and strict_local_ok and mode_in != "web_live":
@@ -1647,6 +1809,7 @@ def run_answer_pipeline(
         "context_relevance_reason": evidence_decision.context_relevance_reason,
         "morphological_topic_overlap": evidence_decision.morphological_topic_overlap,
         "strict_local_ok": strict_local_ok,
+        "local_context_state": local_context_state,
         "guard_ok": bool(gated_ok),
         "hits": len(prelim),
         "final_context_block_count": len(blocks),
@@ -1715,7 +1878,7 @@ def run_answer_pipeline(
         try:
             web_text = _with_timeout(
                 web_search_context,
-                q,
+                q_eff,
                 max_chars=WEB_MAX_CHARS,
                 k=WEB_RESULT_K,
                 timeout=WEB_TIMEOUT_SEC,
@@ -1779,16 +1942,9 @@ def run_answer_pipeline(
             evidence_mode="web_live" if route_mode == "web_live" else (evidence_mode if use_strict else "none"),
         )
         trace("generation", {"generation_total_ms": round((time.perf_counter() - generation_started) * 1000, 1), "first_token_ms": None if token_sink is None else None})
-        # Parse des citations éventuelles
-        citations_idx = []
-        try:
-            m = re.search(r"<CITATIONS>\s*\[?([\d,\s]*)\]?\s*</CITATIONS>", answer, flags=re.IGNORECASE)
-            if m:
-                raw = m.group(1) or ""
-                citations_idx = [int(x) for x in re.findall(r"\d+", raw)]
-                answer = re.sub(r"\s*<CITATIONS>.*?</CITATIONS>\s*", " ", answer, flags=re.IGNORECASE).strip()
-        except Exception:
-            citations_idx = []
+        # The citation tail is private metadata. Keep it out of the answer
+        # while preserving its indices for source selection and validation.
+        answer, citations_idx = extract_citations_and_clean_answer(answer)
     except FuturesTimeout:
         raise HTTPException(status_code=504, detail="LLM timeout")
     except Exception as e:
@@ -1837,21 +1993,20 @@ def run_answer_pipeline(
     # ===================== Sources à renvoyer =====================
     if use_strict and context_for_llm and web_sources_list:
         # web strict
-        sources = [{"path": s["url"], "chunk": -1} for s in web_sources_list]
+        selected_web_indices, web_citation_map = select_web_source_indices(len(web_sources_list), citations_idx)
+        answer = remap_inline_citations(answer, web_citation_map)
+        sources = [{"path": web_sources_list[index - 1]["url"], "chunk": -1} for index in selected_web_indices]
     elif use_strict and blocks:
-        # local strict
-        if citations_idx:
-            chosen = []
-            for i in citations_idx:
-                if 1 <= i <= len(blocks):
-                    chosen.append(blocks[i - 1])
-            chosen = chosen or (blocks or [])
-        else:
-            chosen = (blocks or [])
+        # Context indices identify chunks; the source panel identifies unique
+        # documents. Both use this exact mapping.
+        sources, citation_map = select_cited_references(blocks, citations_idx)
+        answer = remap_inline_citations(answer, citation_map)
         set_stage("source_serialization")
-        sources = references_for_blocks(chosen)
     else:
         sources = []
+
+    if not sources:
+        answer = remap_inline_citations(answer, {})
 
     # Contrat API conservé : lorsque les post-checks sont désactivés, la revue
     # reste neutre et aucun travail n'est exécuté après la génération.
@@ -1897,6 +2052,7 @@ def run_answer_pipeline(
         "context_relevance_reason": evidence_decision.context_relevance_reason,
         "morphological_topic_overlap": evidence_decision.morphological_topic_overlap,
         "strict_local_ok": strict_local_ok,
+        "local_context_state": local_context_state,
         "source_count": len(sources),
     })
 

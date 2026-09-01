@@ -75,6 +75,7 @@ class OrchestrationPlan(BaseModel):
     retrieval_query: Optional[str] = Field(default=None, min_length=3, max_length=400)
     use_history: bool = False
     reuse_previous_subject: bool = False
+    web_request_explicit: bool = False
     source_types: list[SourceType] = Field(default_factory=list, max_length=3)
     # A source type inferred by the model is useful diagnostic context but is
     # never allowed to narrow the candidate set.
@@ -109,6 +110,8 @@ class OrchestrationPlan(BaseModel):
             raise ValueError("retrieval fields are forbidden when retrieval is not needed")
         if self.intent == "conversation" and self.needs_retrieval:
             raise ValueError("conversation cannot request retrieval")
+        if self.web_request_explicit and self.intent != "web_search":
+            raise ValueError("web_request_explicit requires web_search")
         return self
 
 
@@ -122,7 +125,7 @@ Also set query_semantics: use current_state or decision when the user asks for a
 
 Capabilities: indexed local documents; indexed emails; recent history; live Web search when available; supported metadata and time constraints; general conversation. Limits: no live mailbox outside synchronized/indexed data, no external case files, no unconnected source, no external action. No result in a retrieval is not lack of access to indexed sources.
 
-Choose only: conversation, document_question, refine_previous_search, general_question, web_search. Use document retrieval for information that could reasonably be in the user's or organisation's sources: personal or business status, decision, request, validation, correspondence, project, internal procedure, technical reference, product, or recent internal event. Use web_search when the user explicitly asks to search the Web/internet, or when fresh public information is needed. For web_search set needs_retrieval=true and make retrieval_query a concise standalone Web query. When a source-switch request such as "search the web" refers to an active subject, set use_history=true and reuse_previous_subject=true; retrieval_query must retain that subject rather than merely repeating the source-switch instruction. When uncertain between document_question and general_question, prefer document_question. Do not retrieve for obvious social conversation, politeness, incomplete introductions, creative requests, or general explanations independent of local sources.
+Choose only: conversation, document_question, refine_previous_search, general_question, web_search. Use document retrieval for information that could reasonably be in the user's or organisation's sources: personal or business status, decision, request, validation, correspondence, project, internal procedure, technical reference, product, or recent internal event. Use web_search when the user explicitly asks to search the Web/internet, or when fresh public information is needed. For web_search set needs_retrieval=true and make retrieval_query a concise standalone Web query. Also set web_request_explicit=true ONLY when the current user message explicitly asks for Web/internet/online search; otherwise set it false. When a source-switch request such as "search the web" refers to an active subject, set use_history=true and reuse_previous_subject=true; retrieval_query must retain that subject rather than merely repeating the source-switch instruction. When uncertain between document_question and general_question, prefer document_question. Do not retrieve for obvious social conversation, politeness, incomplete introductions, creative requests, or general explanations independent of local sources.
 
 For a follow-up or explicit request to search documents/emails: if an active subject is recoverable, use intent=refine_previous_search, needs_retrieval=true, use_history=true, reuse_previous_subject=true. Make retrieval_query a concise standalone search query, never an instruction to another model: preserve important entities, nouns, technical terms and relation wording; do not add generic search boilerplate such as finding any relevant decision, validation, rejection or correspondence. Narrow source_types when named. If no subject is recoverable, ask for missing information instead of a vague search. Dates and metadata refine relevance; never invent them.
 

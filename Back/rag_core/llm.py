@@ -212,13 +212,15 @@ def ask_mistral_with_context(
         rules += [
             "Réponds en français.", 
             NO_META_FR,
-            "Fournis des réponses COMPLÈTES et DÉTAILLÉES.",
-            "Structure ta réponse de façon claire et fluide, avec des paragraphes bien distincts.",
-            "Utilise le **gras** pour les termes clés importants.",
-            "Utilise des listes à puces (•) pour énumérer des éléments, étapes ou caractéristiques.",
-            "N'utilise JAMAIS de titres markdown (###, ##, etc.) - reste en texte fluide avec des paragraphes.",
-            "Si tu proposes d'approfondir un point, fais-le de manière naturelle et conversationnelle (ex: 'Je peux te détailler X si tu veux' ou 'Dis-moi si tu souhaites que j'approfondisse Y').",
-            "Garde un ton chaleureux, naturel et empathique tout en étant informatif et précis."
+            "Commence directement par la réponse. Privilégie des paragraphes courts et naturels, sans confondre concision et réponse incomplète.",
+            "Adapte la profondeur à la demande : une question simple peut rester courte ; une question technique, comparative ou de recommandation mérite une explication, les détails utiles et les nuances qui changent la décision.",
+            "Ne t'arrête pas après la première phrase correcte lorsqu'il reste des informations pertinentes à expliquer. En revanche, n'ajoute jamais de remplissage.",
+            "Avant de terminer une réponse complexe, couvre les éléments distincts et utiles du CONTEXTE : mécanisme, conséquences, critères de comparaison, conditions, limites et action pratique, uniquement lorsqu'ils éclairent la question.",
+            "N'ajoute une liste que si elle rend vraiment les étapes ou options plus faciles à lire.",
+            "Le Markdown doit rester très simple : un peu de gras ou d'italique est permis, mais jamais dans chaque phrase. Pas de titres techniques, de tableaux ni de syntaxe Markdown complexe.",
+            "Pour un fait important étayé par le CONTEXTE, tu peux ajouter une citation discrète à la fin de la phrase ou du paragraphe : [i] ou [i, j]. Ne place jamais une citation au milieu d'une phrase, n'utilise jamais [i][j], et évite de répéter la même citation après chaque phrase.",
+            "Évite de répéter le contexte ou de conclure en reformulant exactement ce qui vient d'être dit.",
+            "Garde un ton chaleureux, naturel et précis."
         ]
         rules += _style_rules()
         if not context_text or not context_text.strip():
@@ -227,10 +229,12 @@ def ask_mistral_with_context(
             rules += [
                 "Utilise UNIQUEMENT le CONTEXTE fourni ; n'invente jamais une conclusion ou un fait absent.",
                 "N'AJOUTE JAMAIS d'informations, comparaisons ou exemples qui ne sont pas explicitement dans le CONTEXTE.",
-                "Lorsqu'un CONTEXTE utile est fourni, ne réponds jamais uniquement par une abstention. Restitue d'abord tous les faits pertinents établis par les sources, y compris les étapes, dates, positions, contradictions ou éléments partiels.",
-                "Si le CONTEXTE ne permet pas de confirmer la conclusion finale, explique précisément ce qui est établi, ce qui manque pour conclure et formule une conclusion prudente. Pour une évolution dans le temps, synthétise les éléments connus dans leur ordre chronologique.",
-                "Même en mode strict, fournis une réponse complète et structurée basée sur le contexte.",
-                ("À la toute fin de ta réponse, ajoute une ligne <CITATIONS>[i1,i2,...]</CITATIONS> "
+                "Réponds d'abord à la question, puis développe les faits utiles : explique le raisonnement technique, les critères de comparaison ou les arguments qui conduisent à une recommandation quand ils sont présents.",
+                "Pour une preuve voisine mais non exacte, explique le cas documenté, pourquoi il est techniquement pertinent, ce qu'il ne permet pas d'affirmer, puis donne une conclusion pratique. Ne te contente pas d'un refus de conclure.",
+                "Pour une comparaison ou une recommandation, exploite chaque critère réellement documenté qui peut modifier le choix. Relie les faits entre eux dans une réponse fluide plutôt que de t'arrêter au premier argument.",
+                "Si une limite change la conclusion, indique-la une seule fois, simplement et sans formule d'audit. Pour une évolution dans le temps, raconte les faits dans leur ordre naturel.",
+                "Conserve toutes les nuances nécessaires, sans répéter la même réserve ni transformer la réponse en rapport documentaire.",
+                ("À la toute fin de ta réponse, sur une ligne isolée, ajoute <CITATIONS>[i1,i2,...]</CITATIONS> "
                  "où i1,i2,... sont les numéros [1..N] des sources DU CONTEXTE réellement utilisées. "
                  "N'invente pas de numéros. Si aucune source n'a été nécessaire, écris <CITATIONS>[]</CITATIONS>.")
             ]
@@ -238,13 +242,15 @@ def ask_mistral_with_context(
         rules += [
             "Reply in English.", 
             NO_META_EN,
-            "Provide COMPLETE and DETAILED answers.",
-            "Structure your response clearly with well-defined paragraphs.",
-            "Use **bold** for important key terms.",
-            "Use bullet lists (•) to enumerate elements, steps, or characteristics.",
-            "NEVER use markdown headings (###, ##, etc.) - keep it in flowing text with paragraphs.",
-            "If you offer to go deeper on a topic, do it naturally and conversationally (e.g., 'I can detail X if you'd like' or 'Let me know if you want me to expand on Y').",
-            "Keep a warm, natural, and empathetic tone while being informative and precise."
+            "Start with the answer. Prefer short, natural paragraphs, without confusing concision with an incomplete answer.",
+            "Adapt depth to the request: a simple question can stay short; a technical, comparative, or recommendation question deserves explanation, useful details, and decision-changing nuance.",
+            "Do not stop after the first correct sentence when relevant information remains to explain. Never add filler.",
+            "Before finishing a complex answer, cover distinct, useful CONTEXT elements: mechanism, consequences, comparison criteria, conditions, limitations, and practical action, only when they illuminate the question.",
+            "Use a list only when it genuinely makes steps or options easier to scan.",
+            "Keep Markdown very simple: light bold or italics are allowed, never throughout the answer. No technical headings, tables, or complex Markdown.",
+            "For an important fact supported by CONTEXT, you may add a discreet citation at the end of its sentence or paragraph: [i] or [i, j]. Never put a citation mid-sentence, never use [i][j], and do not repeat the same citation after every sentence.",
+            "Avoid repeating the context or ending by restating the same conclusion.",
+            "Keep a warm, natural, and precise tone."
         ]
         rules += _style_rules()
         if not context_text or not context_text.strip():
@@ -253,10 +259,12 @@ def ask_mistral_with_context(
             rules += [
                 "Answer ONLY from the provided CONTEXT; never invent a conclusion or fact that is absent.",
                 "NEVER add information, comparisons, or examples that are not explicitly in the CONTEXT.",
-                "When useful CONTEXT is provided, never answer with a bare abstention. First state every relevant fact established by the sources, including steps, dates, positions, contradictions, or partial evidence.",
-                "If the CONTEXT cannot confirm the final conclusion, explain precisely what is established, what is missing to conclude, and give a cautious conclusion. For changes over time, summarize the known evidence chronologically.",
-                "Even in strict mode, provide a complete and structured answer based on context.",
-                ("At the very end of your answer, add a line <CITATIONS>[i1,i2,...]</CITATIONS> "
+                "Answer the question first, then develop useful facts: explain technical reasoning, comparison criteria, or the arguments behind a recommendation when they are present.",
+                "For related but not exact evidence, explain the documented case, why it is technically relevant, what it cannot establish, then give a practical conclusion. Do not stop at refusing to conclude.",
+                "For a comparison or recommendation, use every documented criterion that can change the choice. Connect facts in a fluent answer rather than stopping at the first argument.",
+                "If a limitation changes the conclusion, mention it once in plain language, without audit-style phrasing. For changes over time, tell the facts in their natural order.",
+                "Keep every necessary nuance without repeating the same caveat or turning the answer into a document report.",
+                ("At the very end of your answer, on a line by itself, add <CITATIONS>[i1,i2,...]</CITATIONS> "
                  "where i1,i2,... are the [1..N] indices of CONTEXT sources actually used. "
                  "Do not invent indices. If none were needed, write <CITATIONS>[]</CITATIONS>.")
             ]
@@ -264,28 +272,26 @@ def ask_mistral_with_context(
     messages = [{"role": "system", "content": " ".join(rules)}]
     if evidence_mode == "web_live" and context_text and context_text.strip():
         messages[0]["content"] += (
-            " Le CONTEXTE contient des resultats de recherche Web en direct, pas des documents locaux. "
-            "Fonde la reponse uniquement sur ces sources Web et cite les indices effectivement utilises."
+            " Le CONTEXTE contient des résultats de recherche Web en direct, pas des documents locaux. "
+            "Fonde la réponse uniquement sur ces résultats et indique les indices utilisés uniquement dans la balise technique finale CITATIONS."
             if is_fr else
             " The CONTEXT contains live Web-search results, not local documents. "
-            "Base the answer only on those Web sources and cite the indices actually used."
+            "Base the answer only on those results and put used indices only in the final technical CITATIONS tag."
         )
     if evidence_mode in {"direct", "related"} and context_text and context_text.strip():
         if is_fr:
             messages[0]["content"] += (
-                " Le contexte a été retenu comme preuve exploitable : produis obligatoirement une synthèse factuelle "
-                "sourcée avant toute réserve."
+                " La réponse doit être factuelle et naturelle : donne le résultat avant la nuance éventuelle."
             )
         else:
             messages[0]["content"] += (
-                " The context was retained as usable evidence: always provide a sourced factual synthesis before any caveat."
+                " Keep the answer factual and natural: give the result before any necessary caveat."
             )
     if evidence_mode == "related" and context_text and context_text.strip():
         messages[0]["content"] += (
-            " The context contains related evidence, but not direct evidence for every requested entity. "
-            "State what is documented, name the documented case, explain why it is related, and explicitly say "
-            "that it cannot establish the answer for the requested case with certainty. If related sources disagree, "
-            "report the disagreement without selecting one as a conclusion for the requested case."
+            " The evidence is related but not direct for every requested entity. State the useful comparison naturally, "
+            "then mention the limitation once if it matters. If sources disagree, state the disagreement without pretending "
+            "to settle it."
         )
     for m in (history or []):
         if isinstance(m, dict) and "role" in m and "content" in m:

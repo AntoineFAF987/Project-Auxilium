@@ -13,7 +13,7 @@ if "api" not in sys.modules:
     package.__path__ = [str(_BACK_ROOT / "api")]
     sys.modules["api"] = package
 
-from api.source_references import local_source_by_document_id, references_for_blocks
+from api.source_references import local_source_by_document_id, references_for_blocks, select_cited_references
 from api import routes_sources
 from api.routes_sources import SourceOpenRequest, open_source
 
@@ -43,6 +43,24 @@ def test_local_reference_has_user_origin_contract(tmp_path):
 def test_multiple_chunks_are_deduplicated_by_document_id():
     rows = [_local_row(), {**_local_row(), "chunk_id": 1}]
     assert len(references_for_blocks([(1.0, row) for row in rows])) == 1
+
+
+def test_eight_chunks_map_to_two_final_documents_in_citation_order():
+    doc_a = _local_row("C:/Docs/A.pdf", "doc_a")
+    doc_b = _local_row("C:/Docs/B.pdf", "doc_b")
+    blocks = [(1.0, {**(doc_a if index in {1, 3, 6} else doc_b), "chunk_id": index}) for index in range(1, 9)]
+    sources, mapping = select_cited_references(blocks, [1, 3, 6, 8])
+    assert [source["document_id"] for source in sources] == ["doc_a", "doc_b"]
+    assert mapping == {1: 1, 2: 2, 3: 1, 4: 2, 5: 2, 6: 1, 7: 2, 8: 2}
+
+
+def test_unselected_document_has_no_public_citation_mapping():
+    doc_a = _local_row("C:/Docs/A.pdf", "doc_a")
+    doc_b = _local_row("C:/Docs/B.pdf", "doc_b")
+    blocks = [(1.0, {**(doc_a if index < 3 else doc_b), "chunk_id": index}) for index in range(1, 5)]
+    sources, mapping = select_cited_references(blocks, [1])
+    assert [source["document_id"] for source in sources] == ["doc_a"]
+    assert mapping == {1: 1, 2: 1}
 
 
 def test_legacy_direct_file_path_is_migrated_without_reindexing(tmp_path):
