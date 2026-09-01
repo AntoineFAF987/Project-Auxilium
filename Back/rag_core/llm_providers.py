@@ -1,11 +1,40 @@
 """Provider boundary for text generation; prompt construction stays in ``llm``."""
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from abc import ABC, abstractmethod
 from typing import Any, Iterator, Sequence
 
 from runtime_settings import GenerationSettings, get_runtime_settings
+
+
+def _temporary_generation_diagnostic(*, provider: str, request_args: dict[str, Any], stream: bool) -> None:
+    """Emit correlation-safe, temporary diagnostics without logging prompt text."""
+    try:
+        # Imported lazily to keep rag_core usable outside the FastAPI package.
+        from api.diagnostics import current_request_id, current_stage, log_event
+        request_id = current_request_id()
+        if not request_id:
+            return
+        serialized = json.dumps(request_args, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        log_event(
+            request_id,
+            "provider_call_effective",
+            provider=provider,
+            stage=current_stage(),
+            stream=stream,
+            model=request_args.get("model"),
+            prompt_hash=hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+            temperature=request_args.get("temperature"),
+            top_p=request_args.get("top_p"),
+            seed=request_args.get("seed"),
+            reasoning_effort=(request_args.get("reasoning") or {}).get("effort"),
+        )
+    except Exception:
+        # Diagnostics must never alter generation availability.
+        pass
 
 
 class LLMProvider(ABC):
@@ -30,6 +59,7 @@ class MistralProvider(LLMProvider):
                    "top_p": top_p, "max_tokens": max_tokens}
         if stream:
             payload["stream"] = True
+        _temporary_generation_diagnostic(provider="mistral", request_args=payload, stream=stream)
         response = requests.post(
             "https://api.mistral.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -97,11 +127,15 @@ class OpenAIProvider(LLMProvider):
         return args
 
     def generate(self, messages, **kwargs) -> str:
-        response = self._client().responses.create(**self._request_args(messages, **kwargs))
+        args = self._request_args(messages, **kwargs)
+        _temporary_generation_diagnostic(provider="openai", request_args=args, stream=False)
+        response = self._client().responses.create(**args)
         return response.output_text
 
     def stream(self, messages, **kwargs) -> Iterator[str]:
-        stream = self._client().responses.create(stream=True, **self._request_args(messages, **kwargs))
+        args = self._request_args(messages, **kwargs)
+        _temporary_generation_diagnostic(provider="openai", request_args=args, stream=True)
+        stream = self._client().responses.create(stream=True, **args)
         for event in stream:
             if getattr(event, "type", None) == "response.output_text.delta":
                 delta = getattr(event, "delta", "")

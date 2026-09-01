@@ -2,6 +2,7 @@
 """Adaptateurs HTTP du pipeline de reponse partage."""
 
 import json
+import time
 import traceback
 from queue import Queue
 from threading import Thread
@@ -65,16 +66,30 @@ def _validated_sse(
     events: Queue[Tuple[str, object]] = Queue()
     citation_filter = _CitationTailFilter()
     request_id = request_id or start_request()
+    status_order = 0
 
     def token_sink(chunk: str) -> None:
         visible = citation_filter.feed(chunk)
         if visible:
             events.put(("content", visible))
 
+    def status_sink(stage: str, label: str) -> None:
+        # Public functional progress only; never model reasoning or prompt text.
+        nonlocal status_order
+        status_order += 1
+        log_event(
+            request_id,
+            "sse_status_emitted",
+            stage=stage,
+            status_order=status_order,
+            timestamp_ms=round(time.time() * 1000),
+        )
+        events.put(("status", {"type": "status", "stage": stage, "label": label}))
+
     def produce() -> None:
         start_request(request_id)
         try:
-            result = run_answer_pipeline(body, request, token_sink=token_sink)
+            result = run_answer_pipeline(body, request, token_sink=token_sink, status_sink=status_sink)
             tail = citation_filter.finish()
             if tail:
                 events.put(("content", tail))
@@ -94,6 +109,10 @@ def _validated_sse(
         if kind == "content":
             emitted_content = True
             yield _sse({"type": "content", "content": str(payload)})
+            continue
+        if kind == "status":
+            status_payload = payload if isinstance(payload, dict) else {}
+            yield _sse(status_payload, event="status")
             continue
         if kind == "error":
             error_payload = payload if isinstance(payload, dict) else {"request_id": request_id}

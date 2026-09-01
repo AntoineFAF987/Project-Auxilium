@@ -13,14 +13,14 @@ if "api" not in sys.modules:
 from api.iterative_retrieval import run_iterative_evidence_retrieval  # noqa: E402
 
 
-def _row(document_id, uid, text, *, date="2026-01-01T00:00:00Z", source="email", blocks=None, attachments=None, order=0):
+def _row(document_id, uid, text, *, date="2026-01-01T00:00:00Z", source="email", blocks=None, attachments=None, order=0, next_chunk_uid=None):
     metadata = {"date": date, "chronological_key": date}
     if attachments is not None:
         metadata["attachments"] = attachments
     return {
         "document_id": document_id, "chunk_uid": uid, "chunk_id": order, "order": order,
         "source": source, "file": f"{document_id}.txt", "path": f"/{document_id}.txt",
-        "text": text, "blocks": blocks or [], "document_metadata": metadata,
+        "text": text, "blocks": blocks or [], "document_metadata": metadata, "next_chunk_uid": next_chunk_uid,
     }
 
 
@@ -95,11 +95,38 @@ def test_recent_candidate_without_topic_relation_is_not_followed():
 def test_header_only_email_expands_its_existing_body_before_generation():
     header = _row("email-1", "header", "Subject: Decision regarding Project X", blocks=[{"block_type": "email_header"}])
     body = _row("email-1", "body", "The final decision is approved.", blocks=[{"block_type": "email_body"}], order=1)
+    actions = []
     evidence, rounds, decision = run_iterative_evidence_retrieval(
-        candidate_pool=[(0.9, header)], initial_evidence=[(0.9, header)], corpus=[header, body], query="What decision was made?", semantics="decision",
+        candidate_pool=[(0.9, header)], initial_evidence=[(0.9, header)], corpus=[header, body], query="What decision was made?", semantics="decision", on_action=actions.append,
     )
     assert any(meta["chunk_uid"] == "body" for _, meta in evidence)
     assert rounds[1]["action"]["type"] == "EXPAND"
+    assert actions[0].type == "EXPAND"
+    assert decision.sufficient is True
+
+
+def test_august_email_header_expansion_places_the_body_in_final_context():
+    """Regression: a header hit must carry its adjacent indexed body to the LLM."""
+    body_text = "Madame KOENIG a accueilli favorablement notre requête, en levant votre interdiction de quitter le territoire national à compter de ce jour."
+    header = _row(
+        "email-2026-08-28", "aug28-header",
+        "Subject: Modification de votre contrôle judiciaire et levée de votre interdiction de quitter le territoire national\nFrom: Cabinet",
+        date="2026-08-28T00:00:00Z", blocks=[{"block_type": "email_header"}], next_chunk_uid="aug28-body",
+    )
+    body = _row(
+        "email-2026-08-28", "aug28-body", body_text,
+        date="2026-08-28T00:00:00Z", blocks=[{"block_type": "email_body"}], order=1,
+    )
+    evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.95, header)], initial_evidence=[(0.95, header)], corpus=[header, body],
+        query="Que dit ce mail concernant la décision ?", semantics="decision",
+    )
+
+    final_context = "\n".join(meta["text"] for _, meta in evidence)
+    assert rounds[0]["evidence_gaps"][0]["gap_type"] == "email_header_only"
+    assert rounds[1]["action"]["type"] == "EXPAND"
+    assert rounds[1]["added_chunk_uids"] == ["aug28-body"]
+    assert "levant votre interdiction de quitter le territoire national à compter de ce jour" in final_context
     assert decision.sufficient is True
 
 
@@ -107,12 +134,14 @@ def test_email_attachment_is_followed_only_when_declared_and_indexed():
     attachment = {"document_id": "decision-pdf", "relation_type": "attachment"}
     header = _row("email-2", "header", "Subject: Final decision attached", blocks=[{"block_type": "email_header"}], attachments=[attachment])
     pdf = _row("decision-pdf", "pdf-1", "Final decision: request approved.", source="pdf")
+    actions = []
     evidence, rounds, decision = run_iterative_evidence_retrieval(
-        candidate_pool=[(0.9, header)], initial_evidence=[(0.9, header)], corpus=[header, pdf], query="What was the final decision?", semantics="decision",
+        candidate_pool=[(0.9, header)], initial_evidence=[(0.9, header)], corpus=[header, pdf], query="What was the final decision?", semantics="decision", on_action=actions.append,
     )
     assert any(meta["document_id"] == "decision-pdf" for _, meta in evidence)
     assert rounds[1]["action"]["type"] == "FOLLOW"
     assert rounds[1]["action"]["relation"] == "attachment"
+    assert actions[0].relation == "attachment"
     assert decision.sufficient is True
 
 

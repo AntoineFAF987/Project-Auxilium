@@ -25,6 +25,8 @@ from api.orchestration import (  # noqa: E402
     filter_retrieval_candidates,
     compact_history,
     build_prompt,
+    build_json_repair_prompt,
+    plan_json_retry,
     plan_once,
     sanitize_plan_for_retrieval,
 )
@@ -41,6 +43,25 @@ def test_plan_requires_standalone_query_for_retrieval():
 def test_invalid_provider_json_is_rejected_for_safe_fallback():
     with pytest.raises(OrchestrationPlanOutputError):
         plan_once("Question", [], lambda *_args, **_kwargs: "not json", model=None, timeout=1)
+
+
+def test_json_only_retry_accepts_valid_repair_after_truncated_planner_output():
+    raw = json.dumps({
+        "intent": "document_question", "needs_retrieval": True,
+        "retrieval_query": "contenu du mail connu", "use_history": True,
+        "source_types": ["email"], "temporal_constraints": [], "metadata_constraints": {},
+        "response_strategy": "answer",
+    })
+    captured = []
+
+    def call(prompt, **_kwargs):
+        captured.append(prompt)
+        return raw
+
+    plan = plan_json_retry("Pourquoi tu n'étudies pas le contenu du mail ?", [], call, model=None, timeout=1)
+    assert plan.needs_retrieval is True
+    assert "Return ONLY one valid JSON object" in captured[0]
+    assert "Pourquoi tu n'étudies pas le contenu du mail ?" in build_json_repair_prompt("Pourquoi tu n'étudies pas le contenu du mail ?", [])
 
 
 def test_temporal_and_sender_constraints_filter_existing_candidates():
@@ -90,6 +111,22 @@ def test_general_question_plan_can_skip_retrieval():
     })
     plan = plan_once("Explique un principe général.", [], lambda *_args, **_kwargs: raw, model=None, timeout=1)
     assert plan.needs_retrieval is False
+
+
+def test_web_search_plan_is_valid_and_prompt_declares_live_web_capability():
+    raw = json.dumps({
+        "intent": "web_search", "needs_retrieval": True,
+        "retrieval_query": "Los Angeles vs San Francisco for a stay in the United States",
+        "use_history": True, "reuse_previous_subject": True,
+        "source_types": [], "temporal_constraints": [], "metadata_constraints": {},
+        "response_strategy": "answer",
+    })
+    plan = plan_once("Je veux que tu fasses une recherche web", [], lambda *_args, **_kwargs: raw, model=None, timeout=1)
+    assert plan.intent == "web_search"
+    assert plan.needs_retrieval is True
+    prompt = build_prompt("Search the web", [])
+    assert "live Web search when available" in prompt
+    assert "web_search" in prompt
 
 
 def test_source_refinement_reuses_active_subject_and_email_scope():

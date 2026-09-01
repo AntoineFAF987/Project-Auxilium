@@ -15,7 +15,7 @@ from typing import Any, Callable, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, field_validator, model_validator
 
 
-Intent = Literal["conversation", "document_question", "refine_previous_search", "general_question"]
+Intent = Literal["conversation", "document_question", "refine_previous_search", "general_question", "web_search"]
 ResponseStrategy = Literal["answer", "ask_for_missing_information", "general_answer"]
 QuerySemantics = Literal["fact_lookup", "current_state", "decision", "chronology", "comparison", "procedure", "general_document_question"]
 SourceType = Literal["email", "pdf", "file"]
@@ -120,9 +120,9 @@ Your mission is to choose strategy: retrieval need, standalone retrieval query, 
 
 Also set query_semantics: use current_state or decision when the user asks for a current status, outcome, or change; otherwise choose the closest supported general documentary need.
 
-Capabilities: indexed local documents; indexed emails; recent history; supported metadata and time constraints; general conversation. Limits: no live mailbox outside synchronized/indexed data, no external case files, no unconnected source, no external action. No result in a retrieval is not lack of access to indexed sources.
+Capabilities: indexed local documents; indexed emails; recent history; live Web search when available; supported metadata and time constraints; general conversation. Limits: no live mailbox outside synchronized/indexed data, no external case files, no unconnected source, no external action. No result in a retrieval is not lack of access to indexed sources.
 
-Choose only: conversation, document_question, refine_previous_search, general_question. Use retrieval for information that could reasonably be in the user's or organisation's sources: personal or business status, decision, request, validation, correspondence, project, internal procedure, technical reference, product, or recent internal event. When uncertain between document_question and general_question, prefer document_question. Do not retrieve for obvious social conversation, politeness, incomplete introductions, creative requests, or general explanations independent of local sources.
+Choose only: conversation, document_question, refine_previous_search, general_question, web_search. Use document retrieval for information that could reasonably be in the user's or organisation's sources: personal or business status, decision, request, validation, correspondence, project, internal procedure, technical reference, product, or recent internal event. Use web_search when the user explicitly asks to search the Web/internet, or when fresh public information is needed. For web_search set needs_retrieval=true and make retrieval_query a concise standalone Web query. When a source-switch request such as "search the web" refers to an active subject, set use_history=true and reuse_previous_subject=true; retrieval_query must retain that subject rather than merely repeating the source-switch instruction. When uncertain between document_question and general_question, prefer document_question. Do not retrieve for obvious social conversation, politeness, incomplete introductions, creative requests, or general explanations independent of local sources.
 
 For a follow-up or explicit request to search documents/emails: if an active subject is recoverable, use intent=refine_previous_search, needs_retrieval=true, use_history=true, reuse_previous_subject=true. Make retrieval_query a concise standalone search query, never an instruction to another model: preserve important entities, nouns, technical terms and relation wording; do not add generic search boilerplate such as finding any relevant decision, validation, rejection or correspondence. Narrow source_types when named. If no subject is recoverable, ask for missing information instead of a vague search. Dates and metadata refine relevance; never invent them.
 
@@ -134,6 +134,7 @@ Examples (conceptual, JSON shape abbreviated):
 - "Can model X be adapted for a harsh environment?" -> document_question, needs_retrieval=true.
 - "Was my request approved?" -> document_question, needs_retrieval=true.
 - "Search recent emails instead" with an active subject -> refine_previous_search, needs_retrieval=true, use_history=true, reuse_previous_subject=true, source_types=["email"], temporal_constraints=[{"mode":"recent"}].
+- "Search the web instead" with an active subject -> web_search, needs_retrieval=true, use_history=true, reuse_previous_subject=true.
 - "Explain REST APIs" -> general_question, needs_retrieval=false.
 """
 
@@ -166,9 +167,20 @@ def build_prompt(question: str, history: list[dict[str, Any]]) -> str:
     )
 
 
-def plan_once(question: str, history: list[dict[str, Any]], call_llm: Callable[..., str], *, model: str | None, timeout: int) -> OrchestrationPlan:
-    """Execute exactly one LLM call; malformed output raises for the caller's safe fallback."""
-    raw = call_llm(build_prompt(question, history), context_text="", history=[], model=model, timeout=timeout, max_tokens=420)
+def build_json_repair_prompt(question: str, history: list[dict[str, Any]]) -> str:
+    """Small retry prompt used only after the planner emitted invalid JSON."""
+    view = compact_history(history)
+    schema = OrchestrationPlan.model_json_schema()
+    return (
+        "Return ONLY one valid JSON object matching this schema. No prose, no markdown, no explanation.\n"
+        f"USER_MESSAGE: {question}\n"
+        f"COMPACT_HISTORY: {json.dumps(view, ensure_ascii=False)}\n"
+        f"JSON_SCHEMA: {json.dumps(schema, ensure_ascii=False, separators=(',', ':'))}"
+    )
+
+
+def _parse_plan(raw: str | None) -> OrchestrationPlan:
+    """Validate planner output while retaining it for local diagnostics."""
     try:
         parsed = json.loads((raw or "").strip())
         if not isinstance(parsed, dict):
@@ -179,6 +191,18 @@ def plan_once(question: str, history: list[dict[str, Any]], call_llm: Callable[.
     except (json.JSONDecodeError, ValidationError, ValueError) as exc:
         details = exc.errors() if isinstance(exc, ValidationError) else [{"message": str(exc)}]
         raise OrchestrationPlanOutputError(raw_model_output=raw or "", validation_error_details=details) from exc
+
+
+def plan_once(question: str, history: list[dict[str, Any]], call_llm: Callable[..., str], *, model: str | None, timeout: int) -> OrchestrationPlan:
+    """Execute exactly one LLM call; malformed output raises for the caller's safe fallback."""
+    raw = call_llm(build_prompt(question, history), context_text="", history=[], model=model, timeout=timeout, max_tokens=420)
+    return _parse_plan(raw)
+
+
+def plan_json_retry(question: str, history: list[dict[str, Any]], call_llm: Callable[..., str], *, model: str | None, timeout: int) -> OrchestrationPlan:
+    """One compact repair attempt; callers decide whether it is appropriate."""
+    raw = call_llm(build_json_repair_prompt(question, history), context_text="", history=[], model=model, timeout=timeout, max_tokens=420)
+    return _parse_plan(raw)
 
 
 class OrchestrationPlanOutputError(ValueError):

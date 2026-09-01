@@ -409,6 +409,86 @@ html, body, aside, [class*="overflow-y-auto"], [class*="overflow-x-auto"] {
   }
 }
 
+/* Indicateur d'attente discret, sans fausse progression ni spinner générique. */
+.aux-thinking-indicator {
+  width: min(100%, 23rem);
+  padding: .15rem 1rem .25rem;
+  color: var(--text);
+  animation: aux-thinking-enter 210ms cubic-bezier(.22, 1, .36, 1) both;
+}
+
+.aux-thinking-indicator--leaving {
+  pointer-events: none;
+  animation: aux-thinking-leave 150ms ease-out both;
+}
+
+.aux-thinking-heading {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+}
+
+.aux-thinking-sparkle {
+  display: grid;
+  width: 1.05rem;
+  height: 1.05rem;
+  color: var(--primary);
+  filter: drop-shadow(0 0 5px color-mix(in oklab, var(--primary) 30%, transparent));
+  animation: aux-thinking-sparkle 1.55s ease-in-out infinite;
+}
+
+.aux-thinking-sparkle svg { width: 100%; height: 100%; }
+
+.aux-thinking-title {
+  font-size: .9375rem;
+  font-weight: 600;
+  letter-spacing: -.01em;
+}
+
+.aux-thinking-stage {
+  display: block;
+  min-height: 1.25rem;
+  margin: .12rem 0 0 1.55rem;
+  color: var(--muted-text);
+  font-size: .8125rem;
+  line-height: 1.25rem;
+  animation: aux-thinking-stage 200ms ease-out both;
+}
+
+.aux-thinking-line {
+  display: block;
+  position: relative;
+  width: 6.25rem;
+  height: 2px;
+  margin: .58rem 0 0 1.55rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--border) 72%, transparent);
+}
+
+.aux-thinking-line span {
+  position: absolute;
+  inset: 0;
+  width: 42%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--primary) 72%, transparent), transparent);
+  animation: aux-thinking-glow 2s ease-in-out infinite;
+}
+
+@keyframes aux-thinking-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes aux-thinking-leave { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(-2px); } }
+@keyframes aux-thinking-sparkle { 0%, 100% { opacity: .64; transform: scale(.95); } 50% { opacity: 1; transform: scale(1.05); } }
+@keyframes aux-thinking-stage { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes aux-thinking-glow { from { transform: translateX(-150%); opacity: .25; } 50% { opacity: .7; } to { transform: translateX(350%); opacity: .25; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .aux-thinking-indicator,
+  .aux-thinking-indicator--leaving,
+  .aux-thinking-sparkle,
+  .aux-thinking-stage,
+  .aux-thinking-line span { animation: none; }
+}
+
 @keyframes dv-pulse-ring {
   0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 30%, transparent); }
   70% { box-shadow: 0 0 0 10px color-mix(in oklab, var(--primary) 0%, transparent); }

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import re, json, uuid, hashlib
+import re, json, uuid, hashlib, logging
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,7 +30,7 @@ from rag_core.turn_type import classify_turn
 from runtime_settings import get_runtime_settings
 from .orchestration import (
     OrchestrationPlan, OrchestrationPlanOutputError, build_prompt, compact_history,
-    explain_candidate_rejection, filter_retrieval_candidates, plan_once,
+    explain_candidate_rejection, filter_retrieval_candidates, plan_once, plan_json_retry,
     sanitize_plan_for_retrieval,
 )
 from .orchestration_debug import record_snapshot
@@ -45,6 +45,8 @@ from auth_ms import verify_ms_token
 
 # --- Anti-429: concurrence + retries ---
 import threading, random, time
+
+logger = logging.getLogger(__name__)
 
 
 AnswerStatus = Literal["answered", "abstained", "fallback"]
@@ -264,19 +266,25 @@ def _safe_llm(fn, *args, **kwargs):
 
 
 def _run_orchestration(q: str, history: List[Dict]) -> OrchestrationPlan:
-    """One planner call only: no retry loop and no retrieval side effect."""
+    """Plan with one JSON-only repair attempt; never performs retrieval."""
     if not LLM_SEM.acquire(timeout=5):
         raise RuntimeError("orchestrator_busy")
     try:
-        return plan_once(
-            q,
-            # Keep enough alternating user/assistant turns to retain the
-            # substantive subject before a terse source-selection follow-up.
-            history[-max(ORCHESTRATOR_SETTINGS.history_max_messages, 6):],
-            lambda prompt, **kwargs: _with_timeout(ask_mistral_with_context, prompt, **kwargs),
-            model=ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model,
-            timeout=ORCHESTRATOR_SETTINGS.timeout,
-        )
+        recent_history = history[-max(ORCHESTRATOR_SETTINGS.history_max_messages, 6):]
+        call_llm = lambda prompt, **kwargs: _with_timeout(ask_mistral_with_context, prompt, **kwargs)
+        model = ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model
+        try:
+            return plan_once(q, recent_history, call_llm, model=model, timeout=ORCHESTRATOR_SETTINGS.timeout)
+        except OrchestrationPlanOutputError:
+            logger.warning("orchestrator_invalid_json_retrying_once")
+            try:
+                return plan_json_retry(
+                    q, recent_history, call_llm, model=model,
+                    timeout=min(ORCHESTRATOR_SETTINGS.timeout, 5),
+                )
+            except OrchestrationPlanOutputError:
+                logger.warning("orchestrator_json_retry_failed")
+                raise
     finally:
         LLM_SEM.release()
 
@@ -347,7 +355,8 @@ def _looks_like_documentary_fallback(question: str, history: List[Dict]) -> bool
     markers = (
         "status", "decision", "approval", "approved", "rejected", "request", "case", "file", "response",
         "authorization", "validation", "dossier", "demande", "decision", "autorisation", "validation",
-        "reponse", "accepte", "refuse", "toujours", "enfin", "verifie", "cherche", "mails", "documents",
+        "reponse", "accepte", "refuse", "toujours", "enfin", "verifie", "cherche", "mails", "mail", "email", "courriel", "documents", "document",
+        "contenu", "contient", "etudie", "étudie", "lire",
     )
     return any(re.search(rf"\b{re.escape(marker)}\b", text) for marker in markers)
 
@@ -371,6 +380,7 @@ def _generate_answer(
     history: List[Dict],
     token_sink: Optional[Callable[[str], None]] = None,
     diagnostic_stage_sink: Optional[Callable[[str], None]] = None,
+    progress_sink: Optional[Callable[[str, str], None]] = None,
     **kwargs,
 ) -> str:
     """Genere en sync ou transmet chaque fragment au transport SSE."""
@@ -381,6 +391,9 @@ def _generate_answer(
     request_id = current_request_id()
     if request_id:
         log_event(request_id, "generation_start")
+    if progress_sink:
+        progress_sink("prepare_response", "Préparation de la réponse")
+        progress_sink("draft_response", "Rédaction de la réponse")
 
     try:
         if token_sink is None:
@@ -741,9 +754,26 @@ def _parse_web_links(web_text: str) -> List[Dict[str, str]]:
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).lower()
 
-def _cache_key(q: str, mode_in: str, route_mode: str, reply_to: Optional[str]) -> str:
-    base = f"{_norm(q)}|{mode_in}|{route_mode}|{bool(reply_to)}"
-    return hashlib.sha256(base.encode("utf-8")).hexdigest()
+def _stable_hash(value: Any) -> str:
+    """Hash structured execution inputs without retaining their content in logs."""
+    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _cache_key(
+    *, conversation_id: str, q: str, mode_in: str, route_mode: str,
+    reply_to: dict[str, str] | None, history_hash: str, rag_context_hash: str,
+) -> str:
+    """Key a final answer to its complete conversational evidence scope."""
+    return _stable_hash({
+        "conversation_id": conversation_id,
+        "question": _norm(q),
+        "source_mode": mode_in,
+        "route_mode": route_mode,
+        "reply_to": reply_to,
+        "history_hash": history_hash,
+        "rag_context_hash": rag_context_hash,
+    })
 
 def _log_event(request_id: str, payload: Dict):
     payload = {"request_id": request_id, **payload}
@@ -991,11 +1021,18 @@ def run_answer_pipeline(
     request: Request,
     *,
     token_sink: Optional[Callable[[str], None]] = None,
+    status_sink: Optional[Callable[[str, str], None]] = None,
 ) -> AnswerPipelineResult:
     request_id = current_request_id() or str(uuid.uuid4())
     set_stage("unknown")
     validations: Dict[str, Any] = {}
     q = validate_answer_request(body)
+
+    def emit_status(stage: str, label: str) -> None:
+        if status_sink:
+            status_sink(stage, label)
+
+    emit_status("analyze_request", "Analyse de la demande")
     trace_started = time.perf_counter()
     if RESPONSE_TRACE_ENABLED:
         RESPONSE_TRACES.start(request_id, {"original_user_message": q, "mode": body.source_mode or "auto", "conversation_id": body.thread_id})
@@ -1096,7 +1133,7 @@ def run_answer_pipeline(
     if (not ORCHESTRATOR_SETTINGS.enabled) and roleplay_active and (not looks_factual(q)):
         try:
             ans = _generate_answer(
-                q, "", history=hist, token_sink=token_sink,
+                q, "", history=hist, token_sink=token_sink, progress_sink=emit_status,
                 roleplay_mode=True, max_tokens=220,
             )
             return finalize_result(_result(answer=ans, sources=[], request_id=request_id))
@@ -1113,7 +1150,7 @@ def run_answer_pipeline(
     if (not ORCHESTRATOR_SETTINGS.enabled) and skind:
         try:
             ans = _generate_answer(
-                q, reply_preamble, history=hist, token_sink=token_sink,
+                q, reply_preamble, history=hist, token_sink=token_sink, progress_sink=emit_status,
                 smalltalk_mode=True, smalltalk_kind=skind, max_tokens=200,
             )
             return finalize_result(_result(answer=ans, sources=[], request_id=request_id))
@@ -1140,9 +1177,9 @@ def run_answer_pipeline(
             return finalize_result(_result(answer=math_ans, sources=[], request_id=request_id))
 
     # --- Mode "general" forcé par l'utilisateur ---
-    if (not ORCHESTRATOR_SETTINGS.enabled) and mode_in == "general":
+    if mode_in == "general":
         try:
-            ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink)
+            ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink, progress_sink=emit_status)
             return finalize_result(_result(answer=ans, sources=[], mode="GENERAL(no-context)", ctx_len=len(reply_preamble), request_id=request_id))
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
@@ -1157,6 +1194,7 @@ def run_answer_pipeline(
     orchestration_failure: dict[str, Any] | None = None
     documentary_orchestration_fallback = False
     if ORCHESTRATOR_SETTINGS.enabled:
+        emit_status("identify_response_mode", "Identification du mode de réponse")
         started = time.perf_counter()
         try:
             trace("orchestrator_input", {"system_prompt": build_prompt(q, hist).split("\nCURRENT_DATE_UTC:", 1)[0], "user_message": q, "history": hist, "active_subject_candidates": compact_history(hist).get("active_subject_candidates", [])})
@@ -1201,10 +1239,7 @@ def run_answer_pipeline(
         except Exception as exc:
             orchestration_ms = round((time.perf_counter() - started) * 1000, 1)
             orchestration_failure = _orchestration_failure_details(exc)
-            documentary_orchestration_fallback = (
-                orchestration_failure["error_category"] in {"provider_error", "timeout"}
-                and _looks_like_documentary_fallback(q, hist)
-            )
+            documentary_orchestration_fallback = _looks_like_documentary_fallback(q, hist)
             fallback_strategy = "documentary_retrieval" if documentary_orchestration_fallback else (
                 "conversation" if not _looks_like_documentary_fallback(q, hist) else "legacy_routing"
             )
@@ -1231,7 +1266,105 @@ def run_answer_pipeline(
                 "fallback_strategy": fallback_strategy,
             })
 
-    if orchestration_plan is not None and not orchestration_plan.needs_retrieval:
+    # Explicit mode wins. In auto mode, the planner may explicitly choose the
+    # live Web route. This branch intentionally runs before the local-index
+    # readiness check and before any idx.search call.
+    web_requested = mode_in == "web_live" or (
+        mode_in == "auto" and orchestration_plan is not None and orchestration_plan.intent == "web_search"
+    )
+    if web_requested:
+        web_follow_up = bool(
+            orchestration_plan
+            and orchestration_plan.reuse_previous_subject
+            and orchestration_plan.intent in {"refine_previous_search", "web_search"}
+        )
+        web_query = (orchestration_plan.retrieval_query if orchestration_plan else None) or q
+        if web_follow_up:
+            web_query = resolve_retrieval_query(
+                raw_user_message=q, orchestrator_query=web_query, history=hist,
+            )
+        trace("web_retrieval_input", {
+            "raw_user_message": q, "web_query": web_query,
+            "follow_up_web_search": web_follow_up,
+            "orchestration_intent": orchestration_plan.intent if orchestration_plan else None,
+        })
+        emit_status("search_web", "Recherche sur internet")
+        try:
+            web_text = _with_timeout(
+                web_search_context, web_query, max_chars=WEB_MAX_CHARS,
+                k=WEB_RESULT_K, timeout=WEB_TIMEOUT_SEC,
+            ) or ""
+        except FuturesTimeout:
+            return finalize_result(_result(
+                answer="Recherche web trop longue. Reessaie ou passe en mode local.", sources=[],
+                mode="STRICT(web_live)", ctx_len=0, request_id=request_id, route_mode="web_live",
+                validations={"evidence_mode": "web_live"},
+            ))
+        except Exception:
+            web_text = ""
+
+        web_sources_list = _parse_web_links(web_text)
+        if not web_text.strip():
+            return finalize_result(_result(
+                answer="Je n'ai rien trouve via la recherche web en direct.", sources=[],
+                mode="STRICT(web_live)", ctx_len=0, request_id=request_id, route_mode="web_live",
+                validations={"evidence_mode": "web_live"},
+            ))
+
+        emit_status("analyze_web_sources", "Analyse des sources trouvees")
+        context_for_llm = f"{reply_preamble}{web_text}"
+        try:
+            answer = _generate_answer(
+                q, context_for_llm, history=hist, token_sink=token_sink, progress_sink=emit_status,
+                evidence_mode="web_live",
+            )
+        except FuturesTimeout:
+            raise HTTPException(status_code=504, detail="LLM timeout")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"LLM error: {e}")
+
+        citations_idx = []
+        match = re.search(r"<CITATIONS>\s*\[?([\d,\s]*)\]?\s*</CITATIONS>", answer, flags=re.IGNORECASE)
+        if match:
+            citations_idx = [int(value) for value in re.findall(r"\d+", match.group(1) or "")]
+            answer = re.sub(r"\s*<CITATIONS>.*?</CITATIONS>\s*", " ", answer, flags=re.IGNORECASE).strip()
+
+        claim_review = None
+        faithfulness_result = None
+        if ENABLE_POST_GENERATION_REVIEW and ENABLE_FAITHFULNESS_CHECK:
+            try:
+                evidence_blocks = [{
+                    "text": web_text, "chunk_uid": "web-live-context",
+                    "path": web_sources_list[0]["url"] if web_sources_list else None,
+                }]
+                claim_review = verify_answer_claims(answer, evidence_blocks, cited_source_indices=citations_idx, use_nli=True)
+                faithfulness_result = claim_review.legacy_summary()
+                validations["faithfulness"] = {"performed": True, **faithfulness_result}
+                validations["claim_faithfulness"] = {"performed": True, **claim_review.to_dict()}
+            except Exception:
+                pass
+        sources = [{"path": source["url"], "chunk": -1} for source in web_sources_list]
+        review = PostGenerationReview()
+        if ENABLE_POST_GENERATION_REVIEW:
+            review = _post_generation_review(q, answer, web_text, sources, faithfulness_result, claim_review)
+            validations["post_answer"] = {"performed": True, **review.to_dict()}
+        validations.update({
+            "evidence_mode": "web_live",
+            "orchestration_intent": orchestration_plan.intent if orchestration_plan else None,
+            "orchestration_needs_retrieval": orchestration_plan.needs_retrieval if orchestration_plan else None,
+        })
+        _log_event(request_id, {
+            "event": "ask", "mode_in": mode_in, "mode_out": "STRICT(web_live)",
+            "route_mode": "web_live", "web_query": web_query, "web_links": len(web_sources_list),
+            "local_retrieval_executed": False,
+        })
+        return finalize_result(_result(
+            answer=answer, sources=sources, mode="STRICT(web_live)", ctx_len=len(context_for_llm),
+            review=review.to_dict(), faithfulness_review=claim_review.to_dict() if claim_review else None,
+            request_id=request_id, route_mode="web_live", validations=validations,
+        ))
+
+    if mode_in == "auto" and orchestration_plan is not None and not orchestration_plan.needs_retrieval:
         catalog_probe = None
         if orchestration_plan.intent == "general_question":
             set_stage("catalog_probe")
@@ -1244,10 +1377,10 @@ def run_answer_pipeline(
                 })
         else:
             trace("catalog_probe", {"executed": False, "strong_match": False, "reason": "intent_not_general_question", "timing_ms": 0.0})
-    if orchestration_plan is not None and not orchestration_plan.needs_retrieval:
+    if mode_in == "auto" and orchestration_plan is not None and not orchestration_plan.needs_retrieval:
         conversational = orchestration_plan.response_strategy == "ask_for_missing_information"
         try:
-            ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink,
+            ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink, progress_sink=emit_status,
                                    conversational_mode=conversational, max_tokens=160 if conversational else None)
             return finalize_result(_result(
                 answer=ans, sources=[], request_id=request_id, route_mode="general",
@@ -1274,7 +1407,7 @@ def run_answer_pipeline(
         })
         try:
             ans = _generate_answer(
-                q, reply_preamble, history=hist, token_sink=token_sink,
+                q, reply_preamble, history=hist, token_sink=token_sink, progress_sink=emit_status,
                 conversational_mode=True, max_tokens=160,
             )
             return finalize_result(_result(
@@ -1303,11 +1436,11 @@ def run_answer_pipeline(
     )
     # Compter UNIQUEMENT les messages utilisateur dans l'historique (pas les réponses assistant)
     user_msg_count = len([m for m in hist if m.get("role") == "user"])
-    if is_vague_question and user_msg_count < 2 and orchestration_plan is None:
+    if mode_in == "auto" and is_vague_question and user_msg_count < 2 and orchestration_plan is None:
         # Pas assez de contexte conversationnel pour ancrer la recherche => GENERAL direct
         _log_event(request_id, {"event": "vague_question_fallback", "q": q, "user_msg_count": user_msg_count})
         try:
-            ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink)
+            ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink, progress_sink=emit_status)
             return finalize_result(_result(answer=ans, sources=[], mode="GENERAL(vague-no-history)", ctx_len=len(reply_preamble), request_id=request_id))
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
@@ -1324,7 +1457,7 @@ def run_answer_pipeline(
                 request_id=request_id,
             ))
         try:
-            ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink)
+            ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink, progress_sink=emit_status)
             return finalize_result(_result(answer=ans, sources=[], mode="GENERAL(no-index)", ctx_len=len(reply_preamble), request_id=request_id))
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
@@ -1345,6 +1478,14 @@ def run_answer_pipeline(
         q_eff = resolved_retrieval_query
     trace("retrieval_input", {"raw_user_message": q, "resolved_retrieval_query": resolved_retrieval_query, "follow_up_retrieval": follow_up, "original_query": q, "orchestrator_query": orchestration_plan.retrieval_query if orchestration_plan else None, "q_eff": q_eff, "q_eff_source": "resolved_retrieval_query" if resolved_retrieval_query else ("orchestrator_query" if orchestration_plan else ("condensed_query" if should_condense else "original_query")), "retrieval_queries": [{"type": kind, "query": query} for kind, query in retrieval_queries], "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": orchestration_plan.source_types if orchestration_plan else [], "temporal_constraints": [item.model_dump(mode="json") for item in orchestration_plan.temporal_constraints] if orchestration_plan else [], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
     set_stage("retrieval")
+    if allowed_sources == {"email"}:
+        emit_status("search_emails", "Recherche dans vos e-mails")
+    elif allowed_sources == {"web"}:
+        emit_status("search_indexed_sources", "Recherche dans vos sources indexées")
+    elif allowed_sources and "email" not in allowed_sources:
+        emit_status("search_documents", "Recherche dans vos documents")
+    else:
+        emit_status("search_local_sources", "Recherche dans vos documents et e-mails")
     _log_event(request_id, {"event": "rag_search_start", "q_eff": q_eff, "should_condense": should_condense, "hist_len": len(hist), "orchestrated": orchestration_plan is not None})
 
     retrieval_started = time.perf_counter()
@@ -1363,17 +1504,29 @@ def run_answer_pipeline(
         query_rankings.append((query_kind, rows))
         query_trace.append({"type": query_kind, "query": query_text, "candidate_count": before_filter, "after_constraint_filter": len(rows)})
     prelim = reciprocal_rank_fusion(query_rankings) if len(query_rankings) > 1 else (query_rankings[0][1] if query_rankings else [])
+    emit_status("analyze_results", "Analyse des résultats trouvés")
     before_constraints = sum(item["candidate_count"] for item in query_trace)
     trace("retrieval", {"retrieval_ms": round((time.perf_counter() - retrieval_started) * 1000, 1), "retrieval_queries": query_trace, "idx_search_candidates": before_constraints, "after_constraint_filter": len(prelim), "candidate_fusion": {"fusion_method": "rrf" if len(query_rankings) > 1 else "single_query", "unique_candidates_before_final_pool": len(prelim)}, "initial_candidates": [{"filename": meta.get("file"), "source": meta.get("source"), "score": score, "retrieved_by": meta.get("retrieved_by"), "per_query_rank": meta.get("per_query_rank"), "per_query_score": meta.get("per_query_score"), "fusion_score": meta.get("fusion_score"), "document_metadata": meta.get("document_metadata") or {}} for score, meta in prelim[:20]], "rejected_candidates": rejected_candidates[:20]})
     prelim_hits = len(prelim)
     fused = fuse_contiguous_passages(prelim, gap=FUSE_ADJACENT_GAP)
     blocks = clip_context_blocks(fused, max_chars=MAX_CONTEXT_CHARS, keep=FINAL_K)
+    emit_status("select_passages", "Sélection des passages pertinents")
 
     # Bounded evidence enrichment happens after the stable first retrieval and
     # before evidence_mode/generation. It follows only existing corpus links.
     retrieval_rounds = []
-    if orchestration_plan is not None:
+    if mode_in in {"local", "web_index"}:
+        route_mode = "strict_local"
+    elif orchestration_plan is not None:
         set_stage("iterative_retrieval")
+        def on_retrieval_action(action) -> None:
+            if action.type == "EXPAND":
+                emit_status("expand_document", "Expansion du document")
+            elif action.relation == "attachment":
+                emit_status("inspect_attachment", "Lecture des pièces jointes")
+            else:
+                emit_status("follow_related_source", "Analyse des sources liées")
+
         blocks, retrieval_rounds, iterative_sufficiency = run_iterative_evidence_retrieval(
             candidate_pool=prelim,
             initial_evidence=blocks,
@@ -1382,6 +1535,7 @@ def run_answer_pipeline(
             semantics=orchestration_plan.query_semantics,
             max_rounds=3,
             max_expanded_chunks=4,
+            on_action=on_retrieval_action,
         )
         blocks = clip_context_blocks(blocks, max_chars=MAX_CONTEXT_CHARS, keep=FINAL_K)
         trace("retrieval_rounds", {
@@ -1397,6 +1551,7 @@ def run_answer_pipeline(
 
     # --- NEW: Vérification de cohérence thématique du contexte ---
     context_is_relevant = _check_context_relevance(q, context_local)
+    emit_status("verify_sources", "Vérification des sources")
     evidence_decision = _evaluate_evidence(
         q, blocks, guard_ok=bool(gated_ok), context_is_relevant=context_is_relevant, overlap=overlap,
     )
@@ -1457,10 +1612,12 @@ def run_answer_pipeline(
     }
 
     # --- Choix du mode (règle déterministe actu ⇒ web_live, hors sujet ⇒ general) ---
-    if orchestration_plan is not None:
-        # In this path the plan is the only authority deciding to retrieve.
-        # evidence_mode still determines whether the retrieved blocks are usable.
+    if mode_in in {"local", "web_index"}:
+        # Explicit local/indexed-source modes are never overridden by a plan.
         route_mode = "strict_local"
+    elif orchestration_plan is not None:
+        # In auto mode, the plan is the authority for the source route.
+        route_mode = "web_live" if orchestration_plan.intent == "web_search" else "strict_local"
     elif documentary_orchestration_fallback:
         route_mode = "strict_local"
     elif mode_in in {"local", "web_index", "web_live"}:
@@ -1498,10 +1655,35 @@ def run_answer_pipeline(
     })
 
     # ------ Cache court (intègre le route_mode) ------
-    ck = _cache_key(q, mode_in, route_mode, body.reply_to.content if body.reply_to else None)
-    cached = response_cache.get(ck)
+    rag_context_hash = hashlib.sha256((context_local or "").encode("utf-8")).hexdigest()
+    rag_chunk_uids = [str(meta.get("chunk_uid") or f"{meta.get('document_id')}:{meta.get('chunk_id')}") for _, meta in blocks]
+    history_hash = _stable_hash(hist)
+    cache_conversation_id = chat_id or (body.thread_id or "").strip()
+    reply_to_cache_value = ({
+        "id": str(body.reply_to.id), "role": str(body.reply_to.role), "content": str(body.reply_to.content),
+    } if body.reply_to else None)
+    # The web context is fetched after this point, so it cannot safely share a
+    # final-answer cache entry before its actual context is known.
+    cache_enabled = bool(cache_conversation_id) and route_mode != "web_live"
+    ck = _cache_key(
+        conversation_id=cache_conversation_id, q=q, mode_in=mode_in, route_mode=route_mode,
+        reply_to=reply_to_cache_value, history_hash=history_hash, rag_context_hash=rag_context_hash,
+    ) if cache_enabled else None
+    cached = response_cache.get(ck) if ck else None
+    cache_diagnostic = {
+        "event": "response_cache", "cache_key_hash": ck, "cache_enabled": cache_enabled, "cache_hit": bool(cached),
+        "conversation_id": cache_conversation_id or None, "chat_id": chat_id or None,
+        "history_hash": history_hash, "rag_context_hash": rag_context_hash, "rag_chunk_uids": rag_chunk_uids,
+    }
+    _log_event(request_id, cache_diagnostic)
+    trace("response_cache", cache_diagnostic)
     if cached:
         cached["request_id"] = request_id
+        _log_event(request_id, {
+            "event": "generation_result", "provider_call_effective": False,
+            "reason": "response_cache_hit",
+            "response_hash": hashlib.sha256(str(cached.get("answer") or "").encode("utf-8")).hexdigest(),
+        })
         return finalize_result(_result(**cached, route_mode=route_mode))
 
     # -------- Verrou post-maths + RESPECT strict du route_mode --------
@@ -1529,6 +1711,7 @@ def run_answer_pipeline(
 
     # A) web_live
     if route_mode == "web_live":
+        emit_status("search_web", "Recherche sur internet")
         try:
             web_text = _with_timeout(
                 web_search_context,
@@ -1539,15 +1722,20 @@ def run_answer_pipeline(
             ) or ""
         except FuturesTimeout:
             out = {"answer": "Recherche web trop longue. Réessaie ou passe en mode local.", "sources": [], "mode": "STRICT(web_live)", "ctx_len": 0}
-            response_cache.set(ck, out)
+            if cache_enabled:
+                response_cache.set(ck, out)
             return finalize_result(_result(**out, request_id=request_id, route_mode=route_mode, validations=validations))
         except Exception:
             web_text = ""
 
         web_sources_list = _parse_web_links(web_text)
+        emit_status("analyze_web_sources", "Analyse des sources trouvées")
+        if len(web_sources_list) > 1:
+            emit_status("cross_reference", "Croisement des informations")
         if not web_text.strip():
             out = {"answer": "Je n’ai rien trouvé via la **recherche web en direct**.", "sources": [], "mode": "STRICT(web_live)", "ctx_len": 0}
-            response_cache.set(ck, out)
+            if cache_enabled:
+                response_cache.set(ck, out)
             return finalize_result(_result(**out, request_id=request_id, route_mode=route_mode, validations=validations))
 
         context_for_llm = f"{reply_preamble}{web_text}"
@@ -1560,13 +1748,15 @@ def run_answer_pipeline(
         if not blocks:
             msg = "Je n’ai rien trouvé de pertinent dans les **sources autorisées**."
             out = {"answer": msg, "sources": [], "mode": "STRICT(local)", "ctx_len": 0}
-            response_cache.set(ck, out)
+            if cache_enabled:
+                response_cache.set(ck, out)
             return finalize_result(_result(**out, request_id=request_id, route_mode=route_mode, validations=validations))
 
         if evidence_mode == "none":
             msg = "J’ai parcouru tes **sources**, mais rien de suffisamment pertinent."
             out = {"answer": msg, "sources": [], "mode": "STRICT(local)", "ctx_len": len(context_local)}
-            response_cache.set(ck, out)
+            if cache_enabled:
+                response_cache.set(ck, out)
             return finalize_result(_result(**out, request_id=request_id, route_mode=route_mode, validations=validations))
 
         context_for_llm = reply_preamble + context_local
@@ -1582,11 +1772,11 @@ def run_answer_pipeline(
     # ===================== Appel LLM principal =====================
     try:
         generation_started = time.perf_counter()
-        trace("generation_input", {"generation_mode": mode_label, "question": q, "context_length": len(context_for_llm or ""), "context": context_for_llm, "provider": _RUNTIME_SETTINGS.generation.provider, "model": _RUNTIME_SETTINGS.generation.model, "reasoning_effort": _RUNTIME_SETTINGS.generation.reasoning_effort, "system_prompt": "constructed by rag_core.llm from generation mode and evidence mode", "evidence_mode": evidence_mode if use_strict else "none"})
+        trace("generation_input", {"generation_mode": mode_label, "question": q, "context_length": len(context_for_llm or ""), "context": context_for_llm, "provider": _RUNTIME_SETTINGS.generation.provider, "model": _RUNTIME_SETTINGS.generation.model, "reasoning_effort": _RUNTIME_SETTINGS.generation.reasoning_effort, "configured_temperature": _RUNTIME_SETTINGS.generation.strict_temperature if use_strict else _RUNTIME_SETTINGS.generation.temperature, "configured_top_p": _RUNTIME_SETTINGS.generation.strict_top_p if use_strict else _RUNTIME_SETTINGS.generation.top_p, "rag_context_hash": rag_context_hash, "rag_chunk_uids": rag_chunk_uids, "system_prompt": "constructed by rag_core.llm from generation mode and evidence mode", "evidence_mode": evidence_mode if use_strict else "none"})
         set_stage("generation")
         answer = _generate_answer(
-            q, context_for_llm, history=hist, token_sink=token_sink,
-            evidence_mode=evidence_mode if use_strict else "none",
+            q, context_for_llm, history=hist, token_sink=token_sink, progress_sink=emit_status,
+            evidence_mode="web_live" if route_mode == "web_live" else (evidence_mode if use_strict else "none"),
         )
         trace("generation", {"generation_total_ms": round((time.perf_counter() - generation_started) * 1000, 1), "first_token_ms": None if token_sink is None else None})
         # Parse des citations éventuelles
@@ -1718,7 +1908,11 @@ def run_answer_pipeline(
         "review": review.to_dict(),
         "faithfulness_review": claim_review.to_dict() if claim_review else None,
     }
-    if not body.reply_to:
+    _log_event(request_id, {
+        "event": "generation_result", "provider_call_effective": True,
+        "response_hash": hashlib.sha256(answer.encode("utf-8")).hexdigest(),
+    })
+    if cache_enabled and not body.reply_to:
         response_cache.set(ck, out)
     return finalize_result(_result(
         **out,

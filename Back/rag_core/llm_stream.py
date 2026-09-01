@@ -267,6 +267,14 @@ def ask_mistral_with_context_stream(
             ]
 
     messages = [{"role": "system", "content": " ".join(rules)}]
+    if evidence_mode == "web_live" and context_text and context_text.strip():
+        messages[0]["content"] += (
+            " Le CONTEXTE contient des resultats de recherche Web en direct, pas des documents locaux. "
+            "Fonde la reponse uniquement sur ces sources Web et cite les indices effectivement utilises."
+            if is_fr else
+            " The CONTEXT contains live Web-search results, not local documents. "
+            "Base the answer only on those Web sources and cite the indices actually used."
+        )
     if evidence_mode in {"direct", "related"} and context_text and context_text.strip():
         if is_fr:
             messages[0]["content"] += (

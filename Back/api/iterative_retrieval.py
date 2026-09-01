@@ -7,8 +7,12 @@ corpus.  It is intentionally a finite state machine, not an agent loop.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 import re
-from typing import Any, Literal
+from typing import Any, Callable, Literal
+
+
+logger = logging.getLogger(__name__)
 
 
 ActionType = Literal["SEARCH", "EXPAND", "FOLLOW", "ANSWER"]
@@ -125,6 +129,41 @@ def _is_header_only(meta: dict[str, Any]) -> bool:
 
 def _rows_for_document(corpus: list[dict[str, Any]], document_id: str) -> list[dict[str, Any]]:
     return [row for row in corpus if str(row.get("document_id")) == document_id]
+
+
+def _row_by_uid(corpus: list[dict[str, Any]], chunk_uid: str | None) -> dict[str, Any] | None:
+    """Resolve an indexed neighbour without relying on search or row order."""
+    if not chunk_uid:
+        return None
+    return next((row for row in corpus if str(row.get("chunk_uid")) == str(chunk_uid)), None)
+
+
+def _block_types(meta: dict[str, Any]) -> set[str]:
+    return {
+        str(block.get("block_type")) for block in (meta.get("blocks") or [])
+        if isinstance(block, dict)
+    }
+
+
+def _is_email_body(meta: dict[str, Any]) -> bool:
+    return meta.get("source") == "email" and "email_body" in _block_types(meta)
+
+
+def _requires_email_content(query: str, semantics: QuerySemantics) -> bool:
+    """Whether an email header must be treated as a lead rather than evidence.
+
+    This intentionally models the request category, not any particular subject
+    line or email. Decision/state questions are content questions too.
+    """
+    if semantics in {"decision", "current_state"}:
+        return True
+    text = query.casefold()
+    mentions_email = bool(re.search(r"\b(?:mail|email|e-mail|courriel)\b", text))
+    asks_content = any(phrase in text for phrase in (
+        "que dit", "qu'est-ce qu", "qu’ est-ce qu", "contenu", "contient",
+        "regarde", "etudie", "étudie", "lire", "lis ", "lecture",
+    ))
+    return mentions_email and asks_content
 
 
 def _attachment_ids(meta: dict[str, Any]) -> list[str]:
@@ -382,8 +421,12 @@ def _inspect(
     # document's answer-bearing content.
     expansion_gaps = [gap for gap in gaps if gap.available_actions and gap.available_actions[0].type == "EXPAND"]
     answer_available = _has_answer_bearing_content(items, semantics, query)
-    if expansion_gaps and semantics in {"decision", "current_state", "chronology"} and (
+    selected_header_requires_body = any(
+        gap.gap_type == "email_header_only" for gap in expansion_gaps
+    ) and _requires_email_content(query, semantics)
+    if expansion_gaps and (semantics in {"decision", "current_state", "chronology"} or selected_header_requires_body) and (
         not answer_available
+        or selected_header_requires_body
         or expansion_gaps[0].priority_class in {"potential_newer_state_resolution", "recent_directly_related", "temporal_coverage"}
     ):
         return EvidenceSufficiency(False, "semantic_question_has_unresolved_selected_evidence_gap", expansion_gaps[0].available_actions[0])
@@ -403,6 +446,55 @@ def _execute_action(
 ) -> list[tuple[float, dict[str, Any]]]:
     if action.type == "EXPAND" and action.target_document_id and action.target_document_id not in evidence.expanded_documents:
         evidence.expanded_documents.add(action.target_document_id)
+        origin = pool.by_document_id(action.target_document_id) or next(
+            (meta for _, meta in evidence.items if str(meta.get("document_id")) == action.target_document_id), None,
+        )
+        # Email expansion is deliberately structural: start at the selected
+        # header's next_chunk_uid and follow adjacent email_body chunks.  This
+        # cannot drift to a generic vector-search result from another email.
+        if origin and _is_header_only(origin):
+            logger.info("rag_email_header_detected document_id=%s chunk_uid=%s next_chunk_uid=%s",
+                        action.target_document_id, origin.get("chunk_uid"), origin.get("next_chunk_uid"))
+            rows: list[dict[str, Any]] = []
+            current = _row_by_uid(corpus, origin.get("next_chunk_uid"))
+            while current and len(rows) < max_expanded_chunks:
+                if str(current.get("chunk_uid")) in evidence.seen_chunk_uids:
+                    current = _row_by_uid(corpus, current.get("next_chunk_uid"))
+                    continue
+                if str(current.get("document_id")) != action.target_document_id or not _is_email_body(current):
+                    break
+                rows.append(current)
+                current = _row_by_uid(corpus, current.get("next_chunk_uid"))
+            # Backward-compatible structural fallback for an already-loaded
+            # legacy corpus lacking neighbour UIDs: only immediate later
+            # email_body rows from this very document are eligible.
+            if not rows and not origin.get("next_chunk_uid"):
+                origin_order = int(origin.get("order") or origin.get("chunk_id") or 0)
+                candidates = sorted(
+                    _rows_for_document(corpus, action.target_document_id),
+                    key=lambda row: int(row.get("order") or row.get("chunk_id") or 0),
+                )
+                rows = [
+                    row for row in candidates
+                    if int(row.get("order") or row.get("chunk_id") or 0) > origin_order
+                    and str(row.get("chunk_uid")) not in evidence.seen_chunk_uids
+                    and _is_email_body(row)
+                ][:max_expanded_chunks]
+            if rows:
+                logger.info("rag_email_expand_added document_id=%s chunk_uids=%s body_found=true",
+                            action.target_document_id, [row.get("chunk_uid") for row in rows])
+                # Keep structurally required content inside the final context
+                # budget beside its retrieved header, rather than demoting it
+                # behind unrelated search hits.
+                origin_score = next((
+                    score for score, meta in evidence.items
+                    if str(meta.get("chunk_uid")) == str(origin.get("chunk_uid"))
+                ), 0.0)
+                return [(float(origin_score) - (index + 1) * 1e-6, row) for index, row in enumerate(rows)]
+            logger.info("rag_email_expand_failed document_id=%s reason=%s",
+                        action.target_document_id,
+                        "next_chunk_uid_missing_or_not_email_body" if origin.get("next_chunk_uid") else "header_has_no_next_chunk_uid")
+            return []
         rows = [row for row in _rows_for_document(corpus, action.target_document_id) if str(row.get("chunk_uid")) not in evidence.seen_chunk_uids]
         rows.sort(key=lambda row: int(row.get("order") or 0))
         return [(0.0, row) for row in rows[:max_expanded_chunks]]
@@ -469,6 +561,7 @@ def run_iterative_evidence_retrieval(
     *, candidate_pool: list[tuple[float, dict[str, Any]]], initial_evidence: list[tuple[float, dict[str, Any]]], corpus: list[dict[str, Any]],
     query: str, semantics: QuerySemantics = "general_document_question", max_rounds: int = 3,
     max_expanded_chunks: int = 4,
+    on_action: Callable[[RetrievalAction], None] | None = None,
 ) -> tuple[list[tuple[float, dict[str, Any]]], list[dict[str, Any]], EvidenceSufficiency]:
     """Enrich evidence using only valid, unseen, structured relations."""
     pool = CandidatePool(tuple(candidate_pool))
@@ -496,6 +589,8 @@ def run_iterative_evidence_retrieval(
     while not decision.sufficient and len(rounds) < max_rounds and decision.next_action:
         action = decision.next_action
         selected_fields = _lead_trace_fields(action, gaps, leads)
+        if on_action:
+            on_action(action)
         added = evidence.add(_execute_action(action, evidence, pool, corpus, max_expanded_chunks=max_expanded_chunks))
         round_data = {
             "round": len(rounds) + 1, "action": action.__dict__,

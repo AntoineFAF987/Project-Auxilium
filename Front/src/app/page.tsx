@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import RequireAuth from "./RequireAuth";
 import { useAuth } from "./useAuth";
@@ -698,6 +698,10 @@ export default function Page() {
   const [chatId, setChatId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [thinking, setThinking] = useState<{ messageId: string; mode: SourceMode; leaving: boolean; statuses: { stage: string; label: string }[] } | null>(null);
+  const thinkingDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const thinkingDismissRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingThinkingStatusRef = useRef<{ stage: string; label: string }[]>([]);
   const [showScrollDown, setShowScrollDown] = useState(false);
 
   useEffect(() => {
@@ -1450,7 +1454,27 @@ export default function Page() {
     return msgs.slice(start, end).map(({ role, content }) => ({ role, content }));
   }
 
+  function finishThinking(immediately = false) {
+    if (thinkingDelayRef.current) {
+      clearTimeout(thinkingDelayRef.current);
+      thinkingDelayRef.current = null;
+    }
+    if (thinkingDismissRef.current) clearTimeout(thinkingDismissRef.current);
+    if (immediately) {
+      setThinking(null);
+      return;
+    }
+    setThinking((current) => current ? { ...current, leaving: true } : null);
+    thinkingDismissRef.current = setTimeout(() => setThinking(null), 150);
+  }
+
+  useEffect(() => () => {
+    if (thinkingDelayRef.current) clearTimeout(thinkingDelayRef.current);
+    if (thinkingDismissRef.current) clearTimeout(thinkingDismissRef.current);
+  }, []);
+
   function stopThinking() {
+    finishThinking(true);
     if (abortRef.current) {
       abortRef.current.abort(); // annule immédiatement le fetch
     }
@@ -1478,9 +1502,14 @@ export default function Page() {
     setInput("");
     setReplyTarget(null);
     setLoading(true);
+    thinkingDelayRef.current = setTimeout(() => {
+      setThinking({ messageId: newUserMsg.id, mode: sourceMode, leaving: false, statuses: pendingThinkingStatusRef.current });
+      thinkingDelayRef.current = null;
+    }, 140);
 
     const controller = new AbortController();
     abortRef.current = controller;
+    pendingThinkingStatusRef.current = [];
 
     let tempTid: string | null = null;
     try {
@@ -1495,6 +1524,7 @@ export default function Page() {
           } as Message,
         ];
         setMessages(next);
+        finishThinking(true);
         setLoading(false);
         return;
       }
@@ -1566,6 +1596,7 @@ export default function Page() {
           } as Message,
         ];
   setMessages(next);
+        finishThinking(true);
         // Nettoyer l'entrée optimiste si la requête a échoué
         if (createdOptimistic) {
           setChats((prev) => prev.filter((c) => c.id !== tid));
@@ -1590,9 +1621,10 @@ export default function Page() {
   let accumulatedContent = "";
       let finalSources: Source[] = [];
       let finalMode: string | undefined = undefined;
-      let finalCaveat: PostGenerationReview | undefined = undefined;
+  let finalCaveat: PostGenerationReview | undefined = undefined;
   let finalChatId: string | null = null;
       let sseBuffer = "";
+      let hasReceivedContent = false;
 
       // Ajouter le message temporaire
       setMessages([...nextUser, tempAssistant]);
@@ -1606,13 +1638,25 @@ export default function Page() {
         sseBuffer = frames.pop() ?? "";
 
         for (const frame of frames) {
-          const line = frame.split(/\r?\n/).find((item) => item.startsWith('data: '));
+          const lines = frame.split(/\r?\n/);
+          const eventName = lines.find((item) => item.startsWith('event: '))?.slice(7).trim() ?? "message";
+          const line = lines.find((item) => item.startsWith('data: '));
           if (!line) continue;
           const data = line.slice(6);
           try {
             const parsed = JSON.parse(data);
             
-            if (parsed.type === 'content') {
+            if ((eventName === 'status' || parsed.type === 'status') && typeof parsed.stage === 'string' && typeof parsed.label === 'string') {
+              const status = { stage: parsed.stage, label: parsed.label };
+              pendingThinkingStatusRef.current = [...pendingThinkingStatusRef.current, status];
+              if (!hasReceivedContent) {
+                setThinking((current) => current ? { ...current, statuses: [...current.statuses, status] } : current);
+              }
+            } else if (parsed.type === 'content') {
+              if (!hasReceivedContent) {
+                hasReceivedContent = true;
+                finishThinking();
+              }
               accumulatedContent += parsed.content;
               
               // Mettre à jour le message en temps réel
@@ -1645,6 +1689,7 @@ export default function Page() {
               }
               if (parsed.chat_id) finalChatId = String(parsed.chat_id);
             } else if (parsed.type === 'error') {
+              finishThinking(true);
               // Gestion des erreurs spécifiques
               const requestId = typeof parsed.request_id === "string" ? parsed.request_id : "";
               const errorMsg = `Une erreur est survenue pendant la génération.${requestId ? ` Référence : ${requestId}` : ""}`;
@@ -1706,6 +1751,7 @@ export default function Page() {
       }
 
     } catch (e: any) {
+      finishThinking(true);
       if (e?.name === "AbortError") {
         // Annulation demandée par l’utilisateur : message court
         const next = [
@@ -1727,6 +1773,7 @@ export default function Page() {
         setChats((prev) => prev.filter((c) => c.id !== (tempTid ?? "")));
       }
     } finally {
+      finishThinking(true);
       setLoading(false);
       abortRef.current = null; // nettoyage
       // Ancrer en bas sans animation à la fin
@@ -2660,6 +2707,8 @@ export default function Page() {
                     const isLast = i === messages.length - 1;
                     const isHistoricalAnswer = !isUser && historicalMessageIds.has(m.id);
 
+                    if (!isUser && loading && isLast && (m.content?.length ?? 0) === 0) return null;
+
                     const renderSource = (s: Source, key: number) => {
                       const isWeb = s.type === "web" || /^https?:\/\//i.test(s.path || "");
                       if (isWeb) {
@@ -2733,6 +2782,7 @@ export default function Page() {
                     };
 
                     return (
+                      <Fragment key={m.id || i}>
                       <div key={m.id || i} className={`group ${isUser ? "" : "assistant-message"} flex ${isUser ? "justify-end" : "justify-start"} relative`}>
                         <div className={isUser ? "max-w-[75%]" : "w-full"}>
                           {/* Encart "en réponse à ..." */}
@@ -2767,7 +2817,7 @@ export default function Page() {
                                   color: "var(--text)"
                                 }}>
                                 {loading && i === messages.length - 1 && m.role === "assistant" && (m.content?.length ?? 0) === 0 ? (
-                                  <ThinkingIndicator />
+                                  null
                                 ) : (
                                   <MathRenderer text={m.content} />
                                 )}
@@ -2926,6 +2976,12 @@ export default function Page() {
                           </div>
                         </div>
                       </div>
+                      {isUser && thinking?.messageId === m.id && (
+                        <div className="assistant-message flex justify-start">
+                          <ThinkingIndicator mode={thinking.mode} statuses={thinking.statuses} leaving={thinking.leaving} />
+                        </div>
+                      )}
+                      </Fragment>
                     );
                   })}
                   <div ref={bottomRef} />

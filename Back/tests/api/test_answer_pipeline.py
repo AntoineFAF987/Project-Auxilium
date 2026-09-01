@@ -54,7 +54,7 @@ from rag_core.faithfulness import (
     ClaimVerification,
     FaithfulnessReview,
 )
-from api.orchestration import OrchestrationPlan
+from api.orchestration import OrchestrationPlan, OrchestrationPlanOutputError
 
 
 class _Cache:
@@ -380,6 +380,20 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(result.mode, "GENERAL(no-context)")
         self.assertEqual(self.index.search_calls, [])
 
+    def test_explicit_general_mode_skips_orchestrator_and_all_retrieval(self):
+        from api import answer_pipeline as pipeline
+
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", side_effect=AssertionError("orchestrator must not run")),
+            patch.object(pipeline, "web_search_context", side_effect=AssertionError("Web must not run")),
+        ):
+            result = run_answer_pipeline(AskIn(q="Explique le principe general", source_mode="general"), _request())
+
+        self.assertEqual(result.mode, "GENERAL(no-context)")
+        self.assertEqual(self.index.search_calls, [])
+
     def test_auto_mode_uses_shared_routing(self):
         body = AskIn(
             q="Quelle est la durée de conservation de la politique ?",
@@ -554,7 +568,30 @@ class AnswerPipelineTests(unittest.TestCase):
             result = run_answer_pipeline(AskIn(q="Question locale", source_mode="local"), _request())
 
         self.assertEqual(result.mode, "STRICT(local)")
+        self.assertGreaterEqual(len(self.index.search_calls), 1)
+
+    def test_invalid_orchestrator_json_keeps_explicit_email_content_request_in_retrieval(self):
+        from api import answer_pipeline as pipeline
+        from api.response_trace import ResponseTraceStore
+
+        trace_store = ResponseTraceStore()
+        invalid_json = OrchestrationPlanOutputError(
+            raw_model_output='{"intent":"document_question","retrieval_query":"unterminated',
+            validation_error_details=[{"message": "Unterminated string"}],
+        )
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "RESPONSE_TRACE_ENABLED", True),
+            patch.object(pipeline, "RESPONSE_TRACES", trace_store),
+            patch.object(pipeline, "_run_orchestration", side_effect=invalid_json),
+        ):
+            result = run_answer_pipeline(AskIn(q="Pourquoi tu n'étudies pas le contenu du mail ?", source_mode="local"), _request())
+
+        trace = trace_store.get(result.request_id)["stages"]["orchestration"]
         self.assertEqual(len(self.index.search_calls), 1)
+        self.assertEqual(trace["error_category"], "model_output_validation_error")
+        self.assertEqual(trace["fallback_strategy"], "documentary_retrieval")
 
     def test_provider_failure_preserves_documentary_retrieval_and_trace_details(self):
         from api import answer_pipeline as pipeline
@@ -691,6 +728,72 @@ class AnswerPipelineTests(unittest.TestCase):
             [{"path": "https://example.test/news", "chunk": -1}],
         )
         self.assertTrue(result.validations["faithfulness"]["faithful"])
+
+    def test_explicit_web_mode_bypasses_orchestrated_local_retrieval(self):
+        from api import answer_pipeline as pipeline
+
+        local_plan = OrchestrationPlan(
+            intent="document_question", needs_retrieval=True,
+            retrieval_query="Los Angeles or San Francisco", response_strategy="answer",
+        )
+        web_context = "[WEB] Travel source\nhttps://example.test/travel\nComparison."
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=local_plan),
+            patch.object(pipeline, "_with_timeout", return_value=web_context),
+        ):
+            result = run_answer_pipeline(AskIn(q="Los Angeles ou San Francisco ?", source_mode="web_live"), _request())
+
+        self.assertEqual(result.mode, "STRICT(web_live)")
+        self.assertEqual(self.index.search_calls, [])
+        self.assertEqual(result.sources, [{"path": "https://example.test/travel", "chunk": -1}])
+
+    def test_auto_web_followup_uses_the_active_subject_not_source_instruction(self):
+        from api import answer_pipeline as pipeline
+
+        plan = OrchestrationPlan(
+            intent="web_search", needs_retrieval=True,
+            retrieval_query="Los Angeles vs San Francisco for a stay in the United States",
+            use_history=True, reuse_previous_subject=True, response_strategy="answer",
+        )
+        web_context = "[WEB] Travel source\nhttps://example.test/travel\nComparison."
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+            patch.object(pipeline, "_with_timeout", return_value=web_context) as timeout_call,
+        ):
+            result = run_answer_pipeline(AskIn(
+                q="Je veux que tu fasses une recherche web", source_mode="auto",
+                history=[
+                    {"role": "user", "content": "Tu conseilles Los Angeles ou San Francisco pour un sejour aux States ?"},
+                    {"role": "assistant", "content": "Je peux comparer les deux villes."},
+                ],
+            ), _request())
+
+        self.assertEqual(result.mode, "STRICT(web_live)")
+        self.assertEqual(self.index.search_calls, [])
+        self.assertIn("Los Angeles vs San Francisco", timeout_call.call_args.args[1])
+        self.assertNotEqual(timeout_call.call_args.args[1], "Je veux que tu fasses une recherche web")
+
+    def test_explicit_local_mode_stays_local_when_orchestrator_selects_web(self):
+        from api import answer_pipeline as pipeline
+
+        web_plan = OrchestrationPlan(
+            intent="web_search", needs_retrieval=True,
+            retrieval_query="Los Angeles vs San Francisco", response_strategy="answer",
+        )
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=web_plan),
+            patch.object(pipeline, "web_search_context", side_effect=AssertionError("Web must not run in local mode")),
+        ):
+            result = run_answer_pipeline(AskIn(q="Los Angeles ou San Francisco ?", source_mode="local"), _request())
+
+        self.assertEqual(result.mode, "STRICT(local)")
+        self.assertGreaterEqual(len(self.index.search_calls), 1)
 
     def test_faithfulness_review_preserves_draft_and_adds_inference_caveat(self):
         calls = {"strict": 0}
@@ -1278,6 +1381,40 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(llm.call_count, 2)
         self.assertFalse(second.validation_performed)
 
+    def test_response_cache_never_crosses_conversations_and_keys_the_used_history(self):
+        from api import answer_pipeline as pipeline
+
+        generated = Mock(side_effect=["answer-a", "answer-b", "answer-c", "history-one", "history-two"])
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": False})),
+            patch.object(pipeline, "_generate_answer", side_effect=generated),
+        ):
+            # Identical question and RAG context in three chats: no cross-chat reuse.
+            answers = [
+                run_answer_pipeline(AskIn(q="Question identique", source_mode="local", thread_id=chat_id), _request()).answer
+                for chat_id in ("chat-a", "chat-b", "chat-c")
+            ]
+            self.assertEqual(answers, ["answer-a", "answer-b", "answer-c"])
+            self.assertEqual(generated.call_count, 3)
+
+            # The same chat can reuse only the exact history/context scope.
+            first = run_answer_pipeline(AskIn(
+                q="Question avec historique", source_mode="local", thread_id="chat-history",
+                history=[{"role": "user", "content": "Contexte A"}],
+            ), _request())
+            changed_history = run_answer_pipeline(AskIn(
+                q="Question avec historique", source_mode="local", thread_id="chat-history",
+                history=[{"role": "user", "content": "Contexte B"}],
+            ), _request())
+            exact_repeat = run_answer_pipeline(AskIn(
+                q="Question avec historique", source_mode="local", thread_id="chat-history",
+                history=[{"role": "user", "content": "Contexte A"}],
+            ), _request())
+
+        self.assertEqual((first.answer, changed_history.answer, exact_repeat.answer), ("history-one", "history-two", "history-one"))
+        self.assertEqual(generated.call_count, 5)
+
 
 class TransportParityTests(unittest.TestCase):
     @staticmethod
@@ -1296,7 +1433,7 @@ class TransportParityTests(unittest.TestCase):
             faithfulness_review=None,
         )
 
-        def pipeline(_body, _request, *, token_sink=None):
+        def pipeline(_body, _request, *, token_sink=None, status_sink=None):
             token_sink("Réponse streamée ")
             token_sink("sans post-vérification.")
             return result
@@ -1313,6 +1450,34 @@ class TransportParityTests(unittest.TestCase):
         self.assertNotIn("event: caveat", stream)
         self.assertIsNone(events[-1]["faithfulness_review"])
         self.assertIsNone(events[-1]["review"]["caveat_type"])
+
+    def test_sse_emits_public_pipeline_status_before_streamed_content(self):
+        from api import routes_ask
+
+        result = AnswerPipelineResult(answer="Réponse.", review=PostGenerationReview())
+
+        def pipeline(_body, _request, *, token_sink=None, status_sink=None):
+            for stage, label in [
+                ("analyze_request", "Analyse de la demande"),
+                ("identify_response_mode", "Identification du mode de réponse"),
+                ("search_documents", "Recherche dans vos documents"),
+                ("analyze_results", "Analyse des résultats trouvés"),
+                ("prepare_response", "Préparation de la réponse"),
+            ]:
+                status_sink(stage, label)
+            token_sink("Bonjour")
+            return result
+
+        with patch.object(routes_ask, "run_answer_pipeline", side_effect=pipeline):
+            response = asyncio.run(routes_ask.ask_stream(AskIn(q="Question"), _request("/ask/stream")))
+            stream = asyncio.run(self._collect(response))
+
+        frames = [frame for frame in stream.split("\n\n") if frame]
+        status_frames = [frame for frame in frames if "event: status" in frame]
+        content_index = next(index for index, frame in enumerate(frames) if '"type": "content"' in frame)
+        self.assertEqual(len(status_frames), 5)
+        self.assertLess(max(frames.index(frame) for frame in status_frames), content_index)
+        self.assertIn('"stage": "prepare_response"', status_frames[-1])
 
     def test_json_and_sse_reconstruct_the_same_validated_answer(self):
         from api import routes_ask
@@ -1362,7 +1527,7 @@ class TransportParityTests(unittest.TestCase):
     def test_sse_exception_after_response_start_is_safe_and_logged(self):
         from api import routes_ask
 
-        def pipeline(_body, _request, *, token_sink=None):
+        def pipeline(_body, _request, *, token_sink=None, status_sink=None):
             token_sink("Avant erreur")
             raise RuntimeError("secret backend detail")
 
@@ -1438,7 +1603,7 @@ class TransportParityTests(unittest.TestCase):
             ),
         )
 
-        def pipeline(_body, _request, *, token_sink=None):
+        def pipeline(_body, _request, *, token_sink=None, status_sink=None):
             self.assertIsNotNone(token_sink)
             token_sink("Réponse locale fiable, ")
             token_sink("immédiatement diffusée.")
@@ -1470,7 +1635,7 @@ class TransportParityTests(unittest.TestCase):
 
         result = AnswerPipelineResult(answer="Réponse fiable.", review=PostGenerationReview())
 
-        def pipeline(_body, _request, *, token_sink=None):
+        def pipeline(_body, _request, *, token_sink=None, status_sink=None):
             token_sink("Réponse ")
             token_sink("fiable.")
             return result
@@ -1492,7 +1657,7 @@ class TransportParityTests(unittest.TestCase):
             review=PostGenerationReview(),
         )
 
-        def pipeline(_body, _request, *, token_sink=None):
+        def pipeline(_body, _request, *, token_sink=None, status_sink=None):
             # Aucun appel au sink : les contrôles amont ont arrêté le pipeline.
             return result
 
