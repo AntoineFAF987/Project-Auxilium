@@ -1,6 +1,32 @@
 /* ===== Tailwind v4 ===== */
 @import "tailwindcss";
 
+.llm-temperature-range {
+  appearance: none;
+  height: 4px;
+  border-radius: 9999px;
+  outline: none;
+}
+
+.llm-temperature-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--surface);
+  border-radius: 9999px;
+  background: var(--primary);
+  box-shadow: 0 1px 3px color-mix(in oklab, var(--text) 22%, transparent);
+}
+
+.llm-temperature-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--surface);
+  border-radius: 9999px;
+  background: var(--primary);
+  box-shadow: 0 1px 3px color-mix(in oklab, var(--text) 22%, transparent);
+}
+
 /* =====================================================================
    Variables de thème (par défaut + 3 thèmes) + rôles (sidebar, bulles)
    ===================================================================== */
@@ -266,9 +292,14 @@ html, body, aside, [class*="overflow-y-auto"], [class*="overflow-x-auto"] {
    ===================================================================== */
 .chat-title-viewport {
   flex: 1 1 auto;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
+}
+
+.chat-title-viewport[data-overflow="true"] {
   -webkit-mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 26px), transparent 100%);
   mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 26px), transparent 100%);
 }
@@ -475,18 +506,88 @@ html, body, aside, [class*="overflow-y-auto"], [class*="overflow-x-auto"] {
   animation: aux-thinking-glow 2s ease-in-out infinite;
 }
 
+/* Variante "Contour lumineux" : aucun changement de boîte sur la bulle. */
+.aux-thinking-style-option--active {
+  border-color: color-mix(in oklab, var(--primary) 58%, var(--border));
+  background: color-mix(in oklab, var(--primary) 10%, transparent);
+}
+
+.aux-user-bubble--thinking {
+  position: relative;
+  isolation: isolate;
+}
+
+.aux-user-bubble--thinking::before,
+.aux-user-bubble--thinking::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: inherit;
+  opacity: 0;
+  transition: opacity 180ms ease-out;
+}
+
+.aux-user-bubble--thinking::after {
+  /* Diffusion ambiante, sans trait ni contour visible. */
+  inset: 0;
+  box-shadow:
+    0 0 11px 2px color-mix(in oklab, var(--primary) 13%, transparent),
+    0 0 25px 4px color-mix(in oklab, var(--primary) 6%, transparent);
+  opacity: .9;
+}
+
+.aux-user-bubble--thinking::before {
+  /* Couronne située hors de la bulle : le masque enlève entièrement son centre. */
+  inset: -11px;
+  box-sizing: border-box;
+  padding: 9px;
+  border-radius: calc(1rem + 11px);
+  background: conic-gradient(
+    from var(--aux-user-bubble-outline-angle),
+    transparent 0deg 276deg,
+    color-mix(in oklab, var(--primary) 10%, transparent) 288deg,
+    color-mix(in oklab, var(--primary) 60%, white 8%) 318deg,
+    color-mix(in oklab, var(--primary) 18%, transparent) 348deg,
+    transparent 360deg
+  );
+  filter: blur(7px);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: .82;
+  animation: aux-user-bubble-outline 2.5s linear infinite;
+}
+
+.aux-user-bubble--thinking-leaving::before,
+.aux-user-bubble--thinking-leaving::after {
+  opacity: 0;
+  animation: none;
+}
+
 @keyframes aux-thinking-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes aux-thinking-leave { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(-2px); } }
 @keyframes aux-thinking-sparkle { 0%, 100% { opacity: .64; transform: scale(.95); } 50% { opacity: 1; transform: scale(1.05); } }
 @keyframes aux-thinking-stage { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes aux-thinking-glow { from { transform: translateX(-150%); opacity: .25; } 50% { opacity: .7; } to { transform: translateX(350%); opacity: .25; } }
+@property --aux-user-bubble-outline-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+@keyframes aux-user-bubble-outline { to { --aux-user-bubble-outline-angle: 1turn; } }
 
 @media (prefers-reduced-motion: reduce) {
   .aux-thinking-indicator,
   .aux-thinking-indicator--leaving,
   .aux-thinking-sparkle,
   .aux-thinking-stage,
-  .aux-thinking-line span { animation: none; }
+  .aux-thinking-line span,
+  .aux-user-bubble--thinking::before { animation: none; }
+
+  .aux-user-bubble--thinking::before {
+    opacity: .56;
+  }
 }
 
 @keyframes dv-pulse-ring {
@@ -503,6 +604,19 @@ html, body, aside, [class*="overflow-y-auto"], [class*="overflow-x-auto"] {
 @keyframes dv-dot-wave {
   0%, 60%, 100% { transform: translateY(0); opacity: .7; }
   30% { transform: translateY(-3px); opacity: 1; }
+}
+
+@keyframes aux-settings-modal-in {
+  from { opacity: 0; transform: scale(.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.aux-settings-modal-in {
+  animation: aux-settings-modal-in 180ms ease-out;
+}
+
+.aux-confirm-delete-modal {
+  animation: aux-settings-modal-in 160ms ease-out;
 }
 
 .dv-thinking {
@@ -552,6 +666,8 @@ html, body, aside, [class*="overflow-y-auto"], [class*="overflow-x-auto"] {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .aux-settings-modal-in,
+  .aux-confirm-delete-modal { animation: none; }
   .dv-thinking .dv-bubble,
   .dv-thinking .dv-bubble::after,
   .dv-thinking .dv-dot {

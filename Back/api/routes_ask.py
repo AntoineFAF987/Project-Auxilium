@@ -139,6 +139,7 @@ def _validated_sse(
                 "sources": safe_sources,
                 "mode": result.mode,
                 "chat_id": result.chat_id,
+                "chat_title": result.chat_title,
                 "request_id": result.request_id or request_id,
                 "status": result.status,
                 "validation_performed": result.validation_performed,

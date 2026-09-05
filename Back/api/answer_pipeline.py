@@ -38,7 +38,8 @@ from .response_trace import ResponseTraceStore
 from .iterative_retrieval import run_iterative_evidence_retrieval
 from .multi_query_retrieval import build_retrieval_queries, reciprocal_rank_fusion, resolve_retrieval_query
 from .catalog_probe import probe_document_catalog
-from .chats_db import create_chat, append_message
+from .chats_db import create_chat, append_message, mark_chat_title_generation_attempted, set_generated_chat_title, should_generate_chat_title
+from .chat_titles import generate_chat_title
 from .source_references import select_cited_references
 from .answer_presentation import (
     enforce_final_citation_contract, extract_citations_and_clean_answer,
@@ -117,6 +118,7 @@ class AnswerPipelineResult:
     context_length: Optional[int] = None
     request_id: Optional[str] = None
     chat_id: Optional[str] = None
+    chat_title: Optional[str] = None
     route_mode: Optional[str] = None
     abstention_reason: Optional[str] = None
     fallback_reason: Optional[str] = None
@@ -136,6 +138,7 @@ class AnswerPipelineResult:
             ctx_len=self.context_length,
             request_id=self.request_id,
             chat_id=self.chat_id,
+            chat_title=self.chat_title,
             review=self.review.to_dict(),
             faithfulness_review=self.faithfulness_review,
         )
@@ -1195,6 +1198,7 @@ def run_answer_pipeline(
         """Persist and transport only the canonical reader-facing answer."""
         canonical_answer = enforce_final_citation_contract(result.answer, len(result.sources))
         result = replace(result, answer=canonical_answer)
+        generated_chat_title: Optional[str] = None
         if tenant_id and user_id and user_turn_persisted:
             log_event(request_id, "message_persistence_start")
             set_stage("message_persistence")
@@ -1212,8 +1216,29 @@ def run_answer_pipeline(
                 # Keep the HTTP/SSE result available even if its assistant write fails.
             else:
                 log_event(request_id, "message_persistence_end")
+                try:
+                    should_title = should_generate_chat_title(tenant_id, user_id, chat_id)
+                except Exception:
+                    should_title = False
+                if should_title:
+                    try:
+                        candidate_title = generate_chat_title([
+                            {"role": "user", "content": q},
+                            {"role": "assistant", "content": result.answer},
+                        ])
+                        if candidate_title and set_generated_chat_title(tenant_id, user_id, chat_id, candidate_title):
+                            generated_chat_title = candidate_title
+                    except Exception:
+                        # Titling is best-effort and must never affect the response lifecycle.
+                        pass
+                    finally:
+                        if not generated_chat_title:
+                            try:
+                                mark_chat_title_generation_attempted(tenant_id, user_id, chat_id)
+                            except Exception:
+                                pass
         persisted_chat_id = chat_id if user_turn_persisted else result.chat_id
-        final = replace(result, chat_id=(persisted_chat_id or None))
+        final = replace(result, chat_id=(persisted_chat_id or None), chat_title=generated_chat_title)
         trace("answer", {"final_answer": final.answer, "mode": final.mode, "sources": final.sources, "total_ms": round((time.perf_counter() - trace_started) * 1000, 1)})
         return final
 

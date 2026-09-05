@@ -1,17 +1,19 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import RequireAuth from "./RequireAuth";
 import { useAuth } from "./useAuth";
-import { useLanguage } from "./i18n";
+import { useLanguage, type UILanguage } from "./i18n";
 import { setTheme } from "./providers";
 import * as chatsApi from "./lib/chatsApi";
 import * as projectsApi from "./lib/projectsApi";
 import { checkBackendHealth } from "./lib/healthCheck";
 import ThinkingIndicator from "./components/ThinkingIndicator";
+import OutlineThinkingIndicator from "./components/OutlineThinkingIndicator";
 import { FolderIcon, getSourceFileKind, SourceFileIcon } from "./components/SourceFileIcon";
 import { ResponseRenderer } from "./components/ResponseRenderer";
+import { SettingsContent } from "./settings/page";
 
 import "katex/dist/katex.min.css";
 
@@ -56,9 +58,8 @@ type Message = {
 type StoredChat = { id: string; createdAt: string; title: string; messages: Message[]; projectId?: string | null; pinned?: boolean; optimistic?: boolean };
 type ProjectMemoryMode = "default" | "project_only";
 
-const HEADER_H = 64;   // h-16
 const FOOTER_H = 92;   // hauteur de la barre d’input
-const SIDEBAR_W = 16;  // rem (w-64)
+const SIDEBAR_W = 17;  // rem
 // Stockage serveur: la liste des chats est chargée via l'API (plus de localStorage comme source de vérité)
 const HISTORY_MAX = 12;
 const FOOTER_GAP_MIN = 0; // espace min au-dessus du bord (px)
@@ -68,8 +69,182 @@ const CONTEXT_MENU_GAP = 8;
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 
+function cleanProjectChatPreview(content: string) {
+  return content
+    .replace(/!?(?:\[([^\]]*)\])\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+)/gm, "")
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")
+    .replace(/([*_`])/g, "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function SettingsModal({ open, onClose, generalContent }: { open: boolean; onClose: () => void; generalContent: ReactNode }) {
+  const { t } = useLanguage();
+  const [activeTitle, setActiveTitle] = useState(t("generalSettings"));
+
+  useEffect(() => {
+    if (open) setActiveTitle(t("generalSettings"));
+  }, [open, t]);
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/40 p-4 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="settings-modal-title" className="aux-settings-modal-in flex h-[85vh] max-h-[760px] w-full max-w-[1000px] flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="relative flex h-16 shrink-0 items-center justify-end border-b border-[var(--border)] px-5 sm:px-6">
+          <h2 id="settings-modal-title" className="absolute left-1/2 -translate-x-1/2 text-lg font-semibold">{activeTitle}</h2>
+          <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-[var(--muted-text)] hover:bg-[var(--muted)] hover:text-[var(--text)] cursor-pointer" aria-label={t("close")}>
+            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path strokeLinecap="round" d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
+        </header>
+        <SettingsContent embedded onActiveTabChange={setActiveTitle} generalContent={generalContent} />
+      </section>
+    </div>
+  );
+}
+
 
 /* ---------------- Icônes ---------------- */
+type DeleteConfirmation = {
+  kind: "chat" | "project";
+  id: string;
+  name: string;
+};
+
+function ConfirmDeleteModal({
+  open, title, description, onConfirm, onCancel, loading, error,
+}: {
+  open: boolean;
+  title: string;
+  description: ReactNode;
+  onConfirm: () => void;
+  onCancel: () => void;
+  loading: boolean;
+  error: string | null;
+}) {
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    previouslyFocusedRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    cancelButtonRef.current?.focus();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      previouslyFocusedRef.current?.focus();
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !loading) onCancel();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, loading, onCancel]);
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[1300] flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget && !loading) onCancel(); }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="confirm-delete-title" aria-describedby="confirm-delete-description" className="aux-confirm-delete-modal w-full max-w-[440px] rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 text-[var(--text)] shadow-2xl sm:p-6" onMouseDown={(event) => event.stopPropagation()}>
+        <h2 id="confirm-delete-title" className="text-[17px] font-semibold leading-6">{title}</h2>
+        <div id="confirm-delete-description" className="mt-3 break-words text-sm leading-5 text-[var(--muted-text)]">{description}</div>
+        {error && <p className="mt-3 text-sm leading-5 text-red-600" role="alert">{error}</p>}
+        <div className="mt-6 flex items-center justify-end gap-2">
+          <button ref={cancelButtonRef} type="button" onClick={onCancel} disabled={loading} className="h-9 rounded-lg bg-[var(--muted)] px-3.5 text-sm font-medium text-[var(--text)] transition-colors hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer">Annuler</button>
+          <button type="button" onClick={onConfirm} disabled={loading} className="h-9 rounded-lg bg-[#d93025] px-3.5 text-sm font-medium text-white transition-colors hover:bg-[#b42318] disabled:cursor-not-allowed disabled:opacity-60 cursor-pointer">{loading ? "Suppression…" : "Supprimer"}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function SettingsIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" {...props}>
+      <path d="M12,16a4,4,0,1,0-4-4A4,4,0,0,0,12,16Zm0-6a2,2,0,1,1-2,2A2,2,0,0,1,12,10ZM3.5,12.877l-1,.579a2,2,0,0,0-.733,2.732l1.489,2.578A2,2,0,0,0,5.99,19.5L7,18.916a1.006,1.006,0,0,1,1.008.011.992.992,0,0,1,.495.857V21a2,2,0,0,0,2,2h3a2,2,0,0,0,2-2V19.782a1.009,1.009,0,0,1,1.5-.866l1.009.582a2,2,0,0,0,2.732-.732l1.488-2.578a2,2,0,0,0-.733-2.732l-1-.579a1.007,1.007,0,0,1-.5-.89,1,1,0,0,1,.5-.864l1-.579a2,2,0,0,0,.733-2.732L20.742,5.234A2,2,0,0,0,18.01,4.5L17,5.083a1.008,1.008,0,0,1-1.5-.867V3a2,2,0,0,0-2-2h-3a2,2,0,0,0-2,2V4.294a.854.854,0,0,1-.428.74l-.154.089a.864.864,0,0,1-.854,0L5.99,4.5a2,2,0,0,0-2.733.732L1.769,7.813A2,2,0,0,0,2.5,10.544l1,.578a1.011,1.011,0,0,1,.5.891A.994.994,0,0,1,3.5,12.877Zm1-3.487-1-.578L4.99,6.234l1.074.62a2.86,2.86,0,0,0,2.85,0l.154-.088A2.863,2.863,0,0,0,10.5,4.294V3h3V4.216a3.008,3.008,0,0,0,4.5,2.6l1.007-.582L20.5,8.812l-1,.578a3.024,3.024,0,0,0,0,5.219l1,.579h0l-1.488,2.578L18,17.184a3.008,3.008,0,0,0-4.5,2.6V21h-3V19.784a3.006,3.006,0,0,0-4.5-2.6l-1.007.582L3.5,15.188l1-.579a3.024,3.024,0,0,0,0-5.219Z" />
+    </svg>
+  );
+}
+
+function ProjectSettingsModal({
+  project,
+  onClose,
+  onSaveName,
+  onDelete,
+}: {
+  project: projectsApi.Project | null;
+  onClose: () => void;
+  onSaveName: (project: projectsApi.Project, name: string) => Promise<void>;
+  onDelete: (project: projectsApi.Project) => void;
+}) {
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!project) return;
+    setName(project.name);
+    setError(null);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    inputRef.current?.focus();
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [project]);
+
+  useEffect(() => {
+    if (!project) return;
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape" && !saving) onClose(); };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [project, saving, onClose]);
+
+  if (!project) return null;
+  const saveName = async () => {
+    const nextName = name.trim();
+    if (!nextName || nextName === project.name || saving) return;
+    setSaving(true);
+    setError(null);
+    try { await onSaveName(project, nextName); }
+    catch (err: unknown) { setError(errorMessage(err) || "Impossible d’enregistrer le nom du projet"); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[1300] flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) onClose(); }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="project-settings-title" className="aux-confirm-delete-modal w-full max-w-[500px] rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 text-[var(--text)] shadow-2xl sm:p-6" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="flex items-center justify-between gap-4">
+          <h2 id="project-settings-title" className="text-[17px] font-semibold leading-6">Paramètres du projet</h2>
+          <button type="button" onClick={onClose} disabled={saving} className="grid h-8 w-8 place-items-center rounded-lg text-[var(--muted-text)] transition-colors hover:bg-[var(--muted)] hover:text-[var(--text)] disabled:opacity-50 cursor-pointer" aria-label="Fermer"><CloseIcon className="h-4 w-4" /></button>
+        </header>
+        <div className="mt-6 space-y-6">
+          <section>
+            <label htmlFor="project-settings-name" className="block text-sm font-medium text-[var(--text)]">Nom du projet</label>
+            <input ref={inputRef} id="project-settings-name" value={name} onChange={(event) => { setName(event.target.value); setError(null); }} onBlur={saveName} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} disabled={saving} className="mt-2 h-10 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text)] outline-none transition-shadow focus:shadow-[0_0_0_2px_color-mix(in_oklab,var(--primary)_25%,transparent)] disabled:opacity-60" />
+            {error && <p className="mt-2 text-sm text-red-600" role="alert">{error}</p>}
+          </section>
+          <section>
+            <h3 className="text-sm font-medium text-[var(--text)]">Accès aux sources</h3>
+            <p className="mt-1 text-sm leading-5 text-[var(--muted-text)]">Ce projet utilise les sources configurées dans Auxilium.</p>
+            <div className="mt-2 flex h-10 items-center rounded-xl border border-[var(--border)] bg-[var(--muted)] px-3 text-sm text-[var(--muted-text)]" aria-label="Sources globales">Sources globales</div>
+          </section>
+        </div>
+        <div className="mt-7 border-t border-[var(--border)] pt-5">
+          <button type="button" onClick={() => onDelete(project)} disabled={saving} className="rounded-lg border border-red-500/35 px-3 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-500/10 disabled:opacity-50 cursor-pointer">Supprimer le projet</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function NewChatIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
     <svg
@@ -256,7 +431,7 @@ function LightbulbIcon(props: React.SVGProps<SVGSVGElement>) {
   );
 }
 
-function ChatTitle({ title }: { title: string }) {
+function ChatTitle({ title, className = "" }: { title: string; className?: string }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLSpanElement>(null);
   const [overflowAmount, setOverflowAmount] = useState(0);
@@ -276,16 +451,24 @@ function ChatTitle({ title }: { title: string }) {
     "--chat-title-duration": `${duration}ms`,
   } as React.CSSProperties;
 
+  useEffect(() => {
+    measureOverflow();
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const observer = new ResizeObserver(measureOverflow);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [title]);
+
   return (
     <div
       ref={viewportRef}
       className="chat-title-viewport"
       data-overflow={overflowAmount > 0}
-      title={title}
       onMouseEnter={measureOverflow}
       onFocus={measureOverflow}
     >
-      <span ref={textRef} className="chat-title-text" data-overflow={overflowAmount > 0} style={style}>
+      <span ref={textRef} className={`chat-title-text ${className}`} data-overflow={overflowAmount > 0} style={style}>
         {title}
       </span>
     </div>
@@ -380,6 +563,9 @@ type InputBarProps = {
   replyTarget: Message | null;
   onCancelReply: () => void;
   inputStyle: "gradient" | "flat";
+  placeholder?: string;
+  leadingIcon?: ReactNode;
+  sourceMenuDirection?: "up" | "down";
 };
 
 function InputBar({
@@ -394,6 +580,9 @@ function InputBar({
   inputStyle,
   replyTarget,
   onCancelReply,
+  placeholder,
+  leadingIcon,
+  sourceMenuDirection = "up",
 }: InputBarProps) {
   const { t } = useLanguage();
   const [open, setOpen] = useState(false);
@@ -485,7 +674,6 @@ function InputBar({
               onClick={onCancelReply}
               className="shrink-0 grid h-7 w-7 place-items-center rounded border hover:bg-[var(--muted)] cursor-pointer"
               aria-label={t("cancelReply")}
-              title={t("cancelReply")}
             >
               <CloseIcon className="h-4 w-4" />
             </button>
@@ -497,7 +685,7 @@ function InputBar({
       {open && (
         <div
           role="menu"
-          className="menu-pop absolute left-2 bottom-[calc(100%+8px)] min-w-[280px] rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xl overflow-hidden z-30"
+          className={`menu-pop absolute left-2 ${sourceMenuDirection === "down" ? "top-[calc(100%+8px)]" : "bottom-[calc(100%+8px)]"} min-w-[280px] rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xl overflow-hidden z-30`}
         >
           {([
             { 
@@ -552,14 +740,15 @@ function InputBar({
       )}
 
       {/* Rectangle : textarea AU-DESSUS, barre des boutons EN DESSOUS */}
-            <div className={`w-full max-w-full box-border border border-[var(--border)] rounded-3xl ${bgClass} text-[var(--text)] px-2 py-2 shadow-[0_2px_8px_rgba(0,0,0,0.08)] focus-within:shadow-[0_3px_12px_rgba(0,0,0,0.12)] backdrop-blur-md transition-all duration-300 ease-in-out`}>
+            <div className={`relative w-full max-w-full box-border border border-[var(--border)] rounded-3xl ${bgClass} text-[var(--text)] px-2 py-2 shadow-[0_2px_8px_rgba(0,0,0,0.08)] focus-within:shadow-[0_3px_12px_rgba(0,0,0,0.12)] backdrop-blur-md transition-all duration-300 ease-in-out`}>
+        {leadingIcon && <span className="pointer-events-none absolute left-5 top-3 text-[var(--muted-text)]">{leadingIcon}</span>}
         <textarea
           ref={inputRef}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={t("askPlaceholder")}
-          className="block w-full max-w-full resize-none outline-none bg-transparent px-4 leading-[1.4rem] text-base placeholder:text-[var(--muted-text)]"
+          placeholder={placeholder ?? t("askPlaceholder")}
+          className={`block w-full max-w-full resize-none outline-none bg-transparent ${leadingIcon ? "pl-11 pr-4" : "px-4"} leading-[1.4rem] text-base placeholder:text-[var(--muted-text)]`}
           rows={1}
           style={{ maxHeight: `calc(${12} * 1.4rem)` }}
           aria-label={t("inputAria")}
@@ -569,7 +758,6 @@ function InputBar({
           <div className="relative">
             <button
               type="button"
-              title={t("chooseSources")}
               aria-haspopup="menu"
               aria-expanded={open}
               onClick={() => setOpen((v) => !v)}
@@ -604,7 +792,6 @@ function InputBar({
               className="h-10 w-10 rounded-full bg-[var(--primary)] grid place-items-center cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               disabled={!value.trim()}
               aria-label={t("send")}
-              title={t("send")}
             >
               <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="var(--primary-foreground)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M12 19V5M5 12l7-7 7 7" />
@@ -616,7 +803,6 @@ function InputBar({
               onClick={onStop}
               className="h-10 w-10 rounded-2xl bg-[var(--muted)] text-[var(--text)] grid place-items-center cursor-pointer shadow-md hover:bg-[var(--border)] transition-all duration-200"
               aria-label={t("stop")}
-              title={t("stop")}
             >
               <StopIcon className="h-6 w-6" />
             </button>
@@ -629,12 +815,13 @@ function InputBar({
 
 /* ---------------- Page ---------------- */
 export default function Page() {
-  const { t, language } = useLanguage();
+  const { t, language, setLanguage } = useLanguage();
   const [messages, setMessages] = useState<Message[]>([]);
   const [chats, setChats] = useState<StoredChat[]>([]);
   const [projects, setProjects] = useState<projectsApi.Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [highlightedProjectId, setHighlightedProjectId] = useState<string | null>(null);
+  const [projectHomeId, setProjectHomeId] = useState<string | null>(null);
   const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(() => new Set());
   const [showAllChatsForProjects, setShowAllChatsForProjects] = useState<Set<string>>(() => new Set());
   const [pinnedSectionOpen, setPinnedSectionOpen] = useState(true);
@@ -653,6 +840,11 @@ export default function Page() {
   const [hoveredProjectMemoryMode, setHoveredProjectMemoryMode] = useState<ProjectMemoryMode | null>(null);
   const [projectMenuId, setProjectMenuId] = useState<string | null>(null);
   const [projectMenuPosition, setProjectMenuPosition] = useState<{ top: number; left: number } | null>(null);
+  const [projectMenuOrigin, setProjectMenuOrigin] = useState<"sidebar" | "project-home" | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
+  const [deletingItem, setDeletingItem] = useState(false);
+  const [deleteConfirmationError, setDeleteConfirmationError] = useState<string | null>(null);
+  const [projectSettingsProject, setProjectSettingsProject] = useState<projectsApi.Project | null>(null);
   const [chatId, setChatId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -661,6 +853,20 @@ export default function Page() {
   const thinkingDismissRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingThinkingStatusRef = useRef<{ stage: string; label: string }[]>([]);
   const [showScrollDown, setShowScrollDown] = useState(false);
+
+  useEffect(() => {
+    const readProjectFromUrl = () => {
+      const projectId = new URLSearchParams(window.location.search).get("project");
+      setProjectHomeId(projectId);
+      if (projectId) {
+        setSelectedProjectId(projectId);
+        setHighlightedProjectId(projectId);
+      }
+    };
+    readProjectFromUrl();
+    window.addEventListener("popstate", readProjectFromUrl);
+    return () => window.removeEventListener("popstate", readProjectFromUrl);
+  }, []);
 
   useEffect(() => {
     // Si la page est vide (nouveau chat), on cache la flèche
@@ -709,14 +915,17 @@ export default function Page() {
   // État de santé du serveur backend
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null);
 
-  // Compte / rideau
+  // Compte / menu contextuel
   const [drawer, setDrawer] = useState(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const { account, signOut, getTokens } = useAuth();
 
   // États du menu Interface
   const [interfaceExpanded, setInterfaceExpanded] = useState(false);
   const [themeOpen, setThemeOpen] = useState(false);
   const [styleOpen, setStyleOpen] = useState(false);
+  const [languageOpen, setLanguageOpen] = useState(false);
+  const [thinkingIndicatorStyle, setThinkingIndicatorStyle] = useState<"classic" | "outline">("classic");
 
   // Thème
   const [theme, setThemeState] = useState<"default" | "light" | "dark" | "gray-dark" | "creme">("default");
@@ -745,7 +954,16 @@ export default function Page() {
     if (typeof window !== "undefined") localStorage.setItem("dv_input_style", val);
   };
 
-  // Fermer le menu Interface automatiquement quand on quitte le drawer
+  useEffect(() => {
+    const stored = typeof window !== "undefined" ? localStorage.getItem("dv_thinking_indicator_style") : null;
+    setThinkingIndicatorStyle(stored === "outline" ? "outline" : "classic");
+  }, []);
+  const applyThinkingIndicatorStyle = (val: "classic" | "outline") => {
+    setThinkingIndicatorStyle(val);
+    if (typeof window !== "undefined") localStorage.setItem("dv_thinking_indicator_style", val);
+  };
+
+  // Fermer les sous-menus Interface lorsque le menu du compte se ferme.
   useEffect(() => {
     if (!drawer) {
       setInterfaceExpanded(false);
@@ -754,6 +972,24 @@ export default function Page() {
     }
   }, [drawer]);
   // ----- Mode Focus (cache sidebar & header, élargit le chat) -----
+  useEffect(() => {
+    if (!drawer) return;
+    const onOutsideAccountMenu = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (accountButtonRef.current?.contains(target) || accountMenuRef.current?.contains(target)) return;
+      setDrawer(false);
+    };
+    document.addEventListener("pointerdown", onOutsideAccountMenu);
+    return () => document.removeEventListener("pointerdown", onOutsideAccountMenu);
+  }, [drawer]);
+
+  useEffect(() => {
+    if (!settingsModalOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [settingsModalOpen]);
+
   const [focus, setFocus] = useState(false);
   useEffect(() => {
     const stored =
@@ -761,6 +997,7 @@ export default function Page() {
     setFocus(stored === "1");
   }, []);
   const toggleFocus = () => {
+    setDrawer(false);
     setFocus((v) => {
       const nv = !v;
       if (typeof window !== "undefined") localStorage.setItem("dv_focus", nv ? "1" : "0");
@@ -769,6 +1006,8 @@ export default function Page() {
   };
 
   // Refs
+  const accountButtonRef = useRef<HTMLButtonElement>(null);
+  const accountMenuRef = useRef<HTMLElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -825,6 +1064,13 @@ export default function Page() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        if (deleteConfirmation) {
+          if (!deletingItem) {
+            setDeleteConfirmation(null);
+            setDeleteConfirmationError(null);
+          }
+          return;
+        }
         if (projectMemoryMenuOpen) {
           setProjectMemoryMenuOpen(false);
           setHoveredProjectMemoryMode(null);
@@ -841,6 +1087,7 @@ export default function Page() {
         setProjectMenuId(null);
         setProjectMenuPosition(null);
         setDrawer(false);
+        setSettingsModalOpen(false);
         setReplyTarget(null);
       }
       if (
@@ -858,7 +1105,7 @@ export default function Page() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [input, loading, messages, projectMemoryMenuOpen]);
+  }, [input, loading, messages, projectMemoryMenuOpen, deleteConfirmation, deletingItem]);
 
   useEffect(() => {
     if (!menuId && !projectMenuId) return;
@@ -943,12 +1190,42 @@ export default function Page() {
   };
 
   const openProject = (projectId: string | null) => {
+    if (projectId === null) leaveProjectHome();
+    else setProjectHomeId(null);
     setSelectedProjectId(projectId);
     setHighlightedProjectId(projectId);
     newChat();
   };
 
+  const openProjectHome = (projectId: string) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("project", projectId);
+    window.history.pushState({}, "", `${url.pathname}${url.search}`);
+    setProjectHomeId(projectId);
+    setSelectedProjectId(projectId);
+    setHighlightedProjectId(projectId);
+    setProjectMenuId(null);
+    setProjectMenuPosition(null);
+    newChat();
+  };
+
+  const leaveProjectHome = () => {
+    if (!projectHomeId) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("project");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}`);
+    setProjectHomeId(null);
+  };
+
+  const newStandaloneChat = () => {
+    leaveProjectHome();
+    setSelectedProjectId(null);
+    setHighlightedProjectId(null);
+    newChat();
+  };
+
   const toggleProject = (projectId: string) => {
+    leaveProjectHome();
     setSelectedProjectId(projectId);
     setHighlightedProjectId(projectId);
     const isExpanded = expandedProjectIds.has(projectId);
@@ -1113,8 +1390,15 @@ export default function Page() {
     }
   };
 
+  const saveProjectName = async (project: projectsApi.Project, name: string) => {
+    const { idToken } = await getTokens();
+    if (!idToken) throw new Error("Session expirée");
+    const updated = await projectsApi.renameProject(project.id, name, idToken);
+    setProjects((previous) => previous.map((item) => item.id === updated.id ? updated : item));
+    setProjectSettingsProject(updated);
+  };
+
   const deleteProject = async (project: projectsApi.Project) => {
-    if (!window.confirm(`Supprimer le projet « ${project.name} » ? Ses discussions seront conservées hors projet.`)) return;
     try {
       const { idToken } = await getTokens();
       if (!idToken) throw new Error("Session expirée");
@@ -1138,10 +1422,48 @@ export default function Page() {
       if (selectedProjectId === project.id) openProject(null);
     } catch (err: unknown) {
       setProjectsError(errorMessage(err) || "Impossible de supprimer le projet");
+      throw err;
     } finally {
       setProjectMenuId(null);
       setProjectMenuPosition(null);
     }
+  };
+
+  const requestDeleteProject = (project: projectsApi.Project) => {
+    setProjectMenuId(null);
+    setProjectMenuPosition(null);
+    setDeleteConfirmationError(null);
+    setDeleteConfirmation({ kind: "project", id: project.id, name: project.name });
+  };
+
+  const openProjectContextMenu = (target: HTMLElement, projectId: string, origin: "sidebar" | "project-home" = "sidebar") => {
+    if (projectMenuId === projectId && projectMenuOrigin === origin) {
+      setProjectMenuId(null);
+      setProjectMenuPosition(null);
+      setProjectMenuOrigin(null);
+      return;
+    }
+    const rect = target.getBoundingClientRect();
+    const left = Math.max(CONTEXT_MENU_GAP, Math.min(rect.right + CONTEXT_MENU_GAP, window.innerWidth - CHAT_CONTEXT_MENU_WIDTH - CONTEXT_MENU_GAP));
+    setProjectMenuPosition({ top: Math.min(Math.max(CONTEXT_MENU_GAP, rect.top), Math.max(CONTEXT_MENU_GAP, window.innerHeight - 176)), left });
+    setProjectMenuOrigin(origin);
+    setProjectMenuId(projectId);
+  };
+
+  const renderProjectContextMenu = (project: projectsApi.Project, { showHome = true }: { showHome?: boolean } = {}) => {
+    if (!projectMenuPosition || typeof document === "undefined") return null;
+    return createPortal(
+      <div role="menu" className="menu-pop theme-context-menu chat-context-menu fixed z-[1000] w-[252px] max-w-[calc(100vw-16px)] rounded-[20px] border p-2" style={projectMenuPosition} onClick={(event) => event.stopPropagation()}>
+        {showHome && <button type="button" role="menuitem" onClick={() => openProjectHome(project.id)} className="theme-context-menu-item flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap cursor-pointer"><ProjectFolderIcon isOpen={false} className="h-[18px] w-[18px] shrink-0" aria-hidden="true" /><span>Accueil du projet</span></button>}
+        {showHome && <div className="theme-context-menu-separator my-1.5 border-t" role="separator" />}
+        <button type="button" role="menuitem" onClick={() => { setProjectMenuId(null); setProjectMenuPosition(null); setProjectMenuOrigin(null); setProjectSettingsProject(project); }} className="theme-context-menu-item flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap cursor-pointer"><SettingsIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" /><span>Paramètres du projet</span></button>
+        <button type="button" role="menuitem" onClick={() => renameProject(project)} className="theme-context-menu-item flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap cursor-pointer"><EditIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" /><span>{t("rename")}</span></button>
+        <div className="theme-context-menu-separator my-1.5 border-t" role="separator" />
+        <button type="button" role="menuitem" onClick={(event) => { toggleProjectPinned(event, project); setProjectMenuId(null); setProjectMenuPosition(null); setProjectMenuOrigin(null); }} className="theme-context-menu-item flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap cursor-pointer"><PinIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" /><span>{project.pinned ? "Désépingler le projet" : "Épingler le projet"}</span></button>
+        <button type="button" role="menuitem" onClick={() => requestDeleteProject(project)} className="theme-context-menu-item theme-context-menu-item-danger flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap cursor-pointer"><TrashIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" /><span>Supprimer le projet</span></button>
+      </div>,
+      document.body
+    );
   };
 
   const toggleProjectPinned = async (event: React.MouseEvent, project: projectsApi.Project) => {
@@ -1182,11 +1504,13 @@ export default function Page() {
   };
 
   const loadChat = async (c: StoredChat) => {
+    leaveProjectHome();
     try {
       const { idToken } = await getTokens();
       const serverMessages = await chatsApi.fetchChatMessages(c.id, idToken);
       const converted = serverMessages.map((m) => ({ id: m.id, role: m.role, content: m.content, sources: m.sources } as Message));
       setChatId(c.id);
+      setChats((previous) => previous.map((chat) => chat.id === c.id ? { ...chat, messages: converted } : chat));
       setSelectedProjectId(c.projectId ?? null);
       setHighlightedProjectId(null);
       setMessages(converted);
@@ -1238,8 +1562,7 @@ export default function Page() {
     }
   };
 
-  const deleteChat = async (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
+  const deleteChat = async (id: string) => {
     try {
       const { idToken } = await getTokens();
       await chatsApi.deleteChat(id, idToken);
@@ -1257,6 +1580,13 @@ export default function Page() {
     } finally {
       closeChatMenus();
     }
+  };
+
+  const requestDeleteChat = (event: React.MouseEvent, chat: StoredChat) => {
+    event.stopPropagation();
+    closeChatMenus();
+    setDeleteConfirmationError(null);
+    setDeleteConfirmation({ kind: "chat", id: chat.id, name: chat.title });
   };
 
   const renderChatContextMenu = (chat: StoredChat) => {
@@ -1286,7 +1616,7 @@ export default function Page() {
           <PinIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
           <span>{chat.pinned ? "Désépingler le chat" : "Épingler le chat"}</span>
         </button>
-        <button type="button" role="menuitem" className="theme-context-menu-item theme-context-menu-item-danger flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap cursor-pointer" onClick={(e) => deleteChat(e, chat.id)}>
+        <button type="button" role="menuitem" className="theme-context-menu-item theme-context-menu-item-danger flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm whitespace-nowrap cursor-pointer" onClick={(e) => requestDeleteChat(e, chat)}>
           <TrashIcon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
           <span>{t("delete")}</span>
         </button>
@@ -1312,7 +1642,7 @@ export default function Page() {
     );
   };
 
-  const renderChatItem = (chat: StoredChat, indent = false, menuLocation: "normal" | "pinned" = "normal") => {
+  const renderChatItem = (chat: StoredChat, { isProjectChat = false, menuLocation = "normal" }: { isProjectChat?: boolean; menuLocation?: "normal" | "pinned" } = {}) => {
     const active = chatId === chat.id;
     const open = menuId === chat.id && chatMenuLocation === menuLocation;
     const disabled = !!chat.optimistic;
@@ -1326,11 +1656,10 @@ export default function Page() {
           }
           loadChat(chat);
         }}
-        className={`chat-item group relative w-full flex items-center justify-between gap-2 py-2 pr-3 rounded-md cursor-pointer ${indent ? "pl-8" : "px-3"} ${active ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"}`}
-        title={chat.title}
+        className={`chat-item group relative w-full flex items-center justify-between gap-2 py-1.5 pr-0 rounded-md cursor-pointer ${isProjectChat ? "pl-8" : "pl-3"} ${active ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"}`}
       >
         {chat.pinned && <PinnedChatIcon className="h-[17px] w-[17px] shrink-0 text-[var(--muted-text)]" aria-hidden="true" />}
-        <div className={`flex min-w-0 flex-1 items-center text-sm text-[var(--text)] ${open ? "pr-12" : "group-hover:pr-12"}`}>
+        <div className={`flex min-w-0 flex-1 items-center text-[13px] leading-[18px] font-normal text-[var(--text)] ${open ? "pr-16" : "group-hover:pr-16"}`}>
           <ChatTitle title={chat.title} />
           {disabled && <span className="ml-1 shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted-text)] align-middle">{t("pending")}</span>}
         </div>
@@ -1339,7 +1668,6 @@ export default function Page() {
           onClick={(e) => toggleChatPinned(e, chat)}
           className="absolute right-8 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer"
           aria-label={chat.pinned ? "Désépingler la discussion" : "Épingler la discussion"}
-          title={chat.pinned ? "Désépingler" : "Épingler"}
         >
           <PinIcon className="h-4 w-4" aria-hidden="true" />
         </button>
@@ -1375,6 +1703,29 @@ export default function Page() {
 
   const pinnedProjects = useMemo(() => projects.filter((project) => project.pinned), [projects]);
   const pinnedChats = useMemo(() => chats.filter((chat) => chat.pinned), [chats]);
+  const projectHome = useMemo(() => projects.find((project) => project.id === projectHomeId) ?? null, [projects, projectHomeId]);
+  const projectHomeChats = useMemo(() => chats.filter((chat) => chat.projectId === projectHomeId), [chats, projectHomeId]);
+  const projectPreviewLoadedRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!projectHomeId) return;
+    const chatsToPreview = projectHomeChats.filter((chat) => !projectPreviewLoadedRef.current.has(chat.id));
+    if (!chatsToPreview.length) return;
+    chatsToPreview.forEach((chat) => projectPreviewLoadedRef.current.add(chat.id));
+    void (async () => {
+      try {
+        const { idToken } = await getTokens();
+        if (!idToken) return;
+        const previews = await Promise.all(chatsToPreview.map(async (chat) => ({ id: chat.id, messages: await chatsApi.fetchChatMessages(chat.id, idToken) })));
+        const byId = new Map(previews.map((preview) => [preview.id, preview.messages as Message[]]));
+        setChats((previous) => previous.map((chat) => byId.has(chat.id) ? { ...chat, messages: byId.get(chat.id)! } : chat));
+      } catch {
+        // La liste reste exploitable même si un aperçu ne peut pas être chargé.
+      }
+    })();
+  }, [projectHomeId, projectHomeChats, getTokens]);
+
+  const formatProjectChatDate = (value: string) => new Intl.DateTimeFormat(language === "en" ? "en-US" : "fr-FR", { day: "numeric", month: "short" }).format(new Date(value));
 
   const moveMenuChat = useMemo(
     () => chats.find((chat) => chat.id === moveMenuChatId) ?? null,
@@ -1441,6 +1792,9 @@ export default function Page() {
   async function sendMessage() {
     const q = input.trim();
     if (!q || loading) return;
+
+    // Depuis l'accueil d'un projet, le premier message ouvre immédiatement le chat créé.
+    if (projectHomeId) leaveProjectHome();
 
     const newUserMsg: Message = {
       id: crypto.randomUUID(),
@@ -1582,6 +1936,7 @@ export default function Page() {
       let finalAnswer: string | undefined = undefined;
   let finalCaveat: PostGenerationReview | undefined = undefined;
   let finalChatId: string | null = null;
+      let finalChatTitle: string | undefined = undefined;
       let sseBuffer = "";
       let hasReceivedContent = false;
 
@@ -1648,6 +2003,7 @@ export default function Page() {
                 finalCaveat = parsed.review as PostGenerationReview;
               }
               if (parsed.chat_id) finalChatId = String(parsed.chat_id);
+              if (typeof parsed.chat_title === "string" && parsed.chat_title.trim()) finalChatTitle = parsed.chat_title.trim();
             } else if (parsed.type === 'error') {
               finishThinking(true);
               // Gestion des erreurs spécifiques
@@ -1697,7 +2053,7 @@ export default function Page() {
         // Réconcilier l'entrée optimiste avec le chat_id final ET mettre à jour le titre si nécessaire
         setChats((prev) => prev.map((c) => {
           if (c.id === tid) {
-            return { ...c, id: finalChatId, optimistic: false, title: c.title || (q.split("\n")[0].slice(0, 60)) };
+            return { ...c, id: finalChatId, optimistic: false, title: finalChatTitle || c.title || (q.split("\n")[0].slice(0, 60)) };
           }
           return c;
         }));
@@ -1802,13 +2158,15 @@ export default function Page() {
   /* ---------------- UI ---------------- */
   const AccountButton = () => (
     <button
-      onClick={() => setDrawer(true)}
-      className="flex items-center gap-2 rounded-full border border-[var(--border)] pl-1 pr-3 py-1 hover:bg-[var(--muted)] cursor-pointer"
-      aria-haspopup="dialog"
+      ref={accountButtonRef}
+      type="button"
+      onClick={() => setDrawer((open) => !open)}
+      className="account-menu-trigger flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-[var(--muted)] cursor-pointer transition-colors"
+      aria-haspopup="menu"
       aria-expanded={drawer}
-      title={t("account")}
+      aria-label={t("account")}
     >
-      <div className="h-8 w-8 rounded-full bg-[var(--muted)] grid place-items-center overflow-hidden">
+      <div className="h-8 w-8 shrink-0 rounded-full bg-[var(--muted)] grid place-items-center overflow-hidden">
         {avatarUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={avatarUrl} alt={displayName} className="h-full w-full object-cover" />
@@ -1816,12 +2174,12 @@ export default function Page() {
           <span className="text-xs font-semibold text-[var(--text)]">{initials}</span>
         )}
       </div>
-      <span className="max-w-[160px] truncate text-sm text-[var(--text)]">
+      <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--text)]">
         {displayName}
       </span>
       <svg
         viewBox="0 0 20 20"
-        className="h-4 w-4 text-[var(--muted-text)]"
+        className={`h-4 w-4 shrink-0 text-[var(--muted-text)] transition-transform ${drawer ? "rotate-180" : ""}`}
         fill="currentColor"
         aria-hidden="true"
       >
@@ -2056,98 +2414,182 @@ export default function Page() {
                 )}
               </div>
             </div>
+
+            {/* Indicateur de réflexion */}
+            <div>
+              <div className="text-xs font-medium mb-2 text-[var(--muted-text)] px-1">{t("thinkingIndicator")}</div>
+              <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label={t("thinkingIndicator")}>
+                {([
+                  { key: "classic", label: t("thinkingIndicatorClassic"), desc: t("thinkingIndicatorClassicDesc") },
+                  { key: "outline", label: t("thinkingIndicatorOutline"), desc: t("thinkingIndicatorOutlineDesc") },
+                ] as const).map((option) => {
+                  const active = thinkingIndicatorStyle === option.key;
+                  return (
+                    <button
+                      key={option.key}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      onClick={() => applyThinkingIndicatorStyle(option.key)}
+                      className={`rounded-lg border px-3 py-2.5 text-left transition-colors duration-150 ${
+                        active
+                          ? "aux-thinking-style-option--active"
+                          : "border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--muted)]"
+                      }`}
+                    >
+                      <span className="block text-sm font-medium text-[var(--text)]">{option.label}</span>
+                      <span className="mt-0.5 block text-xs leading-snug text-[var(--muted-text)]">{option.desc}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </div>
       </div>
     );
   };
 
-  const AccountDrawer = () => (
+  const GeneralSettings = () => {
+    const themeOptions = [
+      { key: "default", label: t("themeDefault") },
+      { key: "light", label: t("themeLight") },
+      { key: "dark", label: t("themeDark") },
+      { key: "gray-dark", label: t("themeGrayDark") },
+      { key: "creme", label: t("themeCreme") },
+    ];
+    const styleOptions = [
+      { key: "flat", label: t("styleFlat") },
+      { key: "gradient", label: t("styleGradient") },
+    ];
+    const languageOptions: { key: UILanguage; label: string }[] = [
+      { key: "fr", label: t("french") },
+      { key: "en", label: t("english") },
+    ];
+    const DropdownChevron = () => <svg viewBox="0 0 24 24" className="h-4 w-4 text-[var(--muted-text)]" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>;
+    const MenuOption = ({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) => <button type="button" role="option" aria-selected={active} onClick={onClick} className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm cursor-pointer ${active ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"}`}><span>{label}</span>{active && <svg viewBox="0 0 24 24" className="h-4 w-4 text-[var(--primary)]" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>}</button>;
+    return (
+      <section className="max-w-2xl">
+        <div className="divide-y divide-[var(--border)]">
+          <div className="flex min-h-16 flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div><div className="text-sm font-medium">{t("theme")}</div></div>
+            <div className="relative shrink-0">
+              <button type="button" onClick={() => { setStyleOpen(false); setLanguageOpen(false); setThemeOpen((open) => !open); }} aria-haspopup="listbox" aria-expanded={themeOpen} className="inline-flex items-center gap-1.5 py-1 text-sm transition-opacity hover:opacity-70 cursor-pointer"><span>{themeOptions.find((option) => option.key === theme)?.label}</span><DropdownChevron /></button>
+              {themeOpen && <><div className="fixed inset-0 z-10" aria-hidden="true" onMouseDown={() => setThemeOpen(false)} /><div role="listbox" className="absolute right-0 top-full z-20 mt-2 w-56 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-1 shadow-xl">{themeOptions.map((option) => <MenuOption key={option.key} label={option.label} active={theme === option.key} onClick={() => { applyTheme(option.key as typeof theme); setThemeOpen(false); }} />)}</div></>}
+            </div>
+          </div>
+          <div className="flex min-h-16 flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div><div className="text-sm font-medium">{t("barStyle")}</div></div>
+            <div className="relative shrink-0">
+              <button type="button" onClick={() => { setThemeOpen(false); setLanguageOpen(false); setStyleOpen((open) => !open); }} aria-haspopup="listbox" aria-expanded={styleOpen} className="inline-flex items-center gap-1.5 py-1 text-sm transition-opacity hover:opacity-70 cursor-pointer"><span>{styleOptions.find((option) => option.key === inputStyle)?.label}</span><DropdownChevron /></button>
+              {styleOpen && <><div className="fixed inset-0 z-10" aria-hidden="true" onMouseDown={() => setStyleOpen(false)} /><div role="listbox" className="absolute right-0 top-full z-20 mt-2 w-56 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-1 shadow-xl">{styleOptions.map((option) => <MenuOption key={option.key} label={option.label} active={inputStyle === option.key} onClick={() => { applyInputStyle(option.key as typeof inputStyle); setStyleOpen(false); }} />)}</div></>}
+            </div>
+          </div>
+          <div className="flex min-h-16 flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div><div className="text-sm font-medium">{t("language")}</div></div>
+            <div className="relative shrink-0">
+              <button type="button" onClick={() => { setThemeOpen(false); setStyleOpen(false); setLanguageOpen((open) => !open); }} aria-haspopup="listbox" aria-expanded={languageOpen} className="inline-flex items-center gap-1.5 py-1 text-sm transition-opacity hover:opacity-70 cursor-pointer"><span>{languageOptions.find((option) => option.key === language)?.label}</span><DropdownChevron /></button>
+              {languageOpen && <><div className="fixed inset-0 z-10" aria-hidden="true" onMouseDown={() => setLanguageOpen(false)} /><div role="listbox" className="absolute right-0 top-full z-20 mt-2 w-48 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-1 shadow-xl">{languageOptions.map((option) => <MenuOption key={option.key} label={option.label} active={language === option.key} onClick={() => { setLanguage(option.key); setLanguageOpen(false); }} />)}</div></>}
+            </div>
+          </div>
+          <div className="flex min-h-[72px] flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div><div className="text-sm font-medium">{t("thinkingIndicator")}</div><p className="mt-1 max-w-xl text-[13px] leading-5 text-[var(--muted-text)]">{thinkingIndicatorStyle === "classic" ? t("thinkingIndicatorClassicDesc") : t("thinkingIndicatorOutlineDesc")}</p></div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={thinkingIndicatorStyle === "classic"}
+              aria-label={t("thinkingIndicator")}
+              onClick={() => applyThinkingIndicatorStyle(thinkingIndicatorStyle === "classic" ? "outline" : "classic")}
+              className={`relative h-5 w-9 shrink-0 overflow-hidden rounded-full transition-colors duration-[160ms] cursor-pointer ${thinkingIndicatorStyle === "classic" ? "bg-[var(--primary)]" : "bg-[var(--muted-text)]/45"}`}
+            >
+              <span
+                className="absolute left-0.5 top-0.5 z-10 h-4 w-4 rounded-full transition-transform duration-[160ms] ease-out"
+                style={{
+                  backgroundColor: "var(--primary-foreground)",
+                  transform: thinkingIndicatorStyle === "classic" ? "translateX(16px)" : "translateX(0)",
+                }}
+              />
+            </button>
+          </div>
+        </div>
+      </section>
+    );
+  };
+
+  const AccountDrawer = () => drawer ? (
     <>
-      {drawer && (
-        <div
-          className="fixed inset-0 z-40 bg-black/30"
-          onClick={() => setDrawer(false)}
-          aria-hidden="true"
-        />
-      )}
       <aside
-        className={`fixed right-0 top-0 z-50 h-full w-[340px] max-w-[90vw] bg-[var(--surface)] shadow-xl border-l border-[var(--border)]
-                    transform transition-transform duration-300 ease-out ${
-                      drawer ? "translate-x-0" : "translate-x-full"
-                    }`}
-        role="dialog"
-        aria-modal="true"
+        ref={accountMenuRef}
+        className="fixed bottom-[4.25rem] left-2 z-50 flex w-[calc(var(--sbw)-1rem)] max-w-[calc(100vw-1rem)] flex-col overflow-y-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-2 shadow-xl"
+        style={{ maxHeight: "calc(100vh - 5rem)" }}
+        role="menu"
         aria-label={language === "en" ? "Account menu" : "Menu du compte"}
       >
-  <div className="h-16 flex items-center justify-between px-4 shadow-[0_4px_12px_-6px_rgba(0,0,0,0.18)] dark:shadow-[0_6px_16px_-8px_rgba(0,0,0,0.35)]">
-          <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-full bg-[var(--muted)] grid place-items-center overflow-hidden">
+        <div className="flex items-center gap-2.5 rounded-xl py-2 pl-3 pr-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+            <div className="h-8 w-8 shrink-0 rounded-full bg-[var(--muted)] grid place-items-center overflow-hidden">
               {avatarUrl ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img src={avatarUrl} alt={displayName} className="h-full w-full object-cover" />
               ) : (
-                <span className="text-sm font-semibold text-[var(--text)]">
+                <span className="text-xs font-semibold text-[var(--text)]">
                   {initials}
                 </span>
               )}
             </div>
-            <div className="min-w-0">
-              <div className="text-sm font-medium text-[var(--text)] truncate max-w-[220px]">
-                {displayName}
-              </div>
+            <div className="min-w-0 flex-1 space-y-0.5">
+              <ChatTitle title={displayName} className="text-[13px] font-medium leading-4 text-[var(--text)]" />
               {displayEmail && (
-                <div className="text-xs text-[var(--muted-text)] truncate max-w-[220px]">
-                  {displayEmail}
-                </div>
+                <ChatTitle title={displayEmail} className="text-[11px] leading-4 text-[var(--muted-text)]" />
               )}
             </div>
           </div>
-          <button
-            onClick={() => setDrawer(false)}
-            className="h-8 w-8 grid place-items-center rounded hover:bg-[var(--muted)] cursor-pointer"
-            aria-label={t("close")}
-            title={t("close")}
-          >
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--muted-text)]">
             <svg
               viewBox="0 0 24 24"
-              className="h-5 w-5 text-[var(--muted-text)]"
+              className="h-4 w-4"
               fill="none"
               stroke="currentColor"
               strokeWidth="1.8"
+              aria-hidden="true"
             >
-              <path strokeLinecap="round" d="M6 6l12 12M18 6L6 18" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="m9 18 6-6-6-6" />
             </svg>
-          </button>
+          </div>
         </div>
+        <div className="mx-2 border-t border-[var(--border)]" role="separator" />
 
         {/* --- Menu Interface (Thème + Style de barre) --- */}
-        <InterfaceMenu />
-
-        <div className="p-4 space-y-3">
-          <a
-            href="/settings"
-            className="w-full flex items-center gap-2 px-4 py-2 rounded-lg border border-[var(--border)] hover:bg-[var(--muted)] cursor-pointer"
+        <div className="space-y-1 p-2">
+          <button
+            type="button"
+            onClick={() => { setDrawer(false); setSettingsModalOpen(true); }}
+            role="menuitem"
+            className="w-full flex min-h-10 items-center gap-3 rounded-xl px-3 text-left text-sm hover:bg-[var(--muted)] cursor-pointer"
           >
             <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor" aria-hidden="true">
               <path d="M12,16a4,4,0,1,0-4-4A4,4,0,0,0,12,16Zm0-6a2,2,0,1,1-2,2A2,2,0,0,1,12,10ZM3.5,12.877l-1,.579a2,2,0,0,0-.733,2.732l1.489,2.578A2,2,0,0,0,5.99,19.5L7,18.916a1.006,1.006,0,0,1,1.008.011.992.992,0,0,1,.495.857V21a2,2,0,0,0,2,2h3a2,2,0,0,0,2-2V19.782a1.009,1.009,0,0,1,1.5-.866l1.009.582a2,2,0,0,0,2.732-.732l1.488-2.578a2,2,0,0,0-.733-2.732l-1-.579a1.007,1.007,0,0,1-.5-.89,1,1,0,0,1,.5-.864l1-.579a2,2,0,0,0,.733-2.732L20.742,5.234A2,2,0,0,0,18.01,4.5L17,5.083a1.008,1.008,0,0,1-1.5-.867V3a2,2,0,0,0-2-2h-3a2,2,0,0,0-2,2V4.294a.854.854,0,0,1-.428.74l-.154.089a.864.864,0,0,1-.854,0L5.99,4.5a2,2,0,0,0-2.733.732L1.769,7.813A2,2,0,0,0,2.5,10.544l1,.578a1.011,1.011,0,0,1,.5.891A.994.994,0,0,1,3.5,12.877Zm1-3.487-1-.578L4.99,6.234l1.074.62a2.86,2.86,0,0,0,2.85,0l.154-.088A2.863,2.863,0,0,0,10.5,4.294V3h3V4.216a3.008,3.008,0,0,0,4.5,2.6l1.007-.582L20.5,8.812l-1,.578a3.024,3.024,0,0,0,0,5.219l1,.579h0l-1.488,2.578L18,17.184a3.008,3.008,0,0,0-4.5,2.6V21h-3V19.784a3.006,3.006,0,0,0-4.5-2.6l-1.007.582L3.5,15.188l1-.579a3.024,3.024,0,0,0,0-5.219Z" />
             </svg>
-            <span className="text-sm">{t("settings")}</span>
-          </a>
+            <span>{t("settings")}</span>
+          </button>
           <button
-            onClick={ingestEmails}
-            className="w-full flex items-center gap-2 px-4 py-2 rounded-lg border border-[var(--border)] hover:bg-[var(--muted)] cursor-pointer"
+            type="button"
+            onClick={() => { setDrawer(false); ingestEmails(); }}
+            role="menuitem"
+            className="w-full flex min-h-10 items-center gap-3 rounded-xl px-3 text-left text-sm hover:bg-[var(--muted)] cursor-pointer"
           >
             <svg viewBox="0 0 512.011 512.011" className="h-5 w-5" fill="currentColor" aria-hidden="true">
               <path d="M509.931,488.341c0.202-0.425,0.396-0.854,0.57-1.294c0.093-0.234,0.174-0.469,0.258-0.705 c0.148-0.417,0.289-0.836,0.412-1.264c0.076-0.265,0.14-0.531,0.205-0.798c0.099-0.405,0.193-0.81,0.268-1.224 c0.054-0.295,0.094-0.59,0.135-0.885c0.055-0.394,0.107-0.788,0.141-1.189c0.025-0.308,0.035-0.616,0.047-0.924 c0.011-0.287,0.043-0.568,0.043-0.857v-256c0-2.071-0.308-4.107-0.885-6.054c-0.002-0.007-0.004-0.014-0.006-0.021 c-0.194-0.652-0.418-1.293-0.672-1.922c-0.006-0.016-0.013-0.032-0.02-0.048c-0.259-0.635-0.547-1.258-0.866-1.866 c-0.001-0.001-0.001-0.002-0.002-0.003c-1.146-2.184-2.669-4.177-4.534-5.872L314.222,33.974 c-33.011-30.01-83.432-30.01-116.444,0.001L6.994,207.415c-0.235,0.213-0.461,0.434-0.685,0.657 c-0.019,0.018-0.039,0.034-0.058,0.052c-0.008,0.008-0.014,0.016-0.021,0.024c-0.466,0.468-0.904,0.957-1.322,1.462 c-0.057,0.069-0.118,0.136-0.174,0.206c-0.367,0.455-0.709,0.927-1.035,1.408c-0.09,0.132-0.183,0.263-0.27,0.397 c-0.282,0.436-0.543,0.885-0.792,1.34c-0.102,0.186-0.205,0.37-0.301,0.558c-0.219,0.43-0.419,0.868-0.608,1.311 c-0.092,0.216-0.183,0.432-0.268,0.65c-0.17,0.438-0.325,0.882-0.466,1.331c-0.07,0.223-0.135,0.445-0.198,0.67 c-0.128,0.459-0.242,0.922-0.339,1.39c-0.044,0.214-0.082,0.428-0.119,0.642c-0.085,0.483-0.159,0.969-0.21,1.458 c-0.021,0.199-0.032,0.397-0.047,0.597c-0.032,0.416-0.052,0.834-0.06,1.253c-0.003,0.189-0.012,0.378-0.01,0.567V478.6 c-0.002,0.065,0.001,0.13,0,0.195v0.405c0,0.095,0.013,0.188,0.014,0.283c0.007,0.584,0.033,1.167,0.088,1.751 c0.014,0.148,0.035,0.293,0.052,0.44c0.063,0.548,0.143,1.094,0.25,1.638c0.034,0.174,0.075,0.345,0.113,0.518 c0.111,0.502,0.236,1,0.385,1.497c0.06,0.199,0.127,0.394,0.193,0.591c0.151,0.456,0.313,0.909,0.497,1.358 c0.09,0.219,0.189,0.433,0.286,0.649c0.187,0.416,0.38,0.83,0.596,1.238c0.118,0.222,0.246,0.437,0.372,0.655 c0.162,0.281,0.304,0.569,0.48,0.846c0.073,0.115,0.159,0.217,0.235,0.331c0.113,0.17,0.236,0.332,0.354,0.499 c0.299,0.425,0.603,0.844,0.928,1.24c0.05,0.061,0.105,0.118,0.156,0.179c2.216,2.646,4.968,4.65,8.003,5.934 c0.082,0.035,0.168,0.061,0.25,0.095c0.55,0.224,1.105,0.434,1.67,0.611c0.153,0.048,0.312,0.083,0.467,0.127 c0.514,0.149,1.029,0.289,1.552,0.399c0.16,0.034,0.324,0.054,0.486,0.084c0.538,0.1,1.078,0.189,1.623,0.248 c0.139,0.015,0.281,0.02,0.421,0.032c0.579,0.051,1.158,0.084,1.74,0.088c0.041,0,0.081,0.006,0.123,0.006h469.333 c0.04,0,0.078-0.006,0.118-0.006c0.567-0.004,1.131-0.037,1.694-0.086c0.163-0.014,0.328-0.02,0.489-0.037 c0.49-0.054,0.975-0.135,1.46-0.223c0.222-0.04,0.447-0.069,0.667-0.115c0.412-0.088,0.816-0.203,1.222-0.314 c0.271-0.074,0.546-0.137,0.812-0.222c0.376-0.119,0.742-0.266,1.11-0.406c0.274-0.104,0.554-0.196,0.822-0.311 c0.404-0.173,0.795-0.375,1.189-0.573c0.214-0.108,0.435-0.203,0.644-0.318c0.446-0.244,0.877-0.517,1.306-0.794 c0.143-0.092,0.293-0.173,0.433-0.269c0.428-0.29,0.838-0.609,1.247-0.932c0.132-0.104,0.271-0.199,0.4-0.306 c0.349-0.29,0.68-0.606,1.013-0.921c0.178-0.168,0.363-0.327,0.535-0.501c0.253-0.257,0.49-0.533,0.731-0.805 c0.237-0.265,0.477-0.525,0.7-0.801c0.171-0.212,0.328-0.438,0.492-0.658c0.272-0.364,0.541-0.731,0.789-1.112 c0.037-0.057,0.08-0.107,0.116-0.164c0.087-0.137,0.154-0.28,0.238-0.419c0.255-0.419,0.501-0.843,0.727-1.281 C509.738,488.757,509.833,488.549,509.931,488.341z M42.678,274.72l101.217,101.217L42.678,440.343V274.72z M204.01,388.258 c31.714-20.193,72.272-20.193,103.98-0.003l109.4,69.612H94.615L204.01,388.258z M368.11,375.937l101.234-101.234v165.65 L368.11,375.937z M226.479,65.545c16.738-15.216,42.306-15.216,59.043,0l174.25,158.391L331.235,352.473l-0.334-0.213 c-45.684-29.087-104.112-29.087-149.801,0.003l-0.329,0.209l-128.53-128.53L226.479,65.545z" />
               <path d="M176.918,216.96c8.331,8.331,21.839,8.331,30.17,0l27.582-27.582v97.83c0,11.782,9.551,21.333,21.333,21.333 s21.333-9.551,21.333-21.333v-97.83l27.582,27.582c8.331,8.331,21.839,8.331,30.17,0c8.331-8.331,8.331-21.839,0-30.17l-64-64 c-0.004-0.004-0.008-0.006-0.011-0.01c-0.494-0.493-1.012-0.96-1.552-1.403c-0.247-0.203-0.507-0.379-0.761-0.569 c-0.303-0.227-0.6-0.462-0.915-0.673c-0.304-0.203-0.619-0.379-0.93-0.565c-0.286-0.171-0.565-0.35-0.86-0.508 c-0.317-0.17-0.643-0.313-0.967-0.466c-0.308-0.145-0.61-0.299-0.925-0.43c-0.314-0.13-0.635-0.235-0.953-0.349 c-0.338-0.122-0.672-0.251-1.018-0.356c-0.318-0.096-0.642-0.167-0.964-0.248c-0.353-0.089-0.701-0.188-1.061-0.259 c-0.372-0.074-0.748-0.117-1.122-0.171c-0.314-0.045-0.622-0.105-0.941-0.136c-1.4-0.138-2.81-0.138-4.21,0 c-0.318,0.031-0.627,0.091-0.941,0.136c-0.375,0.054-0.75,0.097-1.122,0.171c-0.359,0.071-0.708,0.17-1.061,0.259 c-0.322,0.081-0.645,0.152-0.964,0.248c-0.346,0.105-0.68,0.234-1.018,0.356c-0.318,0.114-0.639,0.219-0.953,0.349 c-0.315,0.131-0.618,0.284-0.925,0.43c-0.324,0.153-0.65,0.296-0.967,0.466c-0.294,0.158-0.574,0.337-0.86,0.508 c-0.311,0.186-0.626,0.362-0.93,0.565c-0.315,0.211-0.612,0.446-0.915,0.673c-0.254,0.19-0.514,0.366-0.761,0.569 c-0.54,0.443-1.059,0.91-1.552,1.403c-0.004,0.004-0.008,0.006-0.011,0.01l-64,64 C168.587,195.122,168.587,208.629,176.918,216.96z" />
             </svg>
-            <span className="text-sm">{t("emailIngestion")}</span>
+            <span>{t("emailIngestion")}</span>
           </button>
 
           <button
-            onClick={reindex}
-            className="w-full flex items-center gap-2 px-4 py-2 rounded-lg border border-[var(--border)] hover:bg-[var(--muted)] cursor-pointer"
+            type="button"
+            onClick={() => { setDrawer(false); reindex(); }}
+            role="menuitem"
+            className="w-full flex min-h-10 items-center gap-3 rounded-xl px-3 text-left text-sm hover:bg-[var(--muted)] cursor-pointer"
           >
             <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor" aria-hidden="true">
               <path d="M13.0344 14.0062C13.0361 14.5585 12.5898 15.0076 12.0375 15.0093C11.4853 15.0111 11.0361 14.5647 11.0344 14.0125L13.0344 14.0062Z" />
@@ -2155,24 +2597,27 @@ export default function Page() {
               <path d="M8.30003 5.31387C7.91073 5.70562 7.9127 6.3388 8.30445 6.7281C8.69619 7.1174 9.32938 7.11539 9.71867 6.72364L8.30003 5.31387Z" />
               <path d="M4 12C4 10.8954 4.89543 10 6 10C6.55228 10 7 9.55229 7 9C7 8.44772 6.55228 8 6 8C3.79086 8 2 9.79086 2 12V18C2 20.2091 3.79086 22 6 22H17C19.7614 22 22 19.7614 22 17V12C22 9.79086 20.2091 8 18 8C17.4477 8 17 8.44772 17 9C17 9.55229 17.4477 10 18 10C19.1046 10 20 10.8954 20 12V17C20 18.6569 18.6569 20 17 20H6C4.89543 20 4 19.1046 4 18V12Z" />
             </svg>
-            <span className="text-sm">{t("reindex")}</span>
+            <span>{t("reindex")}</span>
           </button>
 
+          <div className="mx-1 my-1 border-t border-[var(--border)]" role="separator" />
           <button
-            onClick={signOut}
-            className="w-full flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 cursor-pointer"
+            type="button"
+            onClick={() => { setDrawer(false); signOut(); }}
+            role="menuitem"
+            className="w-full flex min-h-10 items-center gap-3 rounded-xl px-3 text-left text-sm text-[var(--text)] hover:bg-[var(--muted)] cursor-pointer"
           >
             <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
               <path d="M4 4v16M4 4h6M4 20h6" />
               <path d="M13 16l4-4-4-4" />
               <path d="M10 12h7" />
             </svg>
-            <span className="text-sm">{t("signOut")}</span>
+            <span>{t("signOut")}</span>
           </button>
         </div>
       </aside>
     </>
-  );
+  ) : null;
 
   /* ---------------- Render ---------------- */
   return (
@@ -2183,7 +2628,7 @@ export default function Page() {
       >
         {/* Sidebar */}
         <aside
-          className="h-screen border-r border-[var(--border)] bg-[var(--surface)] flex flex-col
+          className="h-screen shrink-0 border-r border-[var(--border)] bg-[var(--surface)] flex flex-col
                     overflow-hidden origin-left will-change-transform
                     transition-[width,transform,opacity] duration-500 ease-in-out
                     [transform:translateZ(0)]"
@@ -2195,12 +2640,12 @@ export default function Page() {
           }}
         >
           <div className="sticky top-0 z-10 bg-[var(--surface)]">
-            <div className="p-2">
-              <img src="/logo.png" alt="Auxilium logo" className="h-14 w-auto" />
+            <div className="flex h-[72px] items-center px-4">
+              <span className="text-xl font-semibold tracking-tight text-[var(--text)]">Auxilium</span>
             </div>
             <div className="px-2 pb-2">
               <button
-                onClick={newChat}
+                onClick={newStandaloneChat}
                 className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-[var(--text)] hover:bg-[var(--muted)] transition-colors duration-200 cursor-pointer"
               >
                 <NewChatIcon className="h-5 w-5 text-[var(--text)]" aria-hidden="true" />
@@ -2267,25 +2712,17 @@ export default function Page() {
                     >
                       <ProjectFolderIcon isOpen={expandedProjectIds.has(project.id) || !!search.trim()} className="h-[18px] w-[18px] shrink-0 text-[var(--text)]" aria-hidden="true" />
                       <div className="flex-1 min-w-0 truncate text-sm text-[var(--text)]">{project.name}</div>
-                      <button type="button" onClick={(e) => toggleProjectPinned(e, project)} className="shrink-0 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer" aria-label="Désépingler le projet" title="Désépingler"><PinIcon className="h-4 w-4" aria-hidden="true" /></button>
+                      <button type="button" onClick={(e) => toggleProjectPinned(e, project)} className="shrink-0 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer" aria-label="Désépingler le projet"><PinIcon className="h-4 w-4" aria-hidden="true" /></button>
                       <button type="button" className="menu-toggle shrink-0 p-1 rounded text-[var(--muted-text)] hover:bg-[var(--muted)] cursor-pointer" onClick={(e) => {
                         e.stopPropagation();
-                        if (projectMenuId === project.id) { setProjectMenuId(null); setProjectMenuPosition(null); return; }
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        setProjectMenuPosition({ top: rect.bottom + 4, left: Math.max(8, rect.right - 176) });
-                        setProjectMenuId(project.id);
+                        openProjectContextMenu(e.currentTarget, project.id);
                       }} aria-label={t("moreActions")}>
                         <svg viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor"><circle cx="4" cy="10" r="1.5" /><circle cx="10" cy="10" r="1.5" /><circle cx="16" cy="10" r="1.5" /></svg>
                       </button>
-                      {!projectsSectionOpen && projectMenuId === project.id && projectMenuPosition && typeof document !== "undefined" && createPortal(
-                        <div className="menu-pop theme-context-menu fixed w-44 rounded-lg border py-1 z-50" style={projectMenuPosition} onClick={(e) => e.stopPropagation()}>
-                          <button type="button" onClick={() => renameProject(project)} className="theme-context-menu-item w-full flex gap-2 px-3 py-2 text-sm text-left cursor-pointer"><EditIcon className="h-4 w-4" />{t("rename")}</button>
-                          <button type="button" onClick={() => deleteProject(project)} className="theme-context-menu-item theme-context-menu-item-danger w-full flex gap-2 px-3 py-2 text-sm text-left cursor-pointer"><TrashIcon className="h-4 w-4" />Supprimer le projet</button>
-                        </div>, document.body
-                      )}
+                      {!projectsSectionOpen && projectMenuId === project.id && projectMenuOrigin === "sidebar" && renderProjectContextMenu(project)}
                     </div>
                   ))}
-                  {pinnedChats.map((chat) => renderChatItem(chat, false, "pinned"))}
+                  {pinnedChats.map((chat) => renderChatItem(chat, { menuLocation: "pinned" }))}
                 </div>}
               </section>
             )}
@@ -2322,7 +2759,6 @@ export default function Page() {
                   }}
                   className="ml-auto grid h-5 w-5 place-items-center text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer"
                   aria-label="Nouveau projet"
-                  title="Nouveau projet"
                 >
                   <PlusIcon className="h-4 w-4" aria-hidden="true" />
                 </button>
@@ -2331,7 +2767,7 @@ export default function Page() {
               <div className="mt-1 space-y-1">
                 {projects.filter((project) => !project.pinned).map((project) => {
                   const open = projectMenuId === project.id;
-                  const projectChats = visibleChats.filter((chat) => chat.projectId === project.id && !chat.pinned);
+                  const projectChats = visibleChats.filter((chat) => chat.projectId === project.id);
                   const expanded = expandedProjectIds.has(project.id) || !!search.trim();
                   const showAll = showAllChatsForProjects.has(project.id) || !!search.trim();
                   const initialChats = projectChats.slice(0, 5);
@@ -2341,37 +2777,24 @@ export default function Page() {
                       <div className={`chat-item group relative flex items-center gap-2 px-3 py-2 rounded-md cursor-pointer ${highlightedProjectId === project.id ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"}`} onClick={() => { toggleProject(project.id); setMenuId(null); }}>
                         <ProjectFolderIcon isOpen={expanded} className="h-[18px] w-[18px] shrink-0 text-[var(--text)]" aria-hidden="true" />
                         <div className="flex-1 min-w-0 truncate text-sm text-[var(--text)]">{project.name}</div>
-                        <button type="button" className="shrink-0 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer" onClick={(e) => toggleProjectPinned(e, project)} aria-label={project.pinned ? "Désépingler le projet" : "Épingler le projet"} title={project.pinned ? "Désépingler" : "Épingler"}>
+                        <button type="button" className="shrink-0 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer" onClick={(e) => toggleProjectPinned(e, project)} aria-label={project.pinned ? "Désépingler le projet" : "Épingler le projet"}>
                           <PinIcon className="h-4 w-4" aria-hidden="true" />
                         </button>
                         <button type="button" className={`menu-toggle shrink-0 p-1 rounded text-[var(--muted-text)] hover:bg-[var(--muted)] cursor-pointer ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`} onClick={(e) => {
                           e.stopPropagation();
-                          if (open) {
-                            setProjectMenuId(null);
-                            setProjectMenuPosition(null);
-                            return;
-                          }
-                          const rect = e.currentTarget.getBoundingClientRect();
-                          setProjectMenuPosition({ top: rect.bottom + 4, left: Math.max(8, rect.right - 176) });
-                          setProjectMenuId(project.id);
+                          openProjectContextMenu(e.currentTarget, project.id);
                         }} aria-label={t("moreActions")}>
                           <svg viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor"><circle cx="4" cy="10" r="1.5" /><circle cx="10" cy="10" r="1.5" /><circle cx="16" cy="10" r="1.5" /></svg>
                         </button>
-                        {open && projectMenuPosition && typeof document !== "undefined" && createPortal(
-                          <div className="menu-pop theme-context-menu fixed w-44 rounded-lg border py-1 z-50" style={projectMenuPosition} onClick={(e) => e.stopPropagation()}>
-                            <button type="button" onClick={() => renameProject(project)} className="theme-context-menu-item w-full flex gap-2 px-3 py-2 text-sm text-left cursor-pointer"><EditIcon className="h-4 w-4" />{t("rename")}</button>
-                            <button type="button" onClick={() => deleteProject(project)} className="theme-context-menu-item theme-context-menu-item-danger w-full flex gap-2 px-3 py-2 text-sm text-left cursor-pointer"><TrashIcon className="h-4 w-4" />Supprimer le projet</button>
-                          </div>,
-                          document.body
-                        )}
+                        {open && projectMenuOrigin === "sidebar" && renderProjectContextMenu(project)}
                       </div>
                       <div className="project-chat-accordion" data-open={expanded}>
                         <div className="project-chat-accordion-content">
                           <div className="project-chat-accordion-inner space-y-1">
-                            {initialChats.map((chat) => renderChatItem(chat, true))}
+                            {initialChats.map((chat) => renderChatItem(chat, { isProjectChat: true }))}
                             {showAll && extraChats.length > 0 && (
                               <div className="project-extra-chats space-y-1">
-                                {extraChats.map((chat) => renderChatItem(chat, true))}
+                                {extraChats.map((chat) => renderChatItem(chat, { isProjectChat: true }))}
                               </div>
                             )}
                             {!showAll && projectChats.length > 5 && (
@@ -2394,11 +2817,10 @@ export default function Page() {
               <ChevronDownIcon className="ml-1 h-[15px] w-[15px] shrink-0 text-[var(--muted-text)] opacity-0 transition-opacity duration-200 ease-out group-hover:opacity-100" style={{ transform: chatsSectionOpen ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 180ms ease, opacity 200ms ease-out" }} aria-hidden="true" />
               <button
                 type="button"
-                onClick={(e) => { e.stopPropagation(); setChatsSectionOpen(true); newChat(); }}
-                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); setChatsSectionOpen(true); newChat(); } }}
+                onClick={(e) => { e.stopPropagation(); setChatsSectionOpen(true); newStandaloneChat(); }}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); setChatsSectionOpen(true); newStandaloneChat(); } }}
                 className="ml-auto grid h-5 w-5 place-items-center text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer"
                 aria-label="Nouvelle discussion"
-                title="Nouvelle discussion"
               >
                 <NewChatIcon className="h-4 w-4" aria-hidden="true" />
               </button>
@@ -2426,13 +2848,11 @@ export default function Page() {
                           }
                           loadChat(c);
                         }}
-                        className={`chat-item group relative w-full flex items-center justify-between gap-2 px-3 py-2 rounded-md cursor-pointer ${
+                        className={`chat-item group relative w-full flex items-center justify-between gap-2 pl-3 pr-0 py-1.5 rounded-md cursor-pointer ${
                           active ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"
                         }`}
-                        title={c.title}
                       >
-                        {c.pinned && <PinnedChatIcon className="h-[17px] w-[17px] shrink-0 text-[var(--muted-text)]" aria-hidden="true" />}
-                        <div className={`flex min-w-0 flex-1 items-center text-sm text-[var(--text)] ${open ? "pr-12" : "group-hover:pr-12"}`}>
+                        <div className={`flex min-w-0 flex-1 items-center text-[13px] leading-[18px] font-normal text-[var(--text)] ${open ? "pr-16" : "group-hover:pr-16"}`}>
                           <ChatTitle title={c.title} />
                           {disabled && (
                             <span className="ml-1 shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-[var(--border)] text-[var(--muted-text)] align-middle">
@@ -2445,7 +2865,6 @@ export default function Page() {
                           onClick={(e) => toggleChatPinned(e, c)}
                           className="absolute right-8 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer"
                           aria-label={c.pinned ? "Désépingler la discussion" : "Épingler la discussion"}
-                          title={c.pinned ? "Désépingler" : "Épingler"}
                         >
                           <PinIcon className="h-4 w-4" aria-hidden="true" />
                         </button>
@@ -2505,7 +2924,55 @@ export default function Page() {
               document.body
             )}
           </div>
+          <div className="mt-auto px-2 pb-2 pt-3">
+            <div className="mx-2 border-t border-[var(--border)]" role="separator" />
+            <div className="pt-2">
+              <AccountButton />
+            </div>
+          </div>
         </aside>
+
+        <ConfirmDeleteModal
+          open={!!deleteConfirmation}
+          title={deleteConfirmation?.kind === "project" ? "Supprimer ce projet ?" : "Supprimer le chat ?"}
+          description={deleteConfirmation?.kind === "project" ? <><p>Le projet <span className="font-semibold text-[var(--text)]">{deleteConfirmation.name}</span> sera définitivement supprimé. Les chats associés seront conservés hors projet.</p><p className="mt-2">Cette action est irréversible.</p></> : <><p>Cette action supprimera définitivement <span className="font-semibold text-[var(--text)]">{deleteConfirmation?.name}</span>.</p><p className="mt-2">Cette action est irréversible.</p></>}
+          loading={deletingItem}
+          error={deleteConfirmationError}
+          onCancel={() => {
+            if (deletingItem) return;
+            setDeleteConfirmation(null);
+            setDeleteConfirmationError(null);
+          }}
+          onConfirm={async () => {
+            if (!deleteConfirmation || deletingItem) return;
+            setDeletingItem(true);
+            setDeleteConfirmationError(null);
+            try {
+              if (deleteConfirmation.kind === "chat") {
+                await deleteChat(deleteConfirmation.id);
+              } else {
+                const project = projects.find((item) => item.id === deleteConfirmation.id);
+                if (!project) throw new Error("Projet introuvable");
+                await deleteProject(project);
+              }
+              setDeleteConfirmation(null);
+            } catch (err: unknown) {
+              setDeleteConfirmationError(errorMessage(err) || "Impossible de supprimer cet élément");
+            } finally {
+              setDeletingItem(false);
+            }
+          }}
+        />
+
+        <ProjectSettingsModal
+          project={projectSettingsProject}
+          onClose={() => setProjectSettingsProject(null)}
+          onSaveName={saveProjectName}
+          onDelete={(project) => {
+            setProjectSettingsProject(null);
+            requestDeleteProject(project);
+          }}
+        />
 
         {projectCreationModalOpen && (
           <div className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/30 p-3 backdrop-blur-[1px]" onClick={closeProjectCreationModal}>
@@ -2605,61 +3072,44 @@ export default function Page() {
         )}
 
         {/* Main */}
-        <main className="flex-1">
-          {/* Header */}
-          <header
-            className={`${focus ? "h-0 opacity-0 pointer-events-none -translate-y-2" : "h-16"} flex items-center bg-[var(--surface)] shadow-sm sticky top-0 z-10 transition-all duration-200`}
-            aria-hidden={focus}
+        <main className="min-w-0 flex-1">
+          {/* Actions d'interface */}
+          <button
+            type="button"
+            onClick={toggleFocus}
+            className={`fixed right-4 top-4 z-30 inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors duration-150 cursor-pointer ${focus ? "bg-[color-mix(in_oklab,var(--primary)_12%,transparent)] text-[var(--text)]" : "text-[var(--muted-text)] hover:bg-[var(--muted)] hover:text-[var(--text)]"}`}
+            aria-label={focus ? t("exitFocusTitle") : t("enableFocusTitle")}
+            aria-pressed={focus}
           >
-            <div className="mx-auto text-center w-full">
-              <h1 className="text-2xl font-light font-[Calibri]">Auxilium</h1>
+            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3 8V6a3 3 0 0 1 3-3h2" />
+              <path d="M21 8V6a3 3 0 0 0-3-3h-2" />
+              <path d="M3 16v2a3 3 0 0 0 3 3h2" />
+              <path d="M21 16v2a3 3 0 0 1-3 3h-2" />
+            </svg>
+            <span>{focus ? t("exitFocus") : t("focusMode")}</span>
+          </button>
+          {backendHealthy === false && (
+            <div className="fixed right-4 top-14 z-30 flex items-center gap-2 rounded-full border border-orange-500/50 bg-orange-500/10 px-3 py-1.5 text-xs text-orange-600 dark:text-orange-400">
+              <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="10" opacity="0.3" /><circle cx="12" cy="12" r="6" /></svg>
+              <span>{t("serverOffline")}</span>
             </div>
-            <div className="absolute right-3 flex items-center gap-3">
-              {/* Indicateur de santé du serveur */}
-              {backendHealthy === false && (
-                <div
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-orange-500/50 bg-orange-500/10 text-orange-600 dark:text-orange-400 text-xs"
-                  title={t("serverOfflineHelp")}
-                >
-                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="currentColor">
-                    <circle cx="12" cy="12" r="10" opacity="0.3" />
-                    <circle cx="12" cy="12" r="6" />
-                  </svg>
-                  <span>{t("serverOffline")}</span>
-                </div>
-              )}
-              <button
-                onClick={toggleFocus}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-[var(--border)] hover:bg-[var(--muted)] cursor-pointer text-sm"
-                title={focus ? t("exitFocusTitle") : t("enableFocusTitle")}
-                aria-pressed={focus}
-              >
-                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M3 8V6a3 3 0 0 1 3-3h2" />
-                  <path d="M21 8V6a3 3 0 0 0-3-3h-2" />
-                  <path d="M3 16v2a3 3 0 0 0 3 3h2" />
-                  <path d="M21 16v2a3 3 0 0 1-3 3h-2" />
-                </svg>
-                <span>{focus ? t("exitFocus") : t("focusMode")}</span>
-              </button>
-              <AccountButton />
-            </div>
-          </header>
+          )}
 
           {/* Chat zone */}
-          {messages.length > 0 && (
+          {!projectHome && messages.length > 0 && (
             <div
               className="transition-[left,top] duration-500 ease-in-out"
               style={{
                 position: "fixed",
                 left: "var(--sbw)",
                 right: 0,
-                top: focus ? 0 : HEADER_H,
+                top: 0,
                 bottom: `calc(${footerH}px + max(env(safe-area-inset-bottom, 0px), ${FOOTER_GAP_MIN}px))`,
                 overflowY: "auto",
               }}
             >
-              <div className="mx-auto max-w-[52rem] px-3.5 mt-4">
+              <div className="mx-auto max-w-[52rem] px-3.5 mt-12">
                 <div className="space-y-5" style={{ paddingBottom: CHAT_FOOTER_GAP }}>
                   {messages.map((m, i) => {
                     const isUser = m.role === "user";
@@ -2680,7 +3130,6 @@ export default function Page() {
                               target="_blank"
                               rel="noopener noreferrer"
                               className="underline underline-offset-2 hover:opacity-80"
-                              title={s.path}
                             >
                               {s.path}
                             </a>{" "}
@@ -2707,8 +3156,8 @@ export default function Page() {
                         <li key={key} className="list-none">
                           <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 sm:flex-nowrap">
                             <div className="min-w-0 flex-1 basis-48">
-                              <div className="truncate font-medium" title={sourceDisplayName}><span className="mr-2 text-xs text-[var(--muted-text)]">[{key + 1}]</span>{sourceDisplayName}</div>
-                              {folder && <div className="mt-0.5 truncate text-xs text-[var(--muted-text)]" title={folder}>{folder}</div>}
+                              <div className="truncate font-medium"><span className="mr-2 text-xs text-[var(--muted-text)]">[{key + 1}]</span>{sourceDisplayName}</div>
+                              {folder && <div className="mt-0.5 truncate text-xs text-[var(--muted-text)]">{folder}</div>}
                           {unavailable ? (
                             <div className="text-xs text-amber-600 dark:text-amber-300 mt-1">Source introuvable à son emplacement d&apos;origine</div>
                           ) : null}
@@ -2719,7 +3168,6 @@ export default function Page() {
                                 type="button"
                                 onClick={() => triggerSourceAction("open_file")}
                                 disabled={unavailable}
-                                title={unavailable ? "Source introuvable" : "Ouvrir le fichier"}
                                 aria-label="Ouvrir le fichier"
                                 className="inline-flex h-10 w-10 items-center justify-center rounded-lg text-[var(--foreground)] transition-colors duration-150 hover:bg-[var(--muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40"
                               >
@@ -2729,7 +3177,6 @@ export default function Page() {
                                 type="button"
                                 onClick={() => triggerSourceAction("reveal_in_folder")}
                                 disabled={unavailable}
-                                title={unavailable ? "Source introuvable" : "Afficher dans le dossier"}
                                 aria-label="Afficher dans le dossier"
                                 className="inline-flex h-10 w-10 items-center justify-center rounded-lg text-[var(--muted-text)] transition-colors duration-150 hover:bg-[var(--muted)] hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40"
                               >
@@ -2758,7 +3205,7 @@ export default function Page() {
 
                           {/* Bulle */}
                           {isUser ? (
-                            <div className="w-fit max-w-full ml-auto break-words whitespace-pre-wrap px-4 py-3 rounded-2xl shadow-sm bg-[var(--muted)]"
+                            <div className={`w-fit max-w-full ml-auto break-words whitespace-pre-wrap px-4 py-3 rounded-2xl shadow-sm bg-[var(--muted)]${thinkingIndicatorStyle === "outline" && thinking?.messageId === m.id ? " aux-user-bubble--thinking" : ""}${thinkingIndicatorStyle === "outline" && thinking?.messageId === m.id && thinking.leaving ? " aux-user-bubble--thinking-leaving" : ""}`}
                               style={{
                                 fontFamily: "'Söhne', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif",
                                 fontSize: "16px",
@@ -2913,7 +3360,6 @@ export default function Page() {
                                 isLast ? "" : "invisible group-hover:visible"
                               }`}
                               aria-label={t("reply")}
-                              title={t("reply")}
                             >
                               <ReplyArrow className="h-5 w-5" />
                               <span className="sr-only">{t("reply")}</span>
@@ -2927,7 +3373,6 @@ export default function Page() {
                                 isLast ? "" : "invisible group-hover:visible"
                               } ${loading ? "opacity-0 pointer-events-none" : ""}`}
                               aria-label={t("copyMessage")}
-                              title={copiedId === m.id ? t("copied") : t("copy")}
                               disabled={loading}
                               aria-disabled={loading}
                             >
@@ -2939,7 +3384,11 @@ export default function Page() {
                       </div>
                       {isUser && thinking?.messageId === m.id && (
                         <div className="assistant-message flex justify-start">
-                          <ThinkingIndicator mode={thinking.mode} statuses={thinking.statuses} leaving={thinking.leaving} />
+                          {thinkingIndicatorStyle === "outline" ? (
+                            <OutlineThinkingIndicator mode={thinking.mode} statuses={thinking.statuses} leaving={thinking.leaving} />
+                          ) : (
+                            <ThinkingIndicator mode={thinking.mode} statuses={thinking.statuses} leaving={thinking.leaving} />
+                          )}
                         </div>
                       )}
                       </Fragment>
@@ -2952,8 +3401,64 @@ export default function Page() {
           )}
 
           {/* État vide */}
-          {messages.length === 0 && (
-            <div className="grid place-items-center" style={{ height: focus ? "100vh" : `calc(100vh - ${HEADER_H}px)` }}>
+          {projectHome ? (
+            <div className="min-h-screen overflow-y-auto px-4 pb-16 pt-16 sm:px-8">
+              <div className="mx-auto w-full max-w-[820px]">
+                <header className="flex items-center justify-between gap-4">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <ProjectFolderIcon isOpen={false} className="h-7 w-7 shrink-0 text-[var(--text)]" aria-hidden="true" />
+                    <h1 className="truncate text-[22px] font-semibold tracking-[-0.01em] text-[var(--text)] sm:text-2xl">{projectHome.name}</h1>
+                  </div>
+                  <button type="button" className="menu-toggle grid h-8 w-8 shrink-0 place-items-center rounded-lg text-[var(--muted-text)] hover:bg-[var(--muted)] hover:text-[var(--text)] cursor-pointer" onClick={(event) => openProjectContextMenu(event.currentTarget, projectHome.id, "project-home")} aria-label={t("moreActions")}>
+                    <svg viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor" aria-hidden="true"><circle cx="4" cy="10" r="1.5" /><circle cx="10" cy="10" r="1.5" /><circle cx="16" cy="10" r="1.5" /></svg>
+                  </button>
+                  {projectMenuId === projectHome.id && projectMenuOrigin === "project-home" && renderProjectContextMenu(projectHome, { showHome: false })}
+                </header>
+
+                <section className="mt-8">
+                  <InputBar
+                    inputRef={inputRef}
+                    value={input}
+                    onChange={setInput}
+                    onSend={sendMessage}
+                    onStop={stopThinking}
+                    loading={loading}
+                    sourceMode={sourceMode}
+                    setSourceMode={setSourceMode}
+                    replyTarget={replyTarget}
+                    onCancelReply={() => setReplyTarget(null)}
+                    inputStyle={inputStyle}
+                    placeholder={`Nouveau chat dans ${projectHome.name}`}
+                    sourceMenuDirection="down"
+                  />
+                </section>
+
+                <section className="mt-10">
+                  <div className="mx-auto flex w-fit rounded-lg bg-[var(--muted)] p-1 text-sm">
+                    <button type="button" className="rounded-md bg-[var(--surface)] px-3 py-1.5 font-medium text-[var(--text)] shadow-sm" aria-current="page">Chats</button>
+                  </div>
+                  <div className="mt-5 border-t border-[var(--border)]">
+                    {projectHomeChats.length === 0 ? (
+                      <p className="py-8 text-sm text-[var(--muted-text)]">Aucune conversation dans ce projet.</p>
+                    ) : projectHomeChats.map((chat) => {
+                      const lastUserMessage = [...chat.messages].reverse().find((message) => message.role === "user" && message.content.trim());
+                      const preview = lastUserMessage ? cleanProjectChatPreview(lastUserMessage.content) || "Aucun message" : "Aucun message";
+                      return (
+                        <button key={chat.id} type="button" onClick={() => loadChat(chat)} className="flex w-full items-start gap-4 border-b border-[var(--border)] py-4 text-left transition-colors hover:bg-[color-mix(in_oklab,var(--muted)_55%,transparent)] cursor-pointer">
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-semibold text-[var(--text)]">{chat.title}</div>
+                            <div className="mt-1 line-clamp-1 text-sm leading-5 text-[var(--muted-text)]">{preview}</div>
+                          </div>
+                          <time dateTime={chat.createdAt} className="shrink-0 pt-0.5 text-xs text-[var(--muted-text)]">{formatProjectChatDate(chat.createdAt)}</time>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              </div>
+            </div>
+          ) : messages.length === 0 && (
+            <div className="grid min-h-screen place-items-center">
               <div className="text-center w-full px-4 -translate-y-12">
                 <h2 className="text-2xl font-semibold">{t("exploreTitle")}</h2>
                 <p className="text-[var(--muted-text)] mt-1">
@@ -2980,7 +3485,7 @@ export default function Page() {
         </main>
 
         {/* Barre d’input fixe (flottante au-dessus du bord) */}
-        {messages.length > 0 && (
+        {!projectHome && messages.length > 0 && (
           <div
             ref={footerRef}
             className="fixed z-20 bg-transparent transition-[left] duration-500 ease-in-out"
@@ -3008,15 +3513,15 @@ export default function Page() {
           </div>
         )}
 
-        {/* Rideau compte */}
+        {/* Menus globaux */}
         <AccountDrawer />
+        <SettingsModal open={settingsModalOpen} onClose={() => setSettingsModalOpen(false)} generalContent={<GeneralSettings />} />
       </div>
         {showScrollDown && (
           <button
             onClick={() => bottomRef.current?.scrollIntoView({ behavior: "smooth" })}
             className="fixed bottom-24 right-6 z-30 h-12 w-12 rounded-full bg-[var(--primary)] shadow-lg grid place-items-center hover:bg-[color-mix(in oklab,var(--primary) 80%,black 20%)] transition cursor-pointer"
             aria-label={t("scrollBottom")}
-            title={t("scrollBottom")}
           >
             <svg
               viewBox="0 0 24 24"
@@ -3029,16 +3534,6 @@ export default function Page() {
             >
               <path d="M6 9l6 6 6-6" />
             </svg>
-          </button>
-        )}
-        {focus && (
-          <button
-            onClick={toggleFocus}
-            className="fixed top-4 left-4 z-40 px-3 py-1.5 rounded-full border border-[var(--border)] bg-[var(--surface)] shadow-md hover:bg-[var(--muted)] cursor-pointer text-sm"
-            title={t("exitFocusTitle")}
-            aria-label={t("exitFocus")}
-          >
-            {t("exitFocus")}
           </button>
         )}
     </RequireAuth>

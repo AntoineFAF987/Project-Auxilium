@@ -36,6 +36,8 @@ def init_db() -> None:
                 tenant_id   TEXT,
                 user_id     TEXT,
                 title       TEXT NOT NULL DEFAULT 'Nouveau chat',
+                title_generated INTEGER NOT NULL DEFAULT 0,
+                title_is_manual INTEGER NOT NULL DEFAULT 0,
                 deleted     INTEGER NOT NULL DEFAULT 0,
                 created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -54,6 +56,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE chats ADD COLUMN project_id TEXT NULL")
         if "pinned" not in chat_columns:
             conn.execute("ALTER TABLE chats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        if "title_generated" not in chat_columns:
+            conn.execute("ALTER TABLE chats ADD COLUMN title_generated INTEGER NOT NULL DEFAULT 0")
+        if "title_is_manual" not in chat_columns:
+            conn.execute("ALTER TABLE chats ADD COLUMN title_is_manual INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS projects (
@@ -130,13 +136,58 @@ def rename_chat(tenant_id: str, user_id: str, chat_id: str, title: str) -> bool:
     with get_connection() as conn:
         cur = conn.execute(
             """
-            UPDATE chats SET title=?, updated_at=CURRENT_TIMESTAMP
+            UPDATE chats SET title=?, title_is_manual=1, updated_at=CURRENT_TIMESTAMP
             WHERE id=? AND tenant_id=? AND user_id=? AND deleted=0
             """,
             (title, chat_id, tenant_id, user_id),
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+def set_generated_chat_title(tenant_id: str, user_id: str, chat_id: str, title: str) -> bool:
+    """Persist a generated title once, without ever replacing a manual title."""
+    init_db()
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            UPDATE chats SET title=?, title_generated=1, updated_at=CURRENT_TIMESTAMP
+            WHERE id=? AND tenant_id=? AND user_id=? AND deleted=0
+              AND title_is_manual=0 AND title_generated=0
+            """,
+            (title, chat_id, tenant_id, user_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def should_generate_chat_title(tenant_id: str, user_id: str, chat_id: str) -> bool:
+    init_db()
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM chats
+            WHERE id=? AND tenant_id=? AND user_id=? AND deleted=0
+              AND title_is_manual=0 AND title_generated=0
+            """,
+            (chat_id, tenant_id, user_id),
+        ).fetchone()
+        return bool(row)
+
+
+def mark_chat_title_generation_attempted(tenant_id: str, user_id: str, chat_id: str) -> None:
+    """Avoid retrying a failed best-effort title generation on every later turn."""
+    init_db()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE chats SET title_generated=1
+            WHERE id=? AND tenant_id=? AND user_id=? AND deleted=0
+              AND title_is_manual=0 AND title_generated=0
+            """,
+            (chat_id, tenant_id, user_id),
+        )
+        conn.commit()
 
 
 def soft_delete_chat(tenant_id: str, user_id: str, chat_id: str) -> bool:

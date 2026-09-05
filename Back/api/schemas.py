@@ -60,5 +60,6 @@ class AskOut(BaseModel):
     ctx_len: Optional[int] = None
     request_id: Optional[str] = None
     chat_id: Optional[str] = None
+    chat_title: Optional[str] = None
     review: Optional[PostGenerationReviewOut] = None
     faithfulness_review: Optional[dict] = None
