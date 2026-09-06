@@ -13,6 +13,7 @@ import ThinkingIndicator from "./components/ThinkingIndicator";
 import OutlineThinkingIndicator from "./components/OutlineThinkingIndicator";
 import { FolderIcon, getSourceFileKind, SourceFileIcon } from "./components/SourceFileIcon";
 import { ResponseRenderer } from "./components/ResponseRenderer";
+import { EmailDraftArtifact, type ResponseArtifact } from "./components/EmailDraftArtifact";
 import { SettingsContent } from "./settings/page";
 
 import "katex/dist/katex.min.css";
@@ -53,6 +54,8 @@ type Message = {
   replyTo?: ReplyMeta;
   mode?: string;            // +++ nouveau
   caveat?: PostGenerationReview;
+  artifacts?: ResponseArtifact[];
+  meta?: Record<string, unknown>;
 };
 
 type StoredChat = { id: string; createdAt: string; title: string; messages: Message[]; projectId?: string | null; pinned?: boolean; optimistic?: boolean };
@@ -1508,7 +1511,7 @@ export default function Page() {
     try {
       const { idToken } = await getTokens();
       const serverMessages = await chatsApi.fetchChatMessages(c.id, idToken);
-      const converted = serverMessages.map((m) => ({ id: m.id, role: m.role, content: m.content, sources: m.sources } as Message));
+      const converted = serverMessages.map((m) => ({ id: m.id, role: m.role, content: m.content, sources: m.sources, artifacts: m.artifacts, meta: m.meta } as Message));
       setChatId(c.id);
       setChats((previous) => previous.map((chat) => chat.id === c.id ? { ...chat, messages: converted } : chat));
       setSelectedProjectId(c.projectId ?? null);
@@ -1656,7 +1659,7 @@ export default function Page() {
           }
           loadChat(chat);
         }}
-        className={`chat-item group relative w-full flex items-center justify-between gap-2 py-1.5 pr-0 rounded-md cursor-pointer ${isProjectChat ? "pl-8" : "pl-3"} ${active ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"}`}
+        className={`chat-item group relative w-full flex items-center justify-between gap-2 py-[7px] pr-0 rounded-md cursor-pointer ${isProjectChat ? "pl-8" : "pl-3"} ${active ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"}`}
       >
         {chat.pinned && <PinnedChatIcon className="h-[17px] w-[17px] shrink-0 text-[var(--muted-text)]" aria-hidden="true" />}
         <div className={`flex min-w-0 flex-1 items-center text-[13px] leading-[18px] font-normal text-[var(--text)] ${open ? "pr-16" : "group-hover:pr-16"}`}>
@@ -1666,7 +1669,7 @@ export default function Page() {
         <button
           type="button"
           onClick={(e) => toggleChatPinned(e, chat)}
-          className="absolute right-8 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer"
+          className="absolute top-1/2 right-8 -translate-y-1/2 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer"
           aria-label={chat.pinned ? "Désépingler la discussion" : "Épingler la discussion"}
         >
           <PinIcon className="h-4 w-4" aria-hidden="true" />
@@ -1676,7 +1679,7 @@ export default function Page() {
             e.stopPropagation();
             openChatContextMenu(e.currentTarget, chat.id, menuLocation);
           }}
-          className={`menu-toggle absolute right-2 p-1 rounded text-[var(--muted-text)] hover:text-[var(--text)] hover:bg-[var(--muted)] cursor-pointer ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+          className={`menu-toggle absolute top-1/2 right-2 -translate-y-1/2 p-1 rounded text-[var(--muted-text)] hover:text-[var(--text)] hover:bg-[var(--muted)] cursor-pointer ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
           aria-label={t("moreActions")}
         >
           <svg viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor"><circle cx="4" cy="10" r="1.5" /><circle cx="10" cy="10" r="1.5" /><circle cx="16" cy="10" r="1.5" /></svg>
@@ -1748,19 +1751,19 @@ export default function Page() {
   /* ---------------- API ---------------- */
   function buildHistoryPayload(
     msgs: Message[]
-  ): { role: "user" | "assistant"; content: string }[] {
+  ): { role: "user" | "assistant"; content: string; meta?: Record<string, unknown> }[] {
     const slice = msgs.slice(-HISTORY_MAX);
-    return slice.map(({ role, content }) => ({ role, content }));
+    return slice.map(({ role, content, meta }) => ({ role, content, meta }));
   }
 
   function buildReplyHistory(
     msgs: Message[],
     target: Message
-  ): { role: "user" | "assistant"; content: string }[] {
+  ): { role: "user" | "assistant"; content: string; meta?: Record<string, unknown> }[] {
     const idx = msgs.findIndex((m) => m.id === target.id);
     const end = idx >= 0 ? idx + 1 : msgs.length;            // inclut le message ciblé
     const start = Math.max(0, end - HISTORY_MAX);            // jusqu’à 12 messages avant
-    return msgs.slice(start, end).map(({ role, content }) => ({ role, content }));
+    return msgs.slice(start, end).map(({ role, content, meta }) => ({ role, content, meta }));
   }
 
   function finishThinking(immediately = false) {
@@ -1934,8 +1937,12 @@ export default function Page() {
       let finalSources: Source[] = [];
       let finalMode: string | undefined = undefined;
       let finalAnswer: string | undefined = undefined;
+      let finalArtifacts: ResponseArtifact[] = [];
+      let finalProvenance: Record<string, unknown> | undefined = undefined;
+      let streamedArtifacts: ResponseArtifact[] = [];
   let finalCaveat: PostGenerationReview | undefined = undefined;
   let finalChatId: string | null = null;
+      let finalAssistantMessageId: string | null = null;
       let finalChatTitle: string | undefined = undefined;
       let sseBuffer = "";
       let hasReceivedContent = false;
@@ -1990,6 +1997,23 @@ export default function Page() {
               requestAnimationFrame(() => {
                 try { bottomRef.current?.scrollIntoView(); } catch {}
               });
+            } else if (parsed.type === "artifact_start" && parsed.artifact_type === "email_draft") {
+              const artifactIndex = typeof parsed.index === "number" ? parsed.index : 0;
+              streamedArtifacts[artifactIndex] = { type: "email_draft", content: "" };
+              setMessages((prev) => prev.map((message) => message.id === tempAssistantId ? { ...message, artifacts: [...streamedArtifacts] } : message));
+            } else if (parsed.type === "artifact_subject" && typeof parsed.subject === "string") {
+              const artifactIndex = typeof parsed.index === "number" ? parsed.index : 0;
+              const current = streamedArtifacts[artifactIndex] || { type: "email_draft", content: "" };
+              streamedArtifacts[artifactIndex] = { ...current, subject: parsed.subject };
+              setMessages((prev) => prev.map((message) => message.id === tempAssistantId ? { ...message, artifacts: [...streamedArtifacts] } : message));
+            } else if (parsed.type === "artifact_delta" && typeof parsed.content === "string") {
+              const artifactIndex = typeof parsed.index === "number" ? parsed.index : 0;
+              const current = streamedArtifacts[artifactIndex] || { type: "email_draft", content: "" };
+              streamedArtifacts[artifactIndex] = { ...current, content: current.content + parsed.content };
+              setMessages((prev) => prev.map((message) => message.id === tempAssistantId ? { ...message, artifacts: [...streamedArtifacts] } : message));
+              requestAnimationFrame(() => {
+                try { bottomRef.current?.scrollIntoView(); } catch {}
+              });
             } else if (parsed.type === 'caveat') {
               finalCaveat = parsed as PostGenerationReview;
               setMessages((prev) => prev.map((message) =>
@@ -1999,10 +2023,13 @@ export default function Page() {
               finalSources = Array.isArray(parsed.sources) ? parsed.sources : [];
               finalMode = typeof parsed.mode === 'string' ? parsed.mode : undefined;
               finalAnswer = typeof parsed.answer === 'string' ? parsed.answer : undefined;
+              finalArtifacts = Array.isArray(parsed.artifacts) ? parsed.artifacts.filter((artifact: unknown): artifact is ResponseArtifact => Boolean(artifact && typeof (artifact as ResponseArtifact).type === "string" && typeof (artifact as ResponseArtifact).content === "string")) : [];
+              finalProvenance = parsed.provenance && typeof parsed.provenance === "object" ? parsed.provenance as Record<string, unknown> : undefined;
               if (!finalCaveat && parsed.review?.status === 'CAVEAT') {
                 finalCaveat = parsed.review as PostGenerationReview;
               }
               if (parsed.chat_id) finalChatId = String(parsed.chat_id);
+              if (parsed.assistant_message_id !== undefined && parsed.assistant_message_id !== null) finalAssistantMessageId = String(parsed.assistant_message_id);
               if (typeof parsed.chat_title === "string" && parsed.chat_title.trim()) finalChatTitle = parsed.chat_title.trim();
             } else if (parsed.type === 'error') {
               finishThinking(true);
@@ -2036,13 +2063,15 @@ export default function Page() {
 
       // Finaliser le message
       const finalMessage: Message = {
-        id: tempAssistantId,
+        id: finalAssistantMessageId || tempAssistantId,
         role: "assistant",
         content: finalAnswer ?? accumulatedContent,
+        artifacts: finalArtifacts,
         sources: finalSources,
         caveat: finalCaveat,
         // Ne pas inclure le mode si c'est smalltalk pour éviter tout re-render
         mode: finalMode === "smalltalk" ? undefined : finalMode,
+        meta: finalProvenance ? { evidence_provenance: finalProvenance, sources: finalSources } : undefined,
       };
 
       const finalMessages = [...nextUser, finalMessage];
@@ -2848,7 +2877,7 @@ export default function Page() {
                           }
                           loadChat(c);
                         }}
-                        className={`chat-item group relative w-full flex items-center justify-between gap-2 pl-3 pr-0 py-1.5 rounded-md cursor-pointer ${
+                        className={`chat-item group relative w-full flex items-center justify-between gap-2 pl-3 pr-0 py-[7px] rounded-md cursor-pointer ${
                           active ? "bg-[var(--muted)]" : "hover:bg-[var(--muted)]"
                         }`}
                       >
@@ -2863,7 +2892,7 @@ export default function Page() {
                         <button
                           type="button"
                           onClick={(e) => toggleChatPinned(e, c)}
-                          className="absolute right-8 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer"
+                          className="absolute top-1/2 right-8 -translate-y-1/2 p-1 text-[var(--muted-text)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100 cursor-pointer"
                           aria-label={c.pinned ? "Désépingler la discussion" : "Épingler la discussion"}
                         >
                           <PinIcon className="h-4 w-4" aria-hidden="true" />
@@ -2873,7 +2902,7 @@ export default function Page() {
                             e.stopPropagation();
                             openChatContextMenu(e.currentTarget, c.id, "normal");
                           }}
-                          className={`menu-toggle absolute right-2 p-1 rounded text-[var(--muted-text)] hover:text-[var(--text)] hover:bg-[var(--muted)] cursor-pointer ${
+                          className={`menu-toggle absolute top-1/2 right-2 -translate-y-1/2 p-1 rounded text-[var(--muted-text)] hover:text-[var(--text)] hover:bg-[var(--muted)] cursor-pointer ${
                             open ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                           }`}
                           aria-label={t("moreActions")}
@@ -3231,6 +3260,22 @@ export default function Page() {
                                 )}
                               </div>
 
+                              {m.artifacts?.map((artifact, artifactIndex) => artifact.type === "email_draft" ? (
+                                <EmailDraftArtifact
+                                  key={`${m.id}-artifact-${artifactIndex}`}
+                                  content={artifact.content}
+                                  subject={artifact.subject}
+                                  copied={copiedId === `${m.id}-artifact-${artifactIndex}`}
+                                  onCopy={(value) => copyMessage(value, `${m.id}-artifact-${artifactIndex}`)}
+                                  onChange={async (updated) => {
+                                    setMessages((previous) => previous.map((message) => message.id === m.id ? { ...message, artifacts: message.artifacts?.map((item, index) => index === artifactIndex ? updated : item) } : message));
+                                    if (!chatId || !/^\d+$/.test(m.id)) return;
+                                    try { const { idToken } = await getTokens(); if (idToken) await chatsApi.updateEmailDraft(chatId, m.id, artifactIndex, updated, idToken); } catch (error) { console.error("Impossible de sauvegarder le brouillon", error); }
+                                  }}
+                                  copyIcon={<CopyIcon className="h-5 w-5" />}
+                                />
+                              ) : null)}
+
                               {m.caveat?.status === "CAVEAT" && m.caveat.message && (
                                 <div
                                   className="mx-4 mt-3 rounded-xl border border-amber-400/50 bg-amber-400/10 px-4 py-3 text-sm"
@@ -3253,6 +3298,11 @@ export default function Page() {
                                 
                                 // Pour smalltalk: ne jamais afficher de badge
                                 if (inner === "smalltalk" || raw === "smalltalk") {
+                                  return null;
+                                }
+                                // Ce mode reste disponible pour le routage et
+                                // l'observabilité, mais sa pastille est masquée.
+                                if (raw === "GENERAL(orchestrated)") {
                                   return null;
                                 }
                                 
@@ -3356,7 +3406,7 @@ export default function Page() {
                                 setReplyTarget(m);
                                 inputRef.current?.focus({ preventScroll: true } as any);
                               }}
-                              className={`p-1 text-[var(--text)] hover:text-[var(--primary)] cursor-pointer transition-colors duration-200 ${
+                            className={`flex h-7 w-7 items-center justify-center p-0 leading-none text-[var(--text)] hover:text-[var(--primary)] cursor-pointer transition-colors duration-200 ${
                                 isLast ? "" : "invisible group-hover:visible"
                               }`}
                               aria-label={t("reply")}
@@ -3369,14 +3419,14 @@ export default function Page() {
                             {/* Copier (réservé en permanence pour éviter un shift en fin de stream) */}
                             <button
                               onClick={() => copyMessage(m.content, m.id)}
-                              className={`p-1 text-[var(--text)] hover:text-[var(--primary)] cursor-pointer transition-colors duration-200 ${
+                              className={`flex h-7 w-7 items-center justify-center p-0 leading-none text-[var(--text)] hover:text-[var(--primary)] cursor-pointer transition-colors duration-200 ${
                                 isLast ? "" : "invisible group-hover:visible"
                               } ${loading ? "opacity-0 pointer-events-none" : ""}`}
-                              aria-label={t("copyMessage")}
+                              aria-label={copiedId === m.id ? "Message copié" : t("copyMessage")}
                               disabled={loading}
                               aria-disabled={loading}
                             >
-                              <CopyIcon className="h-5 w-5" />
+                              {copiedId === m.id ? <span className="inline-flex h-5 w-5 items-center justify-center text-base leading-none" aria-hidden="true">✓</span> : <CopyIcon className="h-5 w-5" />}
                               <span className="sr-only">{t("copy")}</span>
                             </button>
                           </div>

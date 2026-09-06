@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError,
 
 Intent = Literal["conversation", "document_question", "refine_previous_search", "general_question", "web_search"]
 ResponseStrategy = Literal["answer", "ask_for_missing_information", "general_answer"]
+ResponseFormat = Literal["normal", "email_draft"]
 QuerySemantics = Literal["fact_lookup", "current_state", "decision", "chronology", "comparison", "procedure", "general_document_question"]
 SourceType = Literal["email", "pdf", "file"]
 TemporalMode = Literal["exact", "range", "recent", "before", "after"]
@@ -84,6 +85,9 @@ class OrchestrationPlan(BaseModel):
     metadata_constraints: MetadataConstraints = Field(default_factory=MetadataConstraints)
     query_semantics: QuerySemantics = "general_document_question"
     response_strategy: ResponseStrategy
+    # Presentation intent is separate from retrieval intent: an email request
+    # may still be a fully documentary/RAG question.
+    response_format: ResponseFormat = "normal"
     _raw_model_output: str | None = PrivateAttr(default=None)
 
     @field_validator("source_types", "temporal_constraints", mode="before")
@@ -120,6 +124,8 @@ SYSTEM_PROMPT = """You are Auxilium's internal orchestrator. You are not the fin
 Auxilium is a documentary and conversational assistant. Its core capability is searching the user's indexed local documents and indexed emails, using recent conversation history, temporal constraints, and available metadata. It can answer generally only when those sources are not relevant. Prefer the user's own information whenever it could contain the answer.
 
 Your mission is to choose strategy: retrieval need, standalone retrieval query, history reuse, source scope, temporal/metadata hints, and response strategy. You never retrieve, inspect or cite documents, invent facts, simulate an action, decide evidence quality, or bypass safeguards. The RAG, evidence_mode, and final generator retain those responsibilities.
+
+Also set response_format. Use "email_draft" when the user asks for wording they can send as an email (for example a reply to a client, a professional email, or what to answer by email). This is a presentation request only: preserve needs_retrieval=true whenever the underlying answer could be in internal sources. Otherwise use "normal".
 
 Also set query_semantics: use current_state or decision when the user asks for a current status, outcome, or change; otherwise choose the closest supported general documentary need.
 

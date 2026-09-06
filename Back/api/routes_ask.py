@@ -73,6 +73,12 @@ def _validated_sse(
         if visible:
             events.put(("content", visible))
 
+    def artifact_sink(event_type: str, payload: dict) -> None:
+        body = dict(payload)
+        if "type" in body:
+            body["artifact_type"] = body.pop("type")
+        events.put(("artifact", {"type": event_type, **body}))
+
     def status_sink(stage: str, label: str) -> None:
         # Public functional progress only; never model reasoning or prompt text.
         nonlocal status_order
@@ -89,7 +95,7 @@ def _validated_sse(
     def produce() -> None:
         start_request(request_id)
         try:
-            result = run_answer_pipeline(body, request, token_sink=token_sink, status_sink=status_sink)
+            result = run_answer_pipeline(body, request, token_sink=token_sink, artifact_sink=artifact_sink, status_sink=status_sink)
             tail = citation_filter.finish()
             if tail:
                 events.put(("content", tail))
@@ -114,6 +120,10 @@ def _validated_sse(
             status_payload = payload if isinstance(payload, dict) else {}
             yield _sse(status_payload, event="status")
             continue
+        if kind == "artifact":
+            artifact_payload = payload if isinstance(payload, dict) else {}
+            yield _sse(artifact_payload, event=str(artifact_payload.get("type") or "artifact"))
+            continue
         if kind == "error":
             error_payload = payload if isinstance(payload, dict) else {"request_id": request_id}
             yield _sse({
@@ -136,15 +146,18 @@ def _validated_sse(
             done_payload = {
                 "type": "done",
                 "answer": result.answer,
+                "artifacts": result.artifacts,
                 "sources": safe_sources,
                 "mode": result.mode,
                 "chat_id": result.chat_id,
                 "chat_title": result.chat_title,
+                "assistant_message_id": result.assistant_message_id,
                 "request_id": result.request_id or request_id,
                 "status": result.status,
                 "validation_performed": result.validation_performed,
                 "review": result.review.to_dict(),
                 "faithfulness_review": result.faithfulness_review,
+                "provenance": result.validations.get("evidence_provenance", {}),
             }
             set_stage("sse_emit")
             yield _sse(done_payload)

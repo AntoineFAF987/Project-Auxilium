@@ -7,6 +7,9 @@ Role = Literal["user", "assistant"]
 class HistoryMsg(BaseModel):
     role: Role
     content: str
+    # Provenance is optional for backwards-compatible clients, but lets a
+    # follow-up distinguish validated documentary context from plain chat.
+    meta: Optional[dict] = None
 
 class ReplyTo(BaseModel):
     """Cible d'une réponse (thread léger) injectée en contexte LLM."""
@@ -55,6 +58,7 @@ class PostGenerationReviewOut(BaseModel):
 
 class AskOut(BaseModel):
     answer: str
+    artifacts: List[dict] = Field(default_factory=list)
     sources: List[dict] = Field(default_factory=list)
     mode: Optional[str] = None
     ctx_len: Optional[int] = None

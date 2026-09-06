@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, List, Dict, Literal, Optional, Tuple
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from fastapi import HTTPException, Request
 
@@ -112,6 +113,7 @@ class AnswerPipelineResult:
     """Résultat interne commun aux transports JSON et SSE."""
 
     answer: str
+    artifacts: List[Dict[str, str]] = field(default_factory=list)
     sources: List[Dict[str, Any]] = field(default_factory=list)
     mode: Optional[str] = None
     status: AnswerStatus = "answered"
@@ -119,6 +121,7 @@ class AnswerPipelineResult:
     request_id: Optional[str] = None
     chat_id: Optional[str] = None
     chat_title: Optional[str] = None
+    assistant_message_id: Optional[int] = None
     route_mode: Optional[str] = None
     abstention_reason: Optional[str] = None
     fallback_reason: Optional[str] = None
@@ -133,6 +136,7 @@ class AnswerPipelineResult:
     def to_ask_out(self) -> AskOut:
         return AskOut(
             answer=self.answer,
+            artifacts=self.artifacts,
             sources=self.sources,
             mode=self.mode,
             ctx_len=self.context_length,
@@ -180,11 +184,13 @@ def _infer_result_status(
 def _result(
     *,
     answer: str,
+    artifacts: Optional[List[Dict[str, str]]] = None,
     sources: Optional[List[Dict[str, Any]]] = None,
     mode: Optional[str] = None,
     ctx_len: Optional[int] = None,
     request_id: Optional[str] = None,
     chat_id: Optional[str] = None,
+    assistant_message_id: Optional[int] = None,
     route_mode: Optional[str] = None,
     status: Optional[AnswerStatus] = None,
     abstention_reason: Optional[str] = None,
@@ -198,12 +204,14 @@ def _result(
         review = PostGenerationReview(**review)
     return AnswerPipelineResult(
         answer=answer,
+        artifacts=list(artifacts or []),
         sources=list(sources or []),
         mode=mode,
         status=status or inferred_status,
         context_length=ctx_len,
         request_id=request_id,
         chat_id=chat_id,
+        assistant_message_id=assistant_message_id,
         route_mode=route_mode,
         abstention_reason=abstention_reason or inferred_abstention,
         fallback_reason=fallback_reason or inferred_fallback,
@@ -211,6 +219,146 @@ def _result(
         review=review or PostGenerationReview(),
         faithfulness_review=faithfulness_review,
     )
+
+
+def _previous_validated_evidence(history: List[Dict[str, Any]]) -> tuple[Dict[str, Any] | None, int | None]:
+    """Return the most recent assistant turn with durable RAG provenance."""
+    for offset, item in enumerate(reversed(history or []), start=1):
+        if item.get("role") != "assistant":
+            continue
+        meta = item.get("meta") or {}
+        provenance = meta.get("evidence_provenance") or {}
+        if provenance.get("evidence_sufficient") and provenance.get("evidence_chunk_uids"):
+            return meta, len(history) - offset
+    return None, None
+
+
+class _GeneratedArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["email_draft"]
+    subject: str = Field(min_length=1, max_length=240)
+    content: str = Field(min_length=1, max_length=12000)
+
+    @field_validator("subject")
+    @classmethod
+    def normalize_subject(cls, value: str) -> str:
+        value = re.sub(r"^\s*(?:objet|subject)\s*:\s*", "", value, flags=re.IGNORECASE).strip().strip('"').rstrip(".").strip()
+        if not value:
+            raise ValueError("subject cannot be empty")
+        return value
+
+
+class _EmailDraftGeneration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    answer: str = Field(min_length=1, max_length=12000)
+    artifacts: List[_GeneratedArtifact] = Field(min_length=1, max_length=4)
+    citations: List[int] = Field(default_factory=list, max_length=100)
+
+
+def _parse_email_draft_generation(raw: str) -> tuple[str, List[Dict[str, str]], List[int]]:
+    """Validate the generator envelope; no prose-marker parsing is involved."""
+    payload = json.loads((raw or "").strip())
+    output = _EmailDraftGeneration.model_validate(payload)
+    citations = [index for index in output.citations if index > 0]
+    return output.answer.strip(), [artifact.model_dump() for artifact in output.artifacts], citations
+
+
+def _sender_first_name_from_request(request: Request) -> str | None:
+    """Use authenticated profile claims only; never manufacture a sender name."""
+    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if " " not in auth:
+        return None
+    try:
+        token = auth.split(" ", 1)[1]
+        try: claims = verify_ms_token(token, expect_id_token=True)
+        except Exception: claims = verify_ms_token(token, expect_id_token=False)
+        value = str(claims.get("given_name") or claims.get("first_name") or claims.get("name") or "").strip()
+        return value.split()[0] if value else None
+    except Exception:
+        return None
+
+
+def _hydrate_email_sender(artifacts: List[Dict[str, Any]], request: Request) -> List[Dict[str, Any]]:
+    sender = _sender_first_name_from_request(request)
+    return [{**artifact, "sender_first_name": artifact.get("sender_first_name") or sender} if artifact.get("type") == "email_draft" else artifact for artifact in artifacts]
+
+
+def _partial_json_string(raw: str, key: str, *, after: int = 0) -> Optional[str]:
+    """Read an incomplete JSON string value without accepting prose markers."""
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"', raw[after:])
+    if not match:
+        return None
+    index = after + match.end()
+    chars: List[str] = []
+    escapes = {"\\\"": '"', "\\\\": "\\", "\\/": "/", "\\b": "\b", "\\f": "\f", "\\n": "\n", "\\r": "\r", "\\t": "\t"}
+    while index < len(raw):
+        char = raw[index]
+        if char == '"':
+            return "".join(chars)
+        if char != "\\":
+            chars.append(char)
+            index += 1
+            continue
+        if index + 1 >= len(raw):
+            break
+        token = raw[index:index + 2]
+        if token == "\\u":
+            if index + 6 > len(raw):
+                break
+            try:
+                chars.append(chr(int(raw[index + 2:index + 6], 16)))
+            except ValueError:
+                break
+            index += 6
+            continue
+        decoded = escapes.get(token)
+        if decoded is None:
+            break
+        chars.append(decoded)
+        index += 2
+    return "".join(chars)
+
+
+class _StreamingEmailDraftDecoder:
+    """Converts the structured generator envelope into safe SSE deltas."""
+
+    def __init__(self, text_sink: Callable[[str], None], artifact_sink: Callable[[str, Dict[str, Any]], None]) -> None:
+        self._raw = ""
+        self._text_sink = text_sink
+        self._artifact_sink = artifact_sink
+        self._answer_length = 0
+        self._content_length = 0
+        self._subject = ""
+        self._started = False
+
+    def feed(self, chunk: str) -> None:
+        self._raw += chunk
+        answer = _partial_json_string(self._raw, "answer")
+        if answer is not None and len(answer) > self._answer_length:
+            self._text_sink(answer[self._answer_length:])
+            self._answer_length = len(answer)
+
+        artifacts_at = self._raw.find('"artifacts"')
+        if artifacts_at < 0:
+            return
+        artifact_type = _partial_json_string(self._raw, "type", after=artifacts_at)
+        if artifact_type != "email_draft":
+            return
+        if not self._started:
+            self._started = True
+            self._artifact_sink("artifact_start", {"index": 0, "type": "email_draft"})
+        subject = _partial_json_string(self._raw, "subject", after=artifacts_at)
+        if subject is not None and subject != self._subject:
+            self._subject = subject
+            self._artifact_sink("artifact_subject", {"index": 0, "subject": subject})
+        content = _partial_json_string(self._raw, "content", after=artifacts_at)
+        if content is not None and len(content) > self._content_length:
+            self._artifact_sink("artifact_delta", {"index": 0, "content": content[self._content_length:]})
+            self._content_length = len(content)
+
+    def finish(self) -> None:
+        if self._started:
+            self._artifact_sink("artifact_end", {"index": 0})
 
 
 def validate_answer_request(body: AskIn) -> str:
@@ -420,12 +568,14 @@ def _generate_answer(
     *,
     history: List[Dict],
     token_sink: Optional[Callable[[str], None]] = None,
+    artifact_sink: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     diagnostic_stage_sink: Optional[Callable[[str], None]] = None,
     progress_sink: Optional[Callable[[str, str], None]] = None,
     **kwargs,
 ) -> str:
     """Genere en sync ou transmet chaque fragment au transport SSE."""
 
+    response_format = str(kwargs.get("response_format") or "normal")
     set_stage("generation")
     if diagnostic_stage_sink:
         diagnostic_stage_sink("generation")
@@ -448,6 +598,7 @@ def _generate_answer(
             )
         else:
             parts: List[str] = []
+            decoder = _StreamingEmailDraftDecoder(token_sink, artifact_sink) if response_format == "email_draft" and artifact_sink else None
             for chunk in _safe_llm_stream(
                 ask_mistral_with_context_stream,
                 question,
@@ -458,8 +609,13 @@ def _generate_answer(
                 text = str(chunk or "")
                 if text:
                     parts.append(text)
-                    token_sink(text)
+                    if decoder:
+                        decoder.feed(text)
+                    else:
+                        token_sink(text)
             answer = "".join(parts)
+            if decoder:
+                decoder.finish()
     except Exception:
         raise
 
@@ -1155,6 +1311,7 @@ def run_answer_pipeline(
     request: Request,
     *,
     token_sink: Optional[Callable[[str], None]] = None,
+    artifact_sink: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     status_sink: Optional[Callable[[str, str], None]] = None,
 ) -> AnswerPipelineResult:
     request_id = current_request_id() or str(uuid.uuid4())
@@ -1199,17 +1356,23 @@ def run_answer_pipeline(
         canonical_answer = enforce_final_citation_contract(result.answer, len(result.sources))
         result = replace(result, answer=canonical_answer)
         generated_chat_title: Optional[str] = None
+        persisted_assistant_message_id: Optional[int] = None
         if tenant_id and user_id and user_turn_persisted:
             log_event(request_id, "message_persistence_start")
             set_stage("message_persistence")
             try:
-                append_message(
+                persisted_assistant_message_id = append_message(
                     tenant_id,
                     user_id,
                     chat_id,
                     "assistant",
                     result.answer,
-                    meta={"mode": result.mode, "review": result.review.to_dict(), "request_id": request_id, "sources": result.sources},
+                    meta={"mode": result.mode, "review": result.review.to_dict(), "request_id": request_id, "sources": result.sources, "artifacts": result.artifacts,
+                          "generation_mode": result.route_mode or result.mode,
+                          "response_format": result.validations.get("response_format", "normal"),
+                          "timestamp": datetime.now(timezone.utc).isoformat(),
+                          "evidence_provenance": result.validations.get("evidence_provenance", {}),
+                          "retrieval_query": result.validations.get("retrieval_query")},
                 )
             except Exception as exc:
                 log_stream_error(request_id, "message_persistence", exc)
@@ -1238,16 +1401,16 @@ def run_answer_pipeline(
                             except Exception:
                                 pass
         persisted_chat_id = chat_id if user_turn_persisted else result.chat_id
-        final = replace(result, chat_id=(persisted_chat_id or None), chat_title=generated_chat_title)
-        trace("answer", {"final_answer": final.answer, "mode": final.mode, "sources": final.sources, "total_ms": round((time.perf_counter() - trace_started) * 1000, 1)})
+        final = replace(result, chat_id=(persisted_chat_id or None), chat_title=generated_chat_title, assistant_message_id=persisted_assistant_message_id or result.assistant_message_id)
+        trace("answer", {"final_answer": final.answer, "artifacts": final.artifacts, "mode": final.mode, "sources": final.sources, "total_ms": round((time.perf_counter() - trace_started) * 1000, 1)})
         return final
 
     # --- Historique & thread ---
     if body.reply_history:
-        raw_hist: List[Dict] = [{"role": m.role, "content": m.content} for m in body.reply_history]
+        raw_hist: List[Dict] = [{"role": m.role, "content": m.content, "meta": m.meta or {}} for m in body.reply_history]
         hist = trim_history(raw_hist, max_turns=REPLY_HISTORY_MAX_TURNS)
     else:
-        raw_hist: List[Dict] = [{"role": m.role, "content": m.content} for m in (body.history or [])]
+        raw_hist: List[Dict] = [{"role": m.role, "content": m.content, "meta": m.meta or {}} for m in (body.history or [])]
         hist = trim_history(raw_hist, max_turns=HISTORY_MAX_TURNS)
 
     trace("request", {"history_used": hist, "orchestrator_enabled": ORCHESTRATOR_SETTINGS.enabled, "provider": _RUNTIME_SETTINGS.generation.provider, "orchestrator_model": ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model, "generation_model": _RUNTIME_SETTINGS.generation.model})
@@ -1433,6 +1596,13 @@ def run_answer_pipeline(
     # live Web route. This branch intentionally runs before the local-index
     # readiness check and before any idx.search call.
     explicit_web_request = _has_explicit_web_request(q)
+    email_draft_requested = bool(orchestration_plan and orchestration_plan.response_format == "email_draft")
+    current_user_first_name = _sender_first_name_from_request(request) if email_draft_requested else None
+    if email_draft_requested:
+        # Private generation context from authenticated identity, never from
+        # retrieved documents. The prompt owns the fallback placeholder.
+        reply_preamble += f"\nCURRENT_USER_FIRST_NAME: {current_user_first_name or '[Prénom]'}\n"
+        _log_event(request_id, {"event": "email_draft_identity", "current_user_first_name_available": bool(current_user_first_name)})
     local_web_override = mode_in == "local" and (
         bool(orchestration_plan and orchestration_plan.intent == "web_search" and orchestration_plan.web_request_explicit)
         or explicit_web_request
@@ -1494,16 +1664,25 @@ def run_answer_pipeline(
         emit_status("analyze_web_sources", "Analyse des sources trouvees")
         context_for_llm = f"{reply_preamble}{web_text}"
         try:
-            answer = _generate_answer(
-                q, context_for_llm, history=hist, token_sink=token_sink, progress_sink=emit_status,
+            generated = _generate_answer(
+                q, context_for_llm, history=hist, token_sink=token_sink, artifact_sink=artifact_sink, progress_sink=emit_status,
                 evidence_mode="web_live",
+                response_format="email_draft" if email_draft_requested else "normal",
             )
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"LLM error: {e}")
 
-        answer, citations_idx = extract_citations_and_clean_answer(answer)
+        artifacts: List[Dict[str, str]] = []
+        if email_draft_requested:
+            try:
+                answer, artifacts, citations_idx = _parse_email_draft_generation(generated)
+            except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+                logger.warning("email_draft_generation_invalid: %s", type(exc).__name__)
+                answer, citations_idx = extract_citations_and_clean_answer(generated)
+        else:
+            answer, citations_idx = extract_citations_and_clean_answer(generated)
         selected_web_indices, web_citation_map = select_web_source_indices(len(web_sources_list), citations_idx)
         answer = remap_inline_citations(answer, web_citation_map)
 
@@ -1515,7 +1694,7 @@ def run_answer_pipeline(
                     "text": web_text, "chunk_uid": "web-live-context",
                     "path": web_sources_list[0]["url"] if web_sources_list else None,
                 }]
-                claim_review = verify_answer_claims(answer, evidence_blocks, cited_source_indices=citations_idx, use_nli=True)
+                claim_review = verify_answer_claims("\n\n".join([answer, *(item["content"] for item in artifacts)]), evidence_blocks, cited_source_indices=citations_idx, use_nli=True)
                 faithfulness_result = claim_review.legacy_summary()
                 validations["faithfulness"] = {"performed": True, **faithfulness_result}
                 validations["claim_faithfulness"] = {"performed": True, **claim_review.to_dict()}
@@ -1537,7 +1716,7 @@ def run_answer_pipeline(
             "local_retrieval_executed": False,
         })
         return finalize_result(_result(
-            answer=answer, sources=sources, mode="STRICT(web_live)", ctx_len=len(context_for_llm),
+            answer=answer, artifacts=artifacts, sources=sources, mode="STRICT(web_live)", ctx_len=len(context_for_llm),
             review=review.to_dict(), faithfulness_review=claim_review.to_dict() if claim_review else None,
             request_id=request_id, route_mode="web_live", validations=validations,
         ))
@@ -1556,16 +1735,44 @@ def run_answer_pipeline(
         else:
             trace("catalog_probe", {"executed": False, "strong_match": False, "reason": "intent_not_general_question", "timing_ms": 0.0})
     if mode_in == "auto" and orchestration_plan is not None and not orchestration_plan.needs_retrieval:
-        conversational = orchestration_plan.response_strategy == "ask_for_missing_information"
+        conversational = orchestration_plan.response_strategy == "ask_for_missing_information" and not email_draft_requested
+        previous_meta, previous_index = _previous_validated_evidence(hist)
+        reuse_previous_evidence = bool(
+            orchestration_plan.use_history
+            and orchestration_plan.reuse_previous_subject
+            and previous_meta
+        )
+        trace("follow_up_evidence_reuse", {
+            "follow_up_reused_evidence": reuse_previous_evidence,
+            "previous_evidence_source_message_id": previous_meta.get("message_id") if previous_meta else None,
+            "previous_history_index": previous_index,
+        })
         try:
-            ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink, progress_sink=emit_status,
-                                   conversational_mode=conversational, max_tokens=160 if conversational else None)
+            generated = _generate_answer(
+                q, reply_preamble, history=hist,
+                token_sink=token_sink, artifact_sink=artifact_sink, progress_sink=emit_status,
+                conversational_mode=conversational, max_tokens=160 if conversational else None,
+                response_format="email_draft" if email_draft_requested else "normal",
+            )
+            artifacts: List[Dict[str, str]] = []
+            if email_draft_requested:
+                try:
+                    ans, artifacts, _ = _parse_email_draft_generation(generated)
+                except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+                    logger.warning("email_draft_generation_invalid: %s", type(exc).__name__)
+                    ans = generated
+            else:
+                ans = generated
             return finalize_result(_result(
-                answer=ans, sources=[], request_id=request_id, route_mode="general",
+                answer=ans, artifacts=artifacts, sources=(previous_meta.get("sources", []) if reuse_previous_evidence else []), request_id=request_id, route_mode="general",
                 mode="GENERAL(orchestrated-conversation)" if conversational else "GENERAL(orchestrated)",
                 ctx_len=len(reply_preamble),
                 validations={"orchestration_intent": orchestration_plan.intent,
-                             "orchestration_needs_retrieval": False, "evidence_mode": "none"},
+                             "orchestration_needs_retrieval": False, "evidence_mode": "none",
+                             "response_format": orchestration_plan.response_format,
+                             "evidence_provenance": (previous_meta.get("evidence_provenance", {}) if reuse_previous_evidence else {}),
+                             "follow_up_reused_evidence": reuse_previous_evidence,
+                             "previous_evidence_source_message_id": previous_meta.get("message_id") if previous_meta else None},
             ))
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
@@ -1730,6 +1937,9 @@ def run_answer_pipeline(
             "stop_reason": iterative_sufficiency.reason,
             "evidence_sufficient": iterative_sufficiency.sufficient,
             "final_evidence_chunk_uids": [meta.get("chunk_uid") for _, meta in blocks],
+            "core_evidence_chunk_uids": retrieval_rounds[-1].get("core_evidence_chunk_uids", []) if retrieval_rounds else [],
+            "optional_evidence_chunk_uids": retrieval_rounds[-1].get("optional_evidence_chunk_uids", []) if retrieval_rounds else [],
+            "anchor_documents": retrieval_rounds[0].get("anchor_documents", []) if retrieval_rounds else [],
         })
 
     gated_ok = answerability_guard(ce_scores, threshold=ANS_THRESHOLD)
@@ -1845,6 +2055,14 @@ def run_answer_pipeline(
     # ------ Cache court (intègre le route_mode) ------
     rag_context_hash = hashlib.sha256((context_local or "").encode("utf-8")).hexdigest()
     rag_chunk_uids = [str(meta.get("chunk_uid") or f"{meta.get('document_id')}:{meta.get('chunk_id')}") for _, meta in blocks]
+    validations["response_format"] = orchestration_plan.response_format if orchestration_plan else "normal"
+    validations["retrieval_query"] = q_eff
+    validations["evidence_provenance"] = {
+        "evidence_sufficient": bool(iterative_sufficiency.sufficient) if iterative_sufficiency is not None else bool(strict_local_ok),
+        "evidence_chunk_uids": rag_chunk_uids,
+        "evidence_document_ids": sorted({str(meta.get("document_id")) for _, meta in blocks if meta.get("document_id")}),
+        "anchor_documents": retrieval_rounds[0].get("anchor_documents", []) if retrieval_rounds else [],
+    }
     history_hash = _stable_hash(hist)
     cache_conversation_id = chat_id or (body.thread_id or "").strip()
     reply_to_cache_value = ({
@@ -1962,14 +2180,23 @@ def run_answer_pipeline(
         generation_started = time.perf_counter()
         trace("generation_input", {"generation_mode": mode_label, "question": q, "context_length": len(context_for_llm or ""), "context": context_for_llm, "provider": _RUNTIME_SETTINGS.generation.provider, "model": _RUNTIME_SETTINGS.generation.model, "reasoning_effort": _RUNTIME_SETTINGS.generation.reasoning_effort, "configured_temperature": _RUNTIME_SETTINGS.generation.strict_temperature if use_strict else _RUNTIME_SETTINGS.generation.temperature, "configured_top_p": _RUNTIME_SETTINGS.generation.strict_top_p if use_strict else _RUNTIME_SETTINGS.generation.top_p, "rag_context_hash": rag_context_hash, "rag_chunk_uids": rag_chunk_uids, "system_prompt": "constructed by rag_core.llm from generation mode and evidence mode", "evidence_mode": evidence_mode if use_strict else "none"})
         set_stage("generation")
-        answer = _generate_answer(
-            q, context_for_llm, history=hist, token_sink=token_sink, progress_sink=emit_status,
+        generated = _generate_answer(
+            q, context_for_llm, history=hist, token_sink=token_sink, artifact_sink=artifact_sink, progress_sink=emit_status,
             evidence_mode="web_live" if route_mode == "web_live" else (evidence_mode if use_strict else "none"),
+            response_format="email_draft" if email_draft_requested else "normal",
         )
         trace("generation", {"generation_total_ms": round((time.perf_counter() - generation_started) * 1000, 1), "first_token_ms": None if token_sink is None else None})
         # The citation tail is private metadata. Keep it out of the answer
         # while preserving its indices for source selection and validation.
-        answer, citations_idx = extract_citations_and_clean_answer(answer)
+        artifacts = []
+        if email_draft_requested:
+            try:
+                answer, artifacts, citations_idx = _parse_email_draft_generation(generated)
+            except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+                logger.warning("email_draft_generation_invalid: %s", type(exc).__name__)
+                answer, citations_idx = extract_citations_and_clean_answer(generated)
+        else:
+            answer, citations_idx = extract_citations_and_clean_answer(generated)
     except FuturesTimeout:
         raise HTTPException(status_code=504, detail="LLM timeout")
     except Exception as e:
@@ -2000,7 +2227,7 @@ def run_answer_pipeline(
                         "path": web_sources_list[0]["url"] if web_sources_list else None,
                     }]
                 claim_review = verify_answer_claims(
-                    answer,
+                    "\n\n".join([answer, *(item["content"] for item in artifacts)]),
                     evidence_blocks,
                     cited_source_indices=citations_idx,
                     use_nli=True,
@@ -2068,6 +2295,7 @@ def run_answer_pipeline(
         "turn_type_margin": getattr(turn_decision, "semantic_margin", None) if turn_decision else None,
         "orchestration_intent": orchestration_plan.intent if orchestration_plan else None,
         "orchestration_needs_retrieval": orchestration_plan.needs_retrieval if orchestration_plan else None,
+        "response_format": orchestration_plan.response_format if orchestration_plan else "normal",
         "orchestration_use_history": orchestration_plan.use_history if orchestration_plan else None,
         "orchestration_reuse_previous_subject": orchestration_plan.reuse_previous_subject if orchestration_plan else None,
         "orchestration_ms": orchestration_ms,
@@ -2083,6 +2311,7 @@ def run_answer_pipeline(
 
     out = {
         "answer": answer,
+        "artifacts": artifacts,
         "sources": sources,
         "mode": mode_label,
         "ctx_len": len(context_for_llm or ""),

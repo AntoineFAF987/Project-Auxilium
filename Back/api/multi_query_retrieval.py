@@ -55,11 +55,17 @@ def resolve_retrieval_query(*, raw_user_message: str, orchestrator_query: str, h
 
 
 def build_retrieval_queries(*, original_query: str, orchestrator_query: str | None, resolved_query: str | None = None, follow_up: bool = False) -> list[tuple[str, str]]:
-    """Build contextual variants; literal wording is retained only for autonomous turns."""
+    """Build factual query variants independently of any response presentation.
+
+    When an orchestrator supplied a standalone documentary query, it is the
+    canonical retrieval subject for every output format.  The raw message is
+    still used for autonomous turns, where no structured subject exists.
+    """
     base = resolved_query or orchestrator_query or original_query
     options: list[tuple[str, str | None]] = [
         *(([("resolved_subject", base), ("normalized_resolved_subject", normalized_query(base)), ("orchestrator", orchestrator_query)] if follow_up else
-          [("original", original_query), ("normalized", normalized_query(original_query)), ("orchestrator", orchestrator_query)])),
+          ([("orchestrator", base), ("normalized_orchestrator", normalized_query(base))] if orchestrator_query else
+           [("original", original_query), ("normalized", normalized_query(original_query))]))),
     ]
     seen: set[str] = set()
     result: list[tuple[str, str]] = []

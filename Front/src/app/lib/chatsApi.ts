@@ -38,6 +38,8 @@ export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   sources?: SourceReference[];
+  artifacts?: Array<{ type: string; subject?: string; content: string }>;
+  meta?: Record<string, unknown>;
 };
 
 export type Chat = {
@@ -110,6 +112,8 @@ export async function fetchChatMessages(chatId: string, idToken: string): Promis
       role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
       content: String(m.content || ""),
       ...(Array.isArray(m.meta?.sources) ? { sources: m.meta.sources as SourceReference[] } : {}),
+      ...(Array.isArray(m.meta?.artifacts) ? { artifacts: m.meta.artifacts as Array<{ type: string; subject?: string; content: string }> } : {}),
+      ...(m.meta && typeof m.meta === "object" ? { meta: m.meta as Record<string, unknown> } : {}),
     }));
   } catch (err: any) {
     if (err.message && err.message.includes("HTTP")) {
@@ -169,4 +173,11 @@ export async function deleteChat(chatId: string, idToken: string): Promise<void>
     }
     throw new Error(`Erreur réseau: ${err.message || "Impossible de contacter le serveur"}`);
   }
+}
+
+export async function updateEmailDraft(chatId: string, messageId: string, artifactIndex: number, artifact: { type: string; subject?: string; content: string; recipient_first_name?: string | null }, idToken: string): Promise<void> {
+  const r = await fetchWithTimeout(`${process.env.NEXT_PUBLIC_API_URL}/chats/${chatId}/messages/${messageId}/email-drafts/${artifactIndex}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` }, body: JSON.stringify({ artifact }),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
 }

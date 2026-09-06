@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Tuple
 from fastapi import APIRouter, HTTPException, Path, Body, Request
 
 from auth_ms import verify_ms_token
-from .chats_db import create_chat, list_chats, list_messages, append_message, rename_chat, set_chat_project, set_chat_pinned, soft_delete_chat
+from .chats_db import create_chat, list_chats, list_messages, append_message, update_email_draft_artifact, rename_chat, set_chat_project, set_chat_pinned, soft_delete_chat
 
 router = APIRouter()
 
@@ -80,6 +80,23 @@ def api_append_message(
     except PermissionError:
         raise HTTPException(status_code=404, detail="Chat introuvable")
     return {"id": mid}
+
+@router.patch("/chats/{chat_id}/messages/{message_id}/email-drafts/{artifact_index}")
+def api_update_email_draft(chat_id: str, message_id: int, artifact_index: int, body: Dict = Body(...), request: Request = None):
+    tenant_id, user_id = _try_get_auth_ids(request)
+    artifact = body.get("artifact")
+    if not isinstance(artifact, dict) or artifact.get("type") != "email_draft" or not isinstance(artifact.get("content"), str):
+        raise HTTPException(status_code=400, detail="Brouillon e-mail invalide")
+    if "recipient_first_name" in artifact and artifact["recipient_first_name"] is not None and not isinstance(artifact["recipient_first_name"], str):
+        raise HTTPException(status_code=400, detail="Destinataire invalide")
+    if "sender_first_name" in artifact and artifact["sender_first_name"] is not None and not isinstance(artifact["sender_first_name"], str):
+        raise HTTPException(status_code=400, detail="Expéditeur invalide")
+    try:
+        if not update_email_draft_artifact(tenant_id, user_id, chat_id, message_id, artifact_index, artifact):
+            raise HTTPException(status_code=404, detail="Brouillon introuvable")
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Chat introuvable")
+    return {"ok": True}
 
 @router.patch("/chats/{chat_id}")
 def api_update_chat(chat_id: str, body: Dict = Body(...), request: Request = None):

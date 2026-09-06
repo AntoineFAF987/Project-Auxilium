@@ -21,6 +21,7 @@ def ask_mistral_with_context(
     roleplay_mode: bool = False,
     conversational_mode: bool = False,
     evidence_mode: str = "none",
+    response_format: str = "normal",
     **kwargs,
 ) -> str:
     import os as _os, requests as _requests
@@ -270,6 +271,22 @@ def ask_mistral_with_context(
             ]
 
     messages = [{"role": "system", "content": " ".join(rules)}]
+    if response_format == "email_draft":
+        messages[0]["content"] += (
+            " Produis UNIQUEMENT un objet JSON valide, sans balise Markdown, avec exactement cette forme : "
+            '{"answer":"courte introduction pour l’utilisateur","artifacts":[{"type":"email_draft","subject":"objet court","content":"e-mail complet"}],"citations":[1,2]}. '
+            "content doit être l’e-mail complet : formule d’appel, contenu, formule de politesse et signature. Utilise le prénom destinataire explicitement connu, sinon exactement [Prénom]. Le champ CURRENT_USER_FIRST_NAME du contexte de génération est la seule source de la signature ; s’il vaut [Prénom], conserve ce placeholder. N’invente jamais de prénom. "
+            "N’ajoute pas de Markdown ni de citations dans le brouillon. Ne présente jamais comme certain un fait absent ou incertain dans le CONTEXTE : formule alors la réserve dans le brouillon. "
+            "Le subject est obligatoire, court, naturel, professionnel, sans guillemets, sans préfixe « Objet : », sans point final ni Markdown. Reprends l’objet explicitement fourni ou récupérable sans ambiguïté ; sinon formule-le à partir du brouillon. "
+            "N’écris jamais la balise CITATIONS : citations doit contenir uniquement les indices des sources du CONTEXTE effectivement utilisées, ou [] si aucune source n’est utilisée."
+            if is_fr else
+            " Produce ONLY a valid JSON object, with no Markdown fence, using exactly this shape: "
+            '{"answer":"short introduction for the user","artifacts":[{"type":"email_draft","subject":"short subject","content":"plain-text draft"}],"citations":[1,2]}. '
+            "The draft must be professional, natural, ready to use, in the user's language, and retain paragraphs, greeting, and closing. "
+            "Do not put Markdown or citations in the draft. Never state a fact as certain when it is absent or uncertain in CONTEXT; express that limitation in the draft. "
+            "subject is required, short, natural, professional, without quotes, an 'Subject:' prefix, a final period, or Markdown. Reuse an explicitly supplied or unambiguous subject; otherwise derive one from the draft. "
+            "Never write a CITATIONS tag: citations must contain only indices of CONTEXT sources actually used, or [] when no source was used."
+        )
     if evidence_mode == "web_live" and context_text and context_text.strip():
         messages[0]["content"] += (
             " Le CONTEXTE contient des résultats de recherche Web en direct, pas des documents locaux. "

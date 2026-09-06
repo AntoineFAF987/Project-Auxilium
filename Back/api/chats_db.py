@@ -314,6 +314,26 @@ def append_message(tenant_id: str, user_id: str, chat_id: str, role: str, conten
         return int(cur.lastrowid)
 
 
+def update_email_draft_artifact(tenant_id: str, user_id: str, chat_id: str, message_id: int, artifact_index: int, artifact: Dict) -> bool:
+    """Persist one email artifact only; assistant prose and other artifacts stay immutable."""
+    if not _ensure_chat_owner(chat_id, tenant_id, user_id):
+        raise PermissionError("Chat introuvable ou non autorise")
+    with get_connection() as conn:
+        row = conn.execute("SELECT meta_json FROM chat_messages WHERE id=? AND chat_id=? AND role='assistant'", (message_id, chat_id)).fetchone()
+        if not row:
+            return False
+        meta = json.loads(row["meta_json"] or "{}")
+        artifacts = meta.get("artifacts")
+        if not isinstance(artifacts, list) or artifact_index < 0 or artifact_index >= len(artifacts):
+            return False
+        if not isinstance(artifacts[artifact_index], dict) or artifacts[artifact_index].get("type") != "email_draft":
+            return False
+        artifacts[artifact_index] = artifact
+        conn.execute("UPDATE chat_messages SET meta_json=? WHERE id=? AND chat_id=?", (json.dumps(json_safe(meta), ensure_ascii=False), message_id, chat_id))
+        conn.commit()
+    return True
+
+
 def list_messages(tenant_id: str, user_id: str, chat_id: str, limit: int = 200) -> List[Dict]:
     if not _ensure_chat_owner(chat_id, tenant_id, user_id):
         raise PermissionError("Chat introuvable ou non autorise")

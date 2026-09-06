@@ -21,6 +21,7 @@ def ask_mistral_with_context_stream(
     roleplay_mode: bool = False,
     conversational_mode: bool = False,
     evidence_mode: str = "none",
+    response_format: str = "normal",
     **kwargs,
 ) -> Iterator[str]:
     """
@@ -275,6 +276,20 @@ def ask_mistral_with_context_stream(
             ]
 
     messages = [{"role": "system", "content": " ".join(rules)}]
+    if response_format == "email_draft":
+        messages[0]["content"] += (
+            " Produis UNIQUEMENT un objet JSON valide, sans balise Markdown : "
+            '{"answer":"introduction courte","artifacts":[{"type":"email_draft","subject":"objet court","content":"e-mail complet"}],"citations":[1,2]}. '
+            "subject est obligatoire : court, professionnel, sans guillemets, sans préfixe « Objet : », sans point final ni Markdown. Reprends un objet explicite ou non ambigu ; sinon génère-le. "
+            "content contient l’e-mail complet, incluant salutation et signature. Utilise le prénom destinataire explicitement connu, sinon exactement [Prénom]. CURRENT_USER_FIRST_NAME est la seule source de signature ; s’il vaut [Prénom], conserve ce placeholder. N’invente aucun fait absent ou incertain du CONTEXTE. "
+            "N’écris jamais de balise CITATIONS ; citations contient les seuls indices de sources effectivement utilisés."
+            if is_fr else
+            " Produce ONLY a valid JSON object, with no Markdown fence: "
+            '{"answer":"short introduction","artifacts":[{"type":"email_draft","subject":"short subject","content":"plain-text draft"}],"citations":[1,2]}. '
+            "subject is required: short, professional, without quotes, a Subject: prefix, a final period, or Markdown. Reuse an explicit or unambiguous subject; otherwise generate it. "
+            "The content is a professional email in the user's language, with line breaks, no Markdown or citations. Never invent facts absent or uncertain in CONTEXT. "
+            "Never write a CITATIONS tag; citations contains only indices of sources actually used."
+        )
     if evidence_mode == "web_live" and context_text and context_text.strip():
         messages[0]["content"] += (
             " Le CONTEXTE contient des résultats de recherche Web en direct, pas des documents locaux. "

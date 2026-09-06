@@ -235,7 +235,7 @@ def test_current_state_prioritizes_newer_state_resolution_gap_over_higher_retrie
     jan10_body = _row("jan10", "jan10-body", "The request was submitted.", date="2026-01-10T00:00:00Z", blocks=[{"block_type": "email_body"}], order=1)
     jan15 = _row("jan15", "jan15-header", "Subject: Request pending", date="2026-01-15T00:00:00Z", blocks=[{"block_type": "email_header"}])
     jan15_body = _row("jan15", "jan15-body", "The request is pending.", date="2026-01-15T00:00:00Z", blocks=[{"block_type": "email_body"}], order=1)
-    jan20 = _row("jan20", "jan20-header", "Subject: Final status update", date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_header"}])
+    jan20 = _row("jan20", "jan20-header", "Subject: Status update for request", date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_header"}])
     jan20_body = _row("jan20", "jan20-body", "The request was approved.", date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_body"}], order=1)
 
     _evidence, rounds, decision = run_iterative_evidence_retrieval(
@@ -248,7 +248,7 @@ def test_current_state_prioritizes_newer_state_resolution_gap_over_higher_retrie
     assert rounds[0]["selected_lead"] == "jan20"
     selected_gap = next(gap for gap in rounds[0]["evidence_gaps"] if gap["document_id"] == "jan20")
     assert selected_gap["priority_class"] == "potential_newer_state_resolution"
-    assert selected_gap["state_change_potential"] is True
+    assert selected_gap["state_change_potential"] == "unknown"
     assert rounds[1]["action"]["target_document_id"] == "jan20"
     assert decision.sufficient is True
 
@@ -269,6 +269,106 @@ def test_current_state_does_not_promote_newer_state_header_from_another_topic():
     assert unrelated_gap["semantic_fit"] == "weak_selected_evidence"
     assert unrelated_gap["priority_class"] != "potential_newer_state_resolution"
     assert rounds[0]["selected_lead"] != "inventory"
+
+
+def test_dominant_document_is_frozen_as_anchor_and_survives_round_budget():
+    anchor_a = _row("guide", "guide-1", "Project Atlas supports the requested capability.", source="pdf")
+    anchor_b = _row("guide", "guide-2", "The capability is described in the technical guide.", source="pdf", order=1)
+    weak = _row("weak", "weak-1", "Unrelated generic material.", source="pdf")
+    evidence, rounds, _decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.95, anchor_a), (0.91, anchor_b), (0.08, weak)],
+        initial_evidence=[(0.95, anchor_a), (0.91, anchor_b)], corpus=[anchor_a, anchor_b, weak],
+        query="Does Project Atlas support the requested capability?", semantics="fact_lookup", max_rounds=1,
+    )
+    assert any(item["document_id"] == "guide" for item in rounds[0]["anchor_documents"])
+    assert {"guide-1", "guide-2"}.issubset({meta["chunk_uid"] for _, meta in evidence})
+    assert "guide-1" in rounds[-1]["core_evidence_chunk_uids"]
+
+
+def test_answerable_anchor_stops_with_optional_relation_available():
+    anchor = _row("guide", "guide-1", "Project Atlas supports the requested capability.", source="pdf")
+    adjacent = _row("guide", "guide-2", "Supplementary implementation detail.", source="pdf", order=1)
+    _evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.95, anchor)], initial_evidence=[(0.95, anchor)], corpus=[anchor, adjacent],
+        query="Does Project Atlas support the requested capability?", semantics="fact_lookup",
+    )
+    assert decision.sufficient is True
+    assert len(rounds) == 1
+    assert "optional_expansions_remaining" in decision.reason
+
+
+def test_weak_expandable_candidate_is_not_a_lead_when_anchor_answers_question():
+    anchor = _row("guide", "guide-1", "Project Atlas supports the requested capability.", source="pdf")
+    weak = _row("weak", "weak-1", "Atlas appears once in unrelated material.", source="pdf")
+    weak_adjacent = _row("weak", "weak-2", "Additional unrelated material.", source="pdf", order=1)
+    _evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(1.0, anchor), (0.05, weak)], initial_evidence=[(1.0, anchor)], corpus=[anchor, weak, weak_adjacent],
+        query="Does Project Atlas support the requested capability?", semantics="fact_lookup",
+    )
+    assert decision.sufficient is True
+    assert rounds[0]["candidate_leads"] == []
+
+
+def test_newer_related_state_body_is_promoted_after_expand():
+    initial = _row("initial", "initial-1", "Request submitted.", date="2026-01-01T00:00:00Z")
+    waiting = _row("waiting", "waiting-1", "Request remains pending.", date="2026-01-05T00:00:00Z")
+    header = _row("latest", "latest-header", "Subject: Final status update for request", date="2026-01-10T00:00:00Z", blocks=[{"block_type": "email_header"}])
+    body = _row("latest", "latest-body", "The request is approved.", date="2026-01-10T00:00:00Z", blocks=[{"block_type": "email_body"}], order=1)
+    evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.95, waiting), (0.90, initial), (0.35, header)],
+        initial_evidence=[(0.95, waiting), (0.90, initial), (0.35, header)], corpus=[initial, waiting, header, body],
+        query="What is the current status of my request?", semantics="current_state",
+    )
+    assert "latest-body" in rounds[-1]["core_evidence_chunk_uids"]
+    assert any("latest-body" in round_.get("state_change_promoted_chunks", []) for round_ in rounds)
+    assert any(meta["chunk_uid"] == "latest-body" for _, meta in evidence)
+    assert decision.sufficient is True
+
+
+def test_expanded_latest_body_is_reevaluated_promoted_and_precedes_its_header():
+    """A generic temporal regression: the only latest content arrives via EXPAND."""
+    old = _row("record-a", "old", "Service request status: pending.", date="2026-01-01T00:00:00Z")
+    middle = _row("record-b", "middle", "Service request: no determination yet.", date="2026-01-10T00:00:00Z")
+    header = _row(
+        "record-c", "latest-header", "Subject: Service request correspondence",
+        date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_header"}], next_chunk_uid="latest-body",
+    )
+    body = _row(
+        "record-c", "latest-body", "Service request status is now approved.",
+        date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_body"}], order=1,
+    )
+    evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.95, old), (0.90, middle), (0.30, header)],
+        initial_evidence=[(0.95, old), (0.90, middle), (0.30, header)],
+        corpus=[old, middle, header, body], query="What is the current status of the service request?", semantics="current_state",
+    )
+
+    expanded_round = next(round_ for round_ in rounds if round_["action"]["type"] == "EXPAND")
+    assert "latest-body" in expanded_round["state_change_promoted_chunks"]
+    assert expanded_round["expanded_chunk_reevaluation"][0]["state_change_potential_before_expand"] == "unknown"
+    assert expanded_round["expanded_chunk_reevaluation"][0]["state_change_potential_after_expand"] == "true"
+    assert evidence[0][1]["chunk_uid"] == "latest-body"
+    assert decision.sufficient is True
+
+
+def test_expanded_latest_body_without_a_new_outcome_is_still_evaluated_as_current_evidence():
+    old = _row("record-a", "old", "Service request status: pending.", date="2026-01-01T00:00:00Z")
+    header = _row(
+        "record-c", "latest-header", "Subject: Service request correspondence",
+        date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_header"}], next_chunk_uid="latest-body",
+    )
+    body = _row(
+        "record-c", "latest-body", "Service request remains pending.",
+        date="2026-01-20T00:00:00Z", blocks=[{"block_type": "email_body"}], order=1,
+    )
+    evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.95, old), (0.30, header)], initial_evidence=[(0.95, old), (0.30, header)],
+        corpus=[old, header, body], query="What is the current status of the service request?", semantics="current_state",
+    )
+
+    assert evidence[0][1]["chunk_uid"] == "latest-body"
+    assert any("latest-body" in round_.get("state_change_promoted_chunks", []) for round_ in rounds)
+    assert decision.sufficient is True
 
 
 def test_candidate_shared_person_name_is_not_a_topical_relation():
