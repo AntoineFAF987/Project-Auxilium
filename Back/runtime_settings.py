@@ -60,6 +60,8 @@ class RetrievalSettings(_FrozenSettings):
     normalize_embeddings: bool = True
     max_context_chars: int = Field(default=12000, ge=1)
     fuse_adjacent_gap: int = Field(default=1, ge=0)
+    max_retry_rounds: int = Field(default=1, ge=0, le=1)
+    max_retry_queries: int = Field(default=2, ge=1, le=2)
 
     @field_validator(
         "embedding_model",
@@ -86,6 +88,7 @@ class FeatureSettings(_FrozenSettings):
     enable_web_search: bool = True
     enable_query_condensation: bool = True
     enable_query_expansion: bool = True
+    enable_intelligent_retry: bool = True
     enable_post_generation_review: bool = False
     enable_faithfulness_check: bool = False
     faithfulness_strict_only: bool = True
@@ -229,6 +232,7 @@ def _runtime_payload(config: Mapping[str, Any]) -> dict[str, Any]:
         "enable_web_search",
         "enable_query_condensation",
         "enable_query_expansion",
+        "enable_intelligent_retry",
         "enable_post_generation_review",
         "enable_faithfulness_check",
         "faithfulness_threshold",
@@ -299,6 +303,7 @@ def _runtime_payload(config: Mapping[str, Any]) -> dict[str, Any]:
                 "enable_web_search": "enable_web_search",
                 "enable_query_condensation": "enable_query_condensation",
                 "enable_query_expansion": "enable_query_expansion",
+                "enable_intelligent_retry": "enable_intelligent_retry",
                 "enable_post_generation_review": "enable_post_generation_review",
                 "enable_faithfulness_check": "enable_faithfulness_check",
                 "faithfulness_strict_only": "faithfulness_strict_only",
@@ -370,6 +375,9 @@ _ENV_PATHS: dict[str, tuple[str, str]] = {
     "AUXILIUM_ORCHESTRATOR_MODEL": ("orchestrator", "model"),
     "AUXILIUM_ORCHESTRATOR_TIMEOUT": ("orchestrator", "timeout"),
     "AUXILIUM_ENABLE_QUERY_EXPANSION": ("features", "enable_query_expansion"),
+    "AUXILIUM_ENABLE_INTELLIGENT_RETRY": ("features", "enable_intelligent_retry"),
+    "AUXILIUM_MAX_RETRY_ROUNDS": ("retrieval", "max_retry_rounds"),
+    "AUXILIUM_MAX_RETRY_QUERIES": ("retrieval", "max_retry_queries"),
     "AUXILIUM_ENABLE_POST_GENERATION_REVIEW": ("features", "enable_post_generation_review"),
     "AUXILIUM_ENABLE_FAITHFULNESS_CHECK": ("features", "enable_faithfulness_check"),
     "AUXILIUM_FAITHFULNESS_STRICT_ONLY": ("features", "faithfulness_strict_only"),

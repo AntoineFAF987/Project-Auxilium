@@ -106,7 +106,7 @@ def _technical_anchors(value: str) -> Set[str]:
     """Extract generic identifier-like terms, without a product vocabulary."""
     return {
         token.casefold()
-        for token in re.findall(r"\b(?=[\w-]*\d)[\w-]{2,}\b", value or "")
+        for token in re.findall(r"\b(?:[A-Za-z]+[A-Za-z0-9-]*\d[A-Za-z0-9-]*|\d+(?:\.\d+)+|\d{2,})\b", value or "")
     }
 
 

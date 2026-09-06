@@ -23,6 +23,8 @@
     "normalize_embeddings": true,
     "max_context_chars": 12000,
     "fuse_adjacent_gap": 1
+    ,"max_retry_rounds": 1
+    ,"max_retry_queries": 2
   },
   "orchestrator": {
     "enabled": true,
@@ -61,6 +63,7 @@
     "enable_web_search": true,
     "enable_query_condensation": true,
     "enable_query_expansion": true,
+    "enable_intelligent_retry": true,
     "enable_post_generation_review": false,
     "enable_faithfulness_check": false,
     "faithfulness_threshold": 0.4,

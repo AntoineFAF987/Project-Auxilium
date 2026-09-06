@@ -39,6 +39,7 @@ from .orchestration_debug import record_snapshot
 from .response_trace import ResponseTraceStore
 from .iterative_retrieval import run_iterative_evidence_retrieval
 from .multi_query_retrieval import build_retrieval_queries, reciprocal_rank_fusion, resolve_retrieval_query
+from .intelligent_retry import build_retry_queries, derive_retrieval_gap, merge_cumulative_evidence
 from .catalog_probe import probe_document_catalog
 from .chats_db import create_chat, append_message, mark_chat_title_generation_attempted, set_generated_chat_title, should_generate_chat_title
 from .chat_titles import generate_chat_title
@@ -383,6 +384,9 @@ CONTEXT_RELEVANCE_THRESHOLD = _RUNTIME_SETTINGS.thresholds.context_relevance
 ENABLE_RERANKER = _RUNTIME_SETTINGS.features.enable_reranker
 ENABLE_CONDENSATION = _RUNTIME_SETTINGS.features.enable_query_condensation
 ENABLE_EXPANSION = _RUNTIME_SETTINGS.features.enable_query_expansion
+ENABLE_INTELLIGENT_RETRY = _RUNTIME_SETTINGS.features.enable_intelligent_retry
+MAX_RETRY_ROUNDS = _RUNTIME_SETTINGS.retrieval.max_retry_rounds
+MAX_RETRY_QUERIES = _RUNTIME_SETTINGS.retrieval.max_retry_queries
 ENABLE_POST_GENERATION_REVIEW = _RUNTIME_SETTINGS.features.enable_post_generation_review
 ENABLE_FAITHFULNESS_CHECK = _RUNTIME_SETTINGS.features.enable_faithfulness_check
 FAITHFULNESS_THRESHOLD = _RUNTIME_SETTINGS.thresholds.faithfulness
@@ -684,7 +688,7 @@ def _specific_anchors(text: str) -> set[str]:
     """Extract stable, domain-neutral identifiers (serial/model/reference-like tokens)."""
     return {
         token.lower()
-        for token in re.findall(r"\b(?=[\w-]*\d)[\w-]{2,}\b", text or "")
+        for token in re.findall(r"\b(?:[A-Za-z]+[A-Za-z0-9-]*\d[A-Za-z0-9-]*|\d+(?:\.\d+)+|\d{2,})\b", text or "")
     }
 
 
@@ -1969,7 +1973,10 @@ def run_answer_pipeline(
     )
 
     # TIER 0 amélioration: multi-query expansion si peu de hits ou faible overlap OU contexte hors sujet
-    if ENABLE_EXPANSION and (not strict_local_ok or not context_is_relevant) and prelim_hits < max(4, RETRIEVE_K // 2):
+    # The legacy broad expansion is disabled when the bounded, gap-driven
+    # retry is enabled below.  It must not consume a second retrieval round
+    # before answerability has identified what is actually missing.
+    if ENABLE_EXPANSION and not ENABLE_INTELLIGENT_RETRY and (not strict_local_ok or not context_is_relevant) and prelim_hits < max(4, RETRIEVE_K // 2):
         try:
             variants = _multi_query_expand(q_eff, n=3)
             all_prelims = [prelim]
@@ -2019,6 +2026,111 @@ def run_answer_pipeline(
         blocks=[meta for _, meta in blocks],
     )
     trace("answerability", answerability_decision.to_dict())
+
+    # Phase 2: one cumulative, gap-driven retry before generation.  This is
+    # intentionally non-recursive: the second decision is final.
+    initial_evidence_chunk_uids = [str(meta.get("chunk_uid")) for _, meta in blocks if meta.get("chunk_uid")]
+    retry_trace: Dict[str, Any] = {
+        "retry_triggered": False,
+        "retry_reason": None,
+        "missing_aspects": [],
+        "preserved_anchors": [],
+        "retry_queries": [],
+        "retry_queries_rejected": [],
+        "initial_evidence_chunk_uids": initial_evidence_chunk_uids,
+        "retry_evidence_chunk_uids": [],
+        "merged_evidence_chunk_uids": initial_evidence_chunk_uids,
+        "answerability_before_retry": answerability_decision.status,
+        "answerability_after_retry": answerability_decision.status,
+        "supported_aspects_before_retry": [],
+        "supported_aspects_after_retry": [],
+    }
+    if ENABLE_INTELLIGENT_RETRY and MAX_RETRY_ROUNDS == 1 and answerability_decision.status in {"partial", "unanswerable"}:
+        retry_gap = derive_retrieval_gap(
+            query=q_eff, context_text=context_local, answerability=answerability_decision,
+            evidence_mode=evidence_mode, evidence_reason=evidence_decision.reason,
+        )
+        retry_queries, retry_rejected = build_retry_queries(
+            original_user_query=q, orchestrator_query=(orchestration_plan.retrieval_query if orchestration_plan else None),
+            resolved_retrieval_query=resolved_retrieval_query or q_eff, gap=retry_gap,
+            max_queries=MAX_RETRY_QUERIES,
+        )
+        retry_trace.update({
+            "retry_reason": retry_gap.reason,
+            "missing_aspects": retry_gap.missing_aspects,
+            "preserved_anchors": retry_gap.anchors,
+            "supported_aspects_before_retry": retry_gap.supported_aspects,
+            "retry_queries": retry_queries,
+            "retry_queries_rejected": retry_rejected,
+        })
+        if retry_queries:
+            retry_trace["retry_triggered"] = True
+            emit_status("retry_retrieval", "Recherche complementaire ciblee")
+            retry_rankings = []
+            retry_scores: list[float] = []
+            for retry_index, retry_query in enumerate(retry_queries, start=1):
+                rows, scores = idx.search(
+                    retry_query, retrieve_k=RETRIEVE_K, top_k_faiss=TOP_K_FAISS,
+                    hybrid_alpha=HYBRID_ALPHA, use_rerank=ENABLE_RERANKER,
+                    allowed_sources=allowed_sources,
+                )
+                if orchestration_plan:
+                    rows = filter_retrieval_candidates(rows, orchestration_plan)
+                retry_rankings.append((f"retry_{retry_index}", rows))
+                retry_scores.extend(scores)
+            retry_prelim = reciprocal_rank_fusion(retry_rankings) if len(retry_rankings) > 1 else (retry_rankings[0][1] if retry_rankings else [])
+            retry_trace["retry_evidence_chunk_uids"] = [str(meta.get("chunk_uid")) for _, meta in retry_prelim if meta.get("chunk_uid")]
+            # Never replace the first pass: deduplicate by uid while retaining
+            # first-pass score and all provenance on a repeated chunk.
+            # Include first-pass structural additions too (email bodies,
+            # thread neighbours, attachments): they are already-confirmed
+            # evidence and must survive even if retry ranking omits them.
+            prelim = merge_cumulative_evidence([*prelim, *blocks], retry_prelim, retry_query_count=len(retry_queries))
+            fused = fuse_contiguous_passages(prelim, gap=FUSE_ADJACENT_GAP)
+            blocks = clip_context_blocks(fused, max_chars=MAX_CONTEXT_CHARS, keep=FINAL_K)
+            if orchestration_plan is not None:
+                blocks, retry_rounds, iterative_sufficiency = run_iterative_evidence_retrieval(
+                    candidate_pool=prelim, initial_evidence=blocks,
+                    corpus=list(getattr(idx, "corpus", []) or []), query=q_eff,
+                    semantics=orchestration_plan.query_semantics, max_rounds=3,
+                    max_expanded_chunks=4,
+                )
+                retrieval_rounds.extend(retry_rounds)
+                blocks = clip_context_blocks(blocks, max_chars=MAX_CONTEXT_CHARS, keep=FINAL_K)
+            ce_scores.extend(retry_scores)
+            gated_ok = answerability_guard(ce_scores, threshold=ANS_THRESHOLD)
+            context_local = format_context_for_llm(blocks) if blocks else ""
+            overlap = keyword_overlap_count(q, context_local)
+            context_is_relevant = _check_context_relevance(q, context_local)
+            evidence_decision = _evaluate_evidence(q, blocks, guard_ok=bool(gated_ok), context_is_relevant=context_is_relevant, overlap=overlap)
+            evidence_mode = evidence_decision.mode
+            strict_local_ok = evidence_mode in {"direct", "related"}
+            local_context_state = _classify_local_context_state(
+                evidence_decision,
+                retrieval_sufficient=(iterative_sufficiency.sufficient if iterative_sufficiency is not None else None),
+            )
+            answerability_decision = evaluate_answerability(
+                query=q, evidence_mode=evidence_mode, context_is_relevant=context_is_relevant,
+                evidence_sufficient=(iterative_sufficiency.sufficient if iterative_sufficiency is not None else None),
+                reranker_accepted=bool(gated_ok), blocks=[meta for _, meta in blocks],
+            )
+            after_gap = derive_retrieval_gap(
+                query=q_eff, context_text=context_local, answerability=answerability_decision,
+                evidence_mode=evidence_mode, evidence_reason=evidence_decision.reason,
+            )
+            retry_trace.update({
+                "merged_evidence_chunk_uids": [str(meta.get("chunk_uid")) for _, meta in blocks if meta.get("chunk_uid")],
+                "answerability_after_retry": answerability_decision.status,
+                "supported_aspects_after_retry": after_gap.supported_aspects,
+            })
+    trace("intelligent_retry", retry_trace)
+    if retry_trace["retry_triggered"]:
+        trace("evidence_after_retry", {
+            "evidence_mode": evidence_mode,
+            "evidence_mode_reason": evidence_decision.reason,
+            "context_is_relevant": context_is_relevant,
+            **answerability_decision.to_dict(),
+        })
 
     # --- Signaux pour routeur LLM ---
     signals = {
@@ -2085,6 +2197,7 @@ def run_answer_pipeline(
     validations["response_format"] = orchestration_plan.response_format if orchestration_plan else "normal"
     validations["retrieval_query"] = q_eff
     validations["answerability"] = answerability_decision.to_dict()
+    validations["intelligent_retry"] = retry_trace
     validations["evidence_provenance"] = {
         "evidence_sufficient": bool(iterative_sufficiency.sufficient) if iterative_sufficiency is not None else bool(strict_local_ok),
         "evidence_chunk_uids": rag_chunk_uids,

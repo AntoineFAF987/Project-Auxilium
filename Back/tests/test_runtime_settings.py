@@ -24,12 +24,15 @@ class RuntimeSettingsLoadingTests(unittest.TestCase):
         self.assertEqual(settings.retrieval.hybrid_alpha, 0.8)
         self.assertEqual(settings.retrieval.exact_match_bonus, 0.15)
         self.assertEqual(settings.retrieval.mmr_lambda, 0.7)
+        self.assertEqual(settings.retrieval.max_retry_rounds, 1)
+        self.assertEqual(settings.retrieval.max_retry_queries, 2)
         self.assertEqual(settings.generation.model, "mistral-small-latest")
         self.assertEqual(settings.generation.temperature, 0.6)
         self.assertEqual(settings.generation.strict_temperature, 0.45)
         self.assertEqual(settings.generation.max_tokens, 1200)
         self.assertFalse(settings.features.enable_post_generation_review)
         self.assertFalse(settings.features.enable_faithfulness_check)
+        self.assertTrue(settings.features.enable_intelligent_retry)
         self.assertFalse(settings.orchestrator.enabled)
 
     def test_config_file_values_override_defaults(self):
