@@ -21,6 +21,7 @@ def ask_mistral_with_context_stream(
     roleplay_mode: bool = False,
     conversational_mode: bool = False,
     evidence_mode: str = "none",
+    answerability: str = "answerable",
     response_format: str = "normal",
     **kwargs,
 ) -> Iterator[str]:
@@ -312,6 +313,16 @@ def ask_mistral_with_context_stream(
             " The evidence is related but not direct for every requested entity. State the useful comparison naturally, "
             "then mention the limitation once if it matters. If sources disagree, state the disagreement without pretending "
             "to settle it."
+        )
+    if answerability == "partial" and context_text and context_text.strip():
+        messages[0]["content"] += (
+            " Les sources ne couvrent qu'une partie de la question. Réponds uniquement avec les faits explicitement confirmés, "
+            "puis explique naturellement quelle information précise manque pour conclure. Ne déduis jamais le cas demandé "
+            "depuis un modèle, une version ou une référence voisine."
+            if is_fr else
+            " The sources cover only part of the question. State only explicitly confirmed facts, then naturally explain "
+            "which precise information is missing to conclude. Never infer the requested case from a neighbouring model, "
+            "version, or reference."
         )
     for m in (history or []):
         if isinstance(m, dict) and "role" in m and "content" in m:

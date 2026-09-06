@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import re
 from time import perf_counter
-from typing import Any, Dict, List, Mapping, Sequence, Set, Tuple
+from typing import Any, Dict, List, Literal, Mapping, Sequence, Set, Tuple
 import unicodedata
 
 from .constants import FINAL_K
@@ -60,6 +60,36 @@ class SufficiencyDecision:
         return asdict(self)
 
 
+Answerability = Literal["answerable", "partial", "unanswerable"]
+
+
+@dataclass(frozen=True)
+class AnswerabilityDecision:
+    """Production-facing decision made after retrieval has produced final blocks.
+
+    This is intentionally deterministic.  It does not pretend that retrieval
+    scores prove an answer; scores only complement topical relevance, direct
+    technical-anchor support, coverage, and structural evidence sufficiency.
+    """
+
+    status: Answerability
+    reasons: Tuple[str, ...]
+    query_term_coverage: float
+    requested_anchors: Tuple[str, ...]
+    supported_anchors: Tuple[str, ...]
+    context_sufficiency: SufficiencyDecision
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "answerability": self.status,
+            "answerability_reasons": list(self.reasons),
+            "query_term_coverage": self.query_term_coverage,
+            "requested_anchors": list(self.requested_anchors),
+            "supported_anchors": list(self.supported_anchors),
+            "context_sufficiency": self.context_sufficiency.to_dict(),
+        }
+
+
 def _normalize(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value.casefold())
     return "".join(char for char in normalized if not unicodedata.combining(char))
@@ -69,6 +99,14 @@ def _tokens(value: str) -> Set[str]:
     return {
         token for token in re.findall(r"[a-z0-9][a-z0-9_.-]*", _normalize(value))
         if len(token) > 1 and token not in _STOPWORDS
+    }
+
+
+def _technical_anchors(value: str) -> Set[str]:
+    """Extract generic identifier-like terms, without a product vocabulary."""
+    return {
+        token.casefold()
+        for token in re.findall(r"\b(?=[\w-]*\d)[\w-]{2,}\b", value or "")
     }
 
 
@@ -279,3 +317,83 @@ def select_adaptive_context(
         "stopped_before_final_k": len(selected) < min(final_k, len(pool)),
         "timing_ms": (perf_counter() - started) * 1000.0,
     }
+
+
+def evaluate_answerability(
+    *,
+    query: str,
+    evidence_mode: Literal["direct", "related", "none"],
+    context_is_relevant: bool,
+    evidence_sufficient: bool | None,
+    reranker_accepted: bool,
+    blocks: Sequence[Mapping[str, Any]],
+    policy: SufficiencyPolicy = SufficiencyPolicy(),
+) -> AnswerabilityDecision:
+    """Classify final local evidence as answerable, partial, or unanswerable.
+
+    ``blocks`` must be the final, post-enrichment context blocks.  A related
+    reference can be useful, but is never enough to mark a precise request as
+    answerable by itself.  This protects version/model identifiers generically.
+    """
+    texts = [str(block.get("text") or "") for block in blocks]
+    metas = [dict(block) for block in blocks]
+    requested = _technical_anchors(query)
+    documented = _technical_anchors("\n".join(texts))
+    supported = requested & documented
+    signals = {
+        index: {"reranker_score": policy.strong_reranker_score if reranker_accepted else 0.0}
+        for index in range(len(texts))
+    }
+    context = evaluate_context_sufficiency(
+        query=query,
+        selected_ids=list(range(len(texts))),
+        metas=metas,
+        texts=texts,
+        candidate_signals=signals,
+        policy=policy,
+    ) if texts else SufficiencyDecision(
+        sufficient=False, reason="no_final_blocks", confidence=0.0,
+        requested_more_evidence=1, selected_count=0, distinct_documents=0,
+        query_term_coverage=0.0, strong_top_evidence=False,
+        protected_evidence_missing=0,
+    )
+
+    reasons: list[str] = []
+    if not texts:
+        reasons.append("no_final_context_blocks")
+    if evidence_mode == "none":
+        reasons.append("no_usable_topical_evidence")
+    if not context_is_relevant:
+        reasons.append("context_not_relevant_to_information_need")
+    missing_anchors = requested - documented
+    if missing_anchors:
+        reasons.append("specific_anchors_not_directly_supported:" + ",".join(sorted(missing_anchors)))
+    if evidence_mode == "related":
+        reasons.append("only_related_evidence_for_requested_entity")
+    if context.query_term_coverage < policy.min_query_term_coverage:
+        reasons.append("insufficient_query_term_coverage")
+    if evidence_sufficient is False:
+        reasons.append("structural_evidence_incomplete")
+    if not reranker_accepted:
+        reasons.append("reranker_guard_rejected_context")
+
+    if not texts or evidence_mode == "none" or not context_is_relevant:
+        status: Answerability = "unanswerable"
+    elif evidence_mode == "related" or missing_anchors or evidence_sufficient is False:
+        status = "partial"
+    elif context.query_term_coverage < policy.min_query_term_coverage or not reranker_accepted:
+        # Relevant direct evidence remains useful, but cannot settle every
+        # requested facet when coverage/reranking does not support it.
+        status = "partial"
+    else:
+        status = "answerable"
+        reasons.append("direct_evidence_covers_requested_information")
+
+    return AnswerabilityDecision(
+        status=status,
+        reasons=tuple(reasons),
+        query_term_coverage=context.query_term_coverage,
+        requested_anchors=tuple(sorted(requested)),
+        supported_anchors=tuple(sorted(supported)),
+        context_sufficiency=context,
+    )

@@ -68,6 +68,20 @@ class EvidenceSet:
             added.append(item)
         return added
 
+    def item_representing(self, chunk_uid: str) -> tuple[float, dict[str, Any]] | None:
+        """Return selected evidence that contains this native chunk.
+
+        Retrieval fusion can represent adjacent native chunks as one evidence
+        item.  A member UID is therefore allowed to be "seen" while still
+        needing semantic inspection during a later structural expansion.
+        """
+        for score, meta in self.items:
+            uid = str(meta.get("chunk_uid") or f"{meta.get('document_id')}:{meta.get('chunk_id')}")
+            members = {str(value) for value in (meta.get("fused_chunk_uids") or []) if value} or {uid}
+            if str(chunk_uid) in members:
+                return score, meta
+        return None
+
 
 @dataclass(frozen=True)
 class CandidatePool:
@@ -260,20 +274,29 @@ def _title_text(meta: dict[str, Any]) -> str:
     return " ".join((str(meta.get("title") or ""), str(metadata.get("subject") or ""), str(meta.get("text") or "")[:400]))
 
 
-def _topic_relation(meta: dict[str, Any], query: str, semantics: QuerySemantics) -> tuple[Literal["direct_subject_match", "state_resolution_context", "weak_selected_evidence"], Literal["true", "false", "unknown"]]:
-    """Return semantic fit and whether the title supplies a state-change lead.
+def _topic_relation(
+    meta: dict[str, Any], query: str, semantics: QuerySemantics, *,
+    chunk_text_only: bool = False,
+) -> tuple[Literal["direct_subject_match", "state_resolution_context", "weak_selected_evidence"], Literal["true", "false", "unknown"]]:
+    """Return semantic fit and state-change potential for a retrieval item.
+
+    Document metadata is useful while selecting a document lead: an email
+    subject can identify a related message before its body is loaded. It is
+    not evidence about every chunk of that message. ``chunk_text_only`` is
+    required for post-EXPAND re-evaluation, where this precise chunk may be
+    promoted to the generation context.
 
     Shared names, organisations and location labels do not establish topical
     relation by themselves.  They need an accompanying non-entity topic term.
     """
-    title = _title_text(meta)
-    query_terms, title_terms = _terms(query), _terms(title)
-    shared = query_terms & title_terms
-    proper_shared = _proper_terms(query) & _proper_terms(title)
+    candidate_text = str(meta.get("text") or "") if chunk_text_only else _title_text(meta)
+    query_terms, candidate_terms = _terms(query), _terms(candidate_text)
+    shared = query_terms & candidate_terms
+    proper_shared = _proper_terms(query) & _proper_terms(candidate_text)
     non_entity_shared = shared - proper_shared
-    title_topics = title_terms - proper_shared
+    candidate_topics = candidate_terms - proper_shared
     query_topics = query_terms - proper_shared
-    competing_topic = bool(title_topics - query_topics) and not non_entity_shared
+    competing_topic = bool(candidate_topics - query_topics) and not non_entity_shared
     # A multiword entity/label ("Project Orion", a product code plus name)
     # is a subject in its own right; one name alone remains insufficient.
     direct = non_entity_shared or (semantics in {"fact_lookup", "general_document_question"} and len(proper_shared) >= 2)
@@ -459,7 +482,11 @@ def _priority_items(evidence: EvidenceSet, semantics: QuerySemantics) -> list[tu
     def rank(item: tuple[float, dict[str, Any]]) -> tuple[int, str, float]:
         score, meta = item
         redundant_header = _is_header_only(meta) and str(meta.get("document_id") or "") in body_documents
-        return (0 if redundant_header else 1, _date_key(meta), score)
+        return (
+            0 if redundant_header else 1,
+            _date_key(meta),
+            score,
+        )
     return sorted(core, key=rank, reverse=True) + sorted(optional, key=rank, reverse=True)
 
 
@@ -581,9 +608,6 @@ def _execute_action(
             rows: list[dict[str, Any]] = []
             current = _row_by_uid(corpus, origin.get("next_chunk_uid"))
             while current and len(rows) < max_expanded_chunks:
-                if str(current.get("chunk_uid")) in evidence.seen_chunk_uids:
-                    current = _row_by_uid(corpus, current.get("next_chunk_uid"))
-                    continue
                 if str(current.get("document_id")) != action.target_document_id or not _is_email_body(current):
                     break
                 rows.append(current)
@@ -730,8 +754,12 @@ def run_iterative_evidence_retrieval(
         if on_action:
             on_action(action)
         expand_started = time.perf_counter()
-        added = evidence.add(_execute_action(action, evidence, pool, corpus, max_expanded_chunks=max_expanded_chunks))
+        expanded_rows = _execute_action(
+            action, evidence, pool, corpus, max_expanded_chunks=max_expanded_chunks,
+        )
+        added = evidence.add(expanded_rows)
         promoted: list[str] = []
+        rejected: list[dict[str, Any]] = []
         stateful_origin = next((
             gap for gap in gaps
             if gap.document_id == action.target_document_id
@@ -744,9 +772,20 @@ def run_iterative_evidence_retrieval(
             # established a topical, temporal lead; structural lineage makes
             # its non-header continuation a candidate, not passive optional
             # material. This is intentionally independent of domain wording.
-            for _score, meta in added:
-                uid = str(meta.get("chunk_uid") or "")
-                fit, potential = _topic_relation(meta, query, semantics)
+            # Inspect every bounded structural neighbour, including a native
+            # chunk already represented inside a fused evidence item.  "Seen"
+            # means de-duplicated in EvidenceSet; it must not mean "already
+            # semantically evaluated as an answer-bearing chunk".
+            for _score, raw_meta in expanded_rows:
+                uid = str(raw_meta.get("chunk_uid") or "")
+                represented = evidence.item_representing(uid) if uid else None
+                meta = represented[1] if represented else raw_meta
+                # A native block may span multiple indexed chunks. Do not let
+                # its text, or its email subject/title, make a signature
+                # inherit a decision stated in a previous chunk.
+                fit, potential = _topic_relation(
+                    raw_meta, query, semantics, chunk_text_only=True,
+                )
                 eligible = (
                     semantics in {"current_state", "decision"}
                     and stateful_origin is not None
@@ -763,23 +802,45 @@ def run_iterative_evidence_retrieval(
                     promotion_reason = "expanded_content_not_answer_bearing"
                 reevaluated_chunks.append({
                     "chunk_uid": uid,
+                    "evaluated_text_source": "chunk.text",
+                    "already_represented_in_evidence": represented is not None and not any(
+                        str(added_meta.get("chunk_uid") or "") == uid for _, added_meta in added
+                    ),
                     "semantic_fit": fit,
                     "state_change_potential_before_expand": stateful_origin.state_change_potential if stateful_origin else None,
                     "state_change_potential_after_expand": potential,
                     "promotion_reason": promotion_reason,
                 })
                 if uid and eligible:
+                    # Evidence-local trace marker. It does not change retrieval
+                    # scores, corpus metadata, or final-context ordering.
+                    meta["state_change_promoted"] = True
+                    promoted_members = list(meta.get("state_change_promoted_member_chunk_uids") or [])
+                    if uid not in promoted_members:
+                        meta["state_change_promoted_member_chunk_uids"] = [*promoted_members, uid]
                     evidence.core_chunk_uids.add(uid)
+                    if represented:
+                        evidence.core_chunk_uids.add(str(meta.get("chunk_uid") or ""))
                     promoted.append(uid)
+                else:
+                    rejected.append({
+                        "chunk_uid": uid,
+                        "reason": promotion_reason,
+                        "semantic_fit": fit,
+                        "state_change_potential": potential,
+                    })
         round_data = {
             "round": len(rounds) + 1, "action": action.__dict__,
             "candidate_pool_count": len(pool.items), "evidence_count": len(evidence.items),
             "added_chunk_uids": [meta.get("chunk_uid") for _, meta in added],
             "expand_ms": round((time.perf_counter() - expand_started) * 1000, 1),
             "state_change_promoted_chunks": promoted,
+            "expanded_document_chunks_considered": [meta.get("chunk_uid") for _, meta in expanded_rows],
+            "expanded_document_chunks_promoted": promoted,
+            "expanded_document_chunks_rejected": rejected,
             "expanded_chunk_reevaluation": reevaluated_chunks,
         }
-        if not added:
+        if not added and not promoted:
             decision = EvidenceSufficiency(False, "requested_action_added_no_new_evidence")
         else:
             decision = _inspect(evidence, pool, corpus=corpus, query=query, semantics=semantics)
@@ -803,8 +864,14 @@ def run_iterative_evidence_retrieval(
         rounds[-1]["sufficiency"] = {"sufficient": decision.sufficient, "reason": decision.reason, "next_action": None}
     final_items = _priority_items(evidence, semantics)
     final_uids = {str(meta.get("chunk_uid") or "") for _, meta in final_items}
+    final_member_uids = {
+        str(member) for _, meta in final_items
+        for member in (meta.get("fused_chunk_uids") or [meta.get("chunk_uid")])
+        if member
+    }
     rounds[-1]["optional_evidence_chunk_uids"] = sorted(final_uids - evidence.core_chunk_uids)
     rounds[-1]["core_evidence_chunk_uids"] = sorted(evidence.core_chunk_uids)
+    rounds[-1]["final_evidence_member_chunk_uids"] = sorted(final_member_uids)
     rounds[-1]["latest_relevant_evidence_date"] = max((_date_key(meta) for _, meta in final_items if _date_key(meta)), default=None)
     rounds[-1]["dropped_evidence"] = [
         {"chunk_uid": str(meta.get("chunk_uid") or ""), "reason": "weak_relative_candidate_not_expanded"}

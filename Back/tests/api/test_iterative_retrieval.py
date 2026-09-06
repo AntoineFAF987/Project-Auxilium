@@ -11,6 +11,7 @@ if "api" not in sys.modules:
     sys.modules["api"] = api_package
 
 from api.iterative_retrieval import run_iterative_evidence_retrieval  # noqa: E402
+from rag_core.retrieval import clip_context_blocks, format_context_for_llm  # noqa: E402
 
 
 def _row(document_id, uid, text, *, date="2026-01-01T00:00:00Z", source="email", blocks=None, attachments=None, order=0, next_chunk_uid=None):
@@ -384,3 +385,106 @@ def test_candidate_shared_person_name_is_not_a_topical_relation():
 
     assert rounds[0]["candidate_leads"] == []
     assert decision.sufficient is True
+
+
+def test_email_body_expansion_promotes_only_the_decision_chunk_from_a_shared_native_block():
+    """A shared parent block must not leak its decision into a signature."""
+    native_body = (
+        "Madame KOENIG a accueilli favorablement la requête et a levé l'interdiction de quitter le territoire.\n\n"
+        "Les autres obligations restent inchangées.\n\n"
+        "Je me tiens à votre disposition. Bien à vous."
+    )
+    header = _row(
+        "recent-mail", "recent-header", "Subject: Modification et levée de l'interdiction de quitter le territoire",
+        date="2026-08-28T12:46:34Z", blocks=[{"block_type": "email_header"}],
+        next_chunk_uid="recent-decision",
+    )
+    decision_body = _row(
+        "recent-mail", "recent-decision",
+        "Madame KOENIG a accueilli favorablement la requête et a levé l'interdiction de quitter le territoire.",
+        date="2026-08-28T12:46:34Z", blocks=[{"block_type": "email_body", "text": native_body}], order=1,
+        next_chunk_uid="recent-obligations",
+    )
+    obligations = _row(
+        "recent-mail", "recent-obligations", "Les autres obligations restent inchangées.",
+        date="2026-08-28T12:46:34Z", blocks=[{"block_type": "email_body", "text": native_body}], order=2,
+        next_chunk_uid="recent-signature",
+    )
+    signature = _row(
+        "recent-mail", "recent-signature",
+        "Je me tiens à votre disposition. Bien à vous.",
+        date="2026-08-28T12:46:34Z", blocks=[{"block_type": "email_body", "text": native_body}], order=3,
+    )
+    evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.95, header), (0.93, decision_body)], initial_evidence=[(0.95, header)],
+        corpus=[header, decision_body, obligations, signature],
+        query="Antoine demande par mail s'il est autorisé à quitter le territoire. Je réponds quoi ?",
+        semantics="decision",
+    )
+
+    expanded_round = next(round_ for round_ in rounds if round_["action"]["type"] == "EXPAND")
+    by_uid = {item["chunk_uid"]: item for item in expanded_round["expanded_chunk_reevaluation"]}
+    final_context = format_context_for_llm(clip_context_blocks(evidence, keep=10))
+    assert rounds[1]["action"]["type"] == "EXPAND"
+    assert decision.sufficient is True
+    assert expanded_round["state_change_promoted_chunks"] == ["recent-decision"]
+    assert {item["evaluated_text_source"] for item in by_uid.values()} == {"chunk.text"}
+    assert by_uid["recent-decision"]["state_change_potential_after_expand"] == "true"
+    assert by_uid["recent-obligations"]["state_change_potential_after_expand"] == "false"
+    assert by_uid["recent-signature"]["state_change_potential_after_expand"] == "false"
+    assert "a levé l'interdiction de quitter le territoire" in final_context
+
+
+def test_expand_reevaluates_decision_already_represented_by_fused_evidence():
+    header = _row(
+        "mail", "header", "Subject: Travel restriction decision",
+        blocks=[{"block_type": "email_header"}], next_chunk_uid="decision",
+    )
+    decision = _row(
+        "mail", "decision", "The travel restriction is lifted effective today.",
+        blocks=[{"block_type": "email_body"}], order=1, next_chunk_uid="signature",
+    )
+    signature = _row(
+        "mail", "signature", "Kind regards.", blocks=[{"block_type": "email_body"}], order=2,
+    )
+    fused_header_and_decision = {
+        **header,
+        "text": f"{header['text']}\n\n{decision['text']}",
+        "fused_chunk_uids": ["header", "decision"],
+    }
+    evidence, rounds, _decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.95, header), (0.93, decision)],
+        initial_evidence=[(0.94, fused_header_and_decision)],
+        corpus=[header, decision, signature],
+        query="Is the travel restriction lifted?", semantics="decision",
+    )
+
+    expanded_round = next(round_ for round_ in rounds if round_["action"]["type"] == "EXPAND")
+    reviewed = {item["chunk_uid"]: item for item in expanded_round["expanded_chunk_reevaluation"]}
+    final_context = format_context_for_llm(clip_context_blocks(evidence, keep=10))
+    assert expanded_round["expanded_document_chunks_considered"] == ["decision", "signature"]
+    assert expanded_round["expanded_document_chunks_promoted"] == ["decision"]
+    assert reviewed["decision"]["already_represented_in_evidence"] is True
+    assert "The travel restriction is lifted effective today." in final_context
+
+
+def test_expansion_never_promotes_signature_from_parent_block_text():
+    header = _row(
+        "mail", "header", "Subject: Decision about lifting the restriction", blocks=[{"block_type": "email_header"}],
+        next_chunk_uid="signature",
+    )
+    signature = _row(
+        "mail", "signature", "Bien à vous.",
+        blocks=[{"block_type": "email_body", "text": "Decision approved and restriction lifted. Bien à vous."}], order=1,
+    )
+    _evidence, rounds, _decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.95, header)], initial_evidence=[(0.95, header)],
+        corpus=[header, signature],
+        query="Quelle décision ce mail communique-t-il ?", semantics="decision",
+    )
+
+    expanded_round = next(round_ for round_ in rounds if round_["action"]["type"] == "EXPAND")
+    rechecked_signature = expanded_round["expanded_chunk_reevaluation"][0]
+    assert expanded_round["state_change_promoted_chunks"] == []
+    assert rechecked_signature["chunk_uid"] == "signature"
+    assert rechecked_signature["state_change_potential_after_expand"] == "false"

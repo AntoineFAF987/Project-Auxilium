@@ -12,6 +12,14 @@ def _canonical(value: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", text))
 
 
+def _obviously_duplicate(left: str, right: str) -> bool:
+    """Deduplicate only safe textual equivalents; preserve useful rewrites."""
+    left_canonical, right_canonical = _canonical(left), _canonical(right)
+    if left_canonical == right_canonical:
+        return True
+    return bool(left_canonical and set(left_canonical.split()) == set(right_canonical.split()))
+
+
 def normalized_query(original: str) -> str | None:
     """Remove conversational glue only; never add or substitute domain terms."""
     filler = {
@@ -28,16 +36,33 @@ def normalized_query(original: str) -> str | None:
 
 
 def _followup_additions(raw_user_message: str, subject: str) -> str:
-    """Keep new subject qualifiers while discarding conversational search glue."""
-    glue = {
-        "and", "anything", "dans", "do", "en", "et", "find", "for", "in", "les", "local", "locales", "locaux",
-        "mail", "mails", "mes", "my", "nothing", "rien", "source", "sources", "the", "tu", "you",
-        "trouves", "trouver", "vos", "your", "can", "could", "check", "documents", "document",
-    }
+    """Keep only structured documentary refinements from a follow-up.
+
+    The orchestrator has already resolved the subject. Free prose in a
+    follow-up is an instruction to the assistant, not a search query. We
+    retain generic structural refinements only: reference-like identifiers,
+    a named entity, and an explicit email/date locator.
+    """
     subject_terms = set(_canonical(subject).split())
-    additions = [word for word in re.findall(r"[\wÀ-ÿ0-9-]+", raw_user_message)
-                 if _canonical(word) not in glue and _canonical(word) not in subject_terms and len(_canonical(word)) >= 3]
-    return " ".join(additions)
+    words = re.findall(r"[\wÀ-ÿ0-9-]+", raw_user_message)
+    additions: list[str] = []
+    for index, word in enumerate(words):
+        canonical = _canonical(word)
+        if not canonical or canonical in subject_terms:
+            continue
+        if any(char.isdigit() for char in word):
+            additions.append(word)
+        elif index > 0 and re.fullmatch(r"[A-ZÀ-Ö][A-Za-zÀ-ÿ'-]{2,}", word):
+            additions.append(word)
+    lowered = [_canonical(word) for word in words]
+    for index, token in enumerate(lowered):
+        if token not in {"mail", "email", "courriel"}:
+            continue
+        window = words[max(0, index - 2):index + 4]
+        if any(any(char.isdigit() for char in value) for value in window):
+            additions.extend(value for value in window if any(char.isdigit() for char in value))
+            additions.append(words[index])
+    return " ".join(dict.fromkeys(additions))
 
 
 def resolve_retrieval_query(*, raw_user_message: str, orchestrator_query: str, history: list[dict[str, Any]] | None = None) -> str:
@@ -57,25 +82,31 @@ def resolve_retrieval_query(*, raw_user_message: str, orchestrator_query: str, h
 def build_retrieval_queries(*, original_query: str, orchestrator_query: str | None, resolved_query: str | None = None, follow_up: bool = False) -> list[tuple[str, str]]:
     """Build factual query variants independently of any response presentation.
 
-    When an orchestrator supplied a standalone documentary query, it is the
-    canonical retrieval subject for every output format.  The raw message is
-    still used for autonomous turns, where no structured subject exists.
+    An autonomous user query is retained because it can contain exact anchors
+    lost by a rewrite. For a resolved conversational follow-up, the raw turn
+    is preserved in history and logs but is not itself a documentary query.
     """
-    base = resolved_query or orchestrator_query or original_query
-    options: list[tuple[str, str | None]] = [
-        *(([("resolved_subject", base), ("normalized_resolved_subject", normalized_query(base)), ("orchestrator", orchestrator_query)] if follow_up else
-          ([("orchestrator", base), ("normalized_orchestrator", normalized_query(base))] if orchestrator_query else
-           [("original", original_query), ("normalized", normalized_query(original_query))]))),
-    ]
-    seen: set[str] = set()
+    # The user's wording is evidence too: it often contains an exact model,
+    # reference, or relation that a planner paraphrase can accidentally lose.
+    # A resolved follow-up is additive, never a silent replacement for it.
+    standalone = resolved_query or orchestrator_query
+    options: list[tuple[str, str | None]] = (
+        [
+            ("resolved_followup", standalone),
+            ("normalized", normalized_query(standalone or original_query)),
+        ]
+        if follow_up else [
+            ("original_autonomous", original_query),
+            ("orchestrator", standalone),
+            ("normalized", normalized_query(standalone or original_query)),
+        ]
+    )
     result: list[tuple[str, str]] = []
     for kind, query in options:
         if not query or len(query.strip()) < 3:
             continue
-        key = _canonical(query)
-        if key in seen:
+        if any(_obviously_duplicate(query, existing) for _, existing in result):
             continue
-        seen.add(key)
         result.append((kind, query.strip()))
     return result[:3]
 

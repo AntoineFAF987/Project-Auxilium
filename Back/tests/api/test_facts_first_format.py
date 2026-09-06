@@ -13,8 +13,8 @@ if "api" not in sys.modules:
 from api.multi_query_retrieval import build_retrieval_queries
 
 
-def test_orchestrated_factual_subject_is_format_independent():
-    """Email wording is presentation; the planned subject drives retrieval."""
+def test_orchestrated_factual_subject_keeps_original_wording_and_shared_subject():
+    """Presentation wording cannot erase either user's retrieval evidence."""
     factual = build_retrieval_queries(
         original_query="Does product X support Y?",
         orchestrator_query="product X support Y",
@@ -23,4 +23,7 @@ def test_orchestrated_factual_subject_is_format_independent():
         original_query="A client asks by email whether product X supports Y; what should I reply?",
         orchestrator_query="product X support Y",
     )
-    assert factual == email
+    assert factual[0] == ("original_autonomous", "Does product X support Y?")
+    assert email[0] == ("original_autonomous", "A client asks by email whether product X supports Y; what should I reply?")
+    assert ("orchestrator", "product X support Y") in factual
+    assert ("orchestrator", "product X support Y") in email

@@ -28,6 +28,7 @@ from rag_core.faithfulness import (
 )
 from rag_core.llm_stream import ask_mistral_with_context_stream
 from rag_core.turn_type import classify_turn
+from rag_core.context_sufficiency import AnswerabilityDecision, evaluate_answerability
 from runtime_settings import get_runtime_settings
 from .orchestration import (
     OrchestrationPlan, OrchestrationPlanOutputError, build_prompt, compact_history,
@@ -1866,10 +1867,10 @@ def run_answer_pipeline(
             allowed_sources = {"__no_matching_source__"}
     follow_up = bool(orchestration_plan and orchestration_plan.intent == "refine_previous_search" and orchestration_plan.reuse_previous_subject)
     resolved_retrieval_query = resolve_retrieval_query(raw_user_message=q, orchestrator_query=orchestration_plan.retrieval_query or q, history=hist) if follow_up else None
-    retrieval_queries = build_retrieval_queries(original_query=q, orchestrator_query=orchestration_plan.retrieval_query, resolved_query=resolved_retrieval_query, follow_up=follow_up) if orchestration_plan else [("original", q_eff)]
+    retrieval_queries = build_retrieval_queries(original_query=q, orchestrator_query=orchestration_plan.retrieval_query, resolved_query=resolved_retrieval_query, follow_up=follow_up) if orchestration_plan else [("original_autonomous", q_eff)]
     if resolved_retrieval_query:
         q_eff = resolved_retrieval_query
-    trace("retrieval_input", {"raw_user_message": q, "resolved_retrieval_query": resolved_retrieval_query, "follow_up_retrieval": follow_up, "original_query": q, "orchestrator_query": orchestration_plan.retrieval_query if orchestration_plan else None, "q_eff": q_eff, "q_eff_source": "resolved_retrieval_query" if resolved_retrieval_query else ("orchestrator_query" if orchestration_plan else ("condensed_query" if should_condense else "original_query")), "retrieval_queries": [{"type": kind, "query": query} for kind, query in retrieval_queries], "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": orchestration_plan.source_types if orchestration_plan else [], "temporal_constraints": [item.model_dump(mode="json") for item in orchestration_plan.temporal_constraints] if orchestration_plan else [], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
+    trace("retrieval_input", {"raw_user_message": q, "resolved_retrieval_query": resolved_retrieval_query, "follow_up_retrieval": follow_up, "raw_query_used_for_retrieval": not follow_up, "raw_query_exclusion_reason": "conversational_followup" if follow_up else None, "original_query": q, "orchestrator_query": orchestration_plan.retrieval_query if orchestration_plan else None, "q_eff": q_eff, "q_eff_source": "resolved_retrieval_query" if resolved_retrieval_query else ("orchestrator_query" if orchestration_plan else ("condensed_query" if should_condense else "original_query")), "retrieval_queries": [{"type": kind, "source": kind, "query": query} for kind, query in retrieval_queries], "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": orchestration_plan.source_types if orchestration_plan else [], "temporal_constraints": [item.model_dump(mode="json") for item in orchestration_plan.temporal_constraints] if orchestration_plan else [], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
     set_stage("retrieval")
     if allowed_sources == {"email"}:
         emit_status("search_emails", "Recherche dans vos e-mails")
@@ -1888,7 +1889,7 @@ def run_answer_pipeline(
     rejected_candidates = []
     for query_kind, query_text in retrieval_queries:
         rows, scores = idx.search(query_text, retrieve_k=RETRIEVE_K, top_k_faiss=TOP_K_FAISS, hybrid_alpha=HYBRID_ALPHA, use_rerank=ENABLE_RERANKER, allowed_sources=allowed_sources)
-        if query_kind == "original" or not ce_scores:
+        if query_kind == "original_autonomous" or not ce_scores:
             ce_scores = scores
         before_filter = len(rows)
         if orchestration_plan:
@@ -1937,6 +1938,11 @@ def run_answer_pipeline(
             "stop_reason": iterative_sufficiency.reason,
             "evidence_sufficient": iterative_sufficiency.sufficient,
             "final_evidence_chunk_uids": [meta.get("chunk_uid") for _, meta in blocks],
+            "final_evidence_member_chunk_uids": [
+                member for _, meta in blocks
+                for member in (meta.get("fused_chunk_uids") or [meta.get("chunk_uid")])
+                if member
+            ],
             "core_evidence_chunk_uids": retrieval_rounds[-1].get("core_evidence_chunk_uids", []) if retrieval_rounds else [],
             "optional_evidence_chunk_uids": retrieval_rounds[-1].get("optional_evidence_chunk_uids", []) if retrieval_rounds else [],
             "anchor_documents": retrieval_rounds[0].get("anchor_documents", []) if retrieval_rounds else [],
@@ -2002,6 +2008,18 @@ def run_answer_pipeline(
             # Fallback silencieux: on garde les résultats initiaux
             pass
 
+    # This is deliberately after all bounded structural enrichment and any
+    # query expansion.  It governs local answer generation, not retrieval.
+    answerability_decision: AnswerabilityDecision = evaluate_answerability(
+        query=q,
+        evidence_mode=evidence_mode,
+        context_is_relevant=context_is_relevant,
+        evidence_sufficient=(iterative_sufficiency.sufficient if iterative_sufficiency is not None else None),
+        reranker_accepted=bool(gated_ok),
+        blocks=[meta for _, meta in blocks],
+    )
+    trace("answerability", answerability_decision.to_dict())
+
     # --- Signaux pour routeur LLM ---
     signals = {
         "hits": int(prelim_hits),
@@ -2027,6 +2045,14 @@ def run_answer_pipeline(
         route_mode = "strict_local"
     elif documentary_orchestration_fallback:
         route_mode = "strict_local"
+    elif (
+        orchestration_plan is not None
+        and orchestration_plan.needs_retrieval
+        and orchestration_plan.intent != "web_search"
+    ):
+        # A documentary request with insufficient local evidence must not
+        # silently become a general-knowledge technical answer.
+        route_mode = "strict_local"
     else:
         # With irrelevant local context, the router may select Web for a
         # public/Web-suitable question; it cannot do so for partial evidence.
@@ -2045,6 +2071,7 @@ def run_answer_pipeline(
         "morphological_topic_overlap": evidence_decision.morphological_topic_overlap,
         "strict_local_ok": strict_local_ok,
         "local_context_state": local_context_state,
+        **answerability_decision.to_dict(),
         "guard_ok": bool(gated_ok),
         "hits": len(prelim),
         "final_context_block_count": len(blocks),
@@ -2057,6 +2084,7 @@ def run_answer_pipeline(
     rag_chunk_uids = [str(meta.get("chunk_uid") or f"{meta.get('document_id')}:{meta.get('chunk_id')}") for _, meta in blocks]
     validations["response_format"] = orchestration_plan.response_format if orchestration_plan else "normal"
     validations["retrieval_query"] = q_eff
+    validations["answerability"] = answerability_decision.to_dict()
     validations["evidence_provenance"] = {
         "evidence_sufficient": bool(iterative_sufficiency.sufficient) if iterative_sufficiency is not None else bool(strict_local_ok),
         "evidence_chunk_uids": rag_chunk_uids,
@@ -2158,6 +2186,16 @@ def run_answer_pipeline(
                 response_cache.set(ck, out)
             return finalize_result(_result(**out, request_id=request_id, route_mode=route_mode, validations=validations))
 
+        if answerability_decision.status == "unanswerable":
+            msg = "Je n’ai pas trouvé suffisamment d’informations dans les documents disponibles pour répondre de manière fiable à cette question."
+            out = {"answer": msg, "sources": [], "mode": "STRICT(local)", "ctx_len": len(context_local)}
+            if cache_enabled:
+                response_cache.set(ck, out)
+            return finalize_result(_result(
+                **out, request_id=request_id, route_mode=route_mode,
+                status="abstained", abstention_reason=msg, validations=validations,
+            ))
+
         if evidence_mode == "none":
             msg = "J’ai parcouru tes **sources**, mais rien de suffisamment pertinent."
             out = {"answer": msg, "sources": [], "mode": "STRICT(local)", "ctx_len": len(context_local)}
@@ -2183,6 +2221,7 @@ def run_answer_pipeline(
         generated = _generate_answer(
             q, context_for_llm, history=hist, token_sink=token_sink, artifact_sink=artifact_sink, progress_sink=emit_status,
             evidence_mode="web_live" if route_mode == "web_live" else (evidence_mode if use_strict else "none"),
+            answerability=(answerability_decision.status if use_strict and route_mode == "strict_local" else "answerable"),
             response_format="email_draft" if email_draft_requested else "normal",
         )
         trace("generation", {"generation_total_ms": round((time.perf_counter() - generation_started) * 1000, 1), "first_token_ms": None if token_sink is None else None})
