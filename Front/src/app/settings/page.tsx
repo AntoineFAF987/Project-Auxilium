@@ -253,6 +253,25 @@ export function SettingsContent({ embedded = false, onActiveTabChange, generalCo
     }
   }
 
+  async function downloadResponseTrace(requestId: string) {
+    try {
+      setMsg(null);
+      const { accessToken } = await getTokens();
+      const trace = await getResponseTrace(requestId, accessToken);
+      const blob = new Blob([JSON.stringify(trace, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `response-trace-${requestId}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      setMsg(`Response trace download failed: ${String(e?.message || e)}`);
+    }
+  }
+
   const llm = cfg?.llm || {};
   const provider = (llm.provider as Provider) || "mistral";
   const models = PROVIDER_MODELS[provider] || [];
@@ -542,7 +561,7 @@ export function SettingsContent({ embedded = false, onActiveTabChange, generalCo
                 </div>
                 <div className="space-y-3 border-t border-[var(--border)] pt-4">
                   <div className="flex items-center justify-between"><h3 className="font-medium">Response Trace</h3><button onClick={async () => { const { accessToken } = await getTokens(); setResponseTraces(await listResponseTraces(accessToken)); }} className="px-2 py-1 text-xs rounded border border-[var(--border)] cursor-pointer">Refresh</button></div>
-                  <div className="space-y-2 max-h-40 overflow-auto">{responseTraces.map((item) => <button key={item.request_id} onClick={async () => { const { accessToken } = await getTokens(); setSelectedTrace(await getResponseTrace(item.request_id, accessToken)); }} className="w-full text-left p-2 rounded border border-[var(--border)] text-xs hover:bg-[var(--muted)]"><div className="font-mono">{item.request_id}</div><div className="truncate opacity-70">{item.original_user_message}</div></button>)}</div>
+                  <div className="space-y-2 max-h-40 overflow-auto">{responseTraces.map((item) => <div key={item.request_id} className="flex gap-2 rounded border border-[var(--border)] p-2 text-xs hover:bg-[var(--muted)]"><button onClick={async () => { const { accessToken } = await getTokens(); setSelectedTrace(await getResponseTrace(item.request_id, accessToken)); }} className="min-w-0 flex-1 text-left cursor-pointer"><div className="font-mono">{item.request_id}</div><div className="truncate opacity-70">{item.original_user_message}</div></button><button onClick={() => downloadResponseTrace(item.request_id)} className="shrink-0 self-center px-2 py-1 rounded border border-[var(--border)] cursor-pointer" title="Télécharger le JSON" aria-label={`Télécharger la trace ${item.request_id} au format JSON`}>JSON</button></div>)}</div>
                   {selectedTrace && <details open><summary className="cursor-pointer font-medium">Timeline JSON</summary><pre className="mt-2 max-h-96 overflow-auto p-3 text-xs rounded-lg bg-[var(--muted)] border border-[var(--border)]">{JSON.stringify(selectedTrace, null, 2)}</pre></details>}
                 </div>
               </>}

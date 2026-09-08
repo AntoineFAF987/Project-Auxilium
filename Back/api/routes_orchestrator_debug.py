@@ -31,7 +31,10 @@ def _runtime_details() -> dict:
         "enabled": ORCHESTRATOR_SETTINGS.enabled,
         "provider": _RUNTIME_SETTINGS.generation.provider,
         "model": ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model,
-        "timeout": ORCHESTRATOR_SETTINGS.timeout,
+        "timeout_seconds": ORCHESTRATOR_SETTINGS.timeout_seconds,
+        "slow_warning_seconds": ORCHESTRATOR_SETTINGS.slow_warning_seconds,
+        "reasoning_effort": ORCHESTRATOR_SETTINGS.reasoning_effort,
+        "max_output_tokens": ORCHESTRATOR_SETTINGS.max_output_tokens,
         "system_prompt": SYSTEM_PROMPT,
     }
 
@@ -73,6 +76,7 @@ def test_orchestrator_plan(body: DebugPlanRequest):
                 "removed": sanitized.removed_constraints,
             },
             "latency_ms": latency_ms,
+            "metrics": dict(plan._orchestration_metrics),
             "fallback_used": False,
             "raw_model_output": plan._raw_model_output,
             "validation_error": None,
@@ -89,4 +93,5 @@ def test_orchestrator_plan(body: DebugPlanRequest):
             "validation_error": type(exc).__name__,
             "validation_error_details": exc.validation_error_details if isinstance(exc, OrchestrationPlanOutputError) else None,
             "raw_model_output": exc.raw_model_output if isinstance(exc, OrchestrationPlanOutputError) else None,
+            "metrics": dict(getattr(exc, "orchestration_metrics", {}) or {}),
         }

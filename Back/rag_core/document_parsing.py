@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from xml.etree import ElementTree as ET
 
 from .document_model import Document, DocumentBlock, DocumentSection
-from .utils import read_supported_text
+from .utils import extract_xlsx_table_rows, read_supported_text
 
 
 _MARKDOWN_HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
@@ -277,12 +277,37 @@ def _parse_text(path: str, raw: str) -> Document:
     return builder.document
 
 
+def _parse_xlsx(path: str) -> Document:
+    """Represent each spreadsheet row as a self-describing structured block."""
+    builder = _Builder(path, "file", Path(path).stem, metadata={"structured_table": True})
+    current_sheet = None
+    for row in extract_xlsx_table_rows(path):
+        if row["sheet_name"] != current_sheet:
+            current_sheet = row["sheet_name"]
+            builder.heading(str(current_sheet), 1)
+        cells = row["cells"]
+        rendered = [str(row["sheet_name"]), f"{cells[0]['column_name']} {row['row_key']}"]
+        rendered.extend(
+            f"{cell['column_name']}: {cell['cell_value']}"
+            + (" [computed]" if cell["value_origin"] == "computed" else "")
+            for cell in cells[1:]
+        )
+        builder.block(" | ".join(rendered), "table_row", source_metadata={
+            "sheet_name": row["sheet_name"], "table_id": row["table_id"],
+            "row_index": row["row_index"], "row_key": row["row_key"],
+            "structured_cells": cells,
+        })
+    return builder.document
+
+
 def parse_document(path: str) -> Document:
     ext = Path(path).suffix.lower()
     if ext == ".pdf":
         return _parse_pdf(path)
     if ext == ".docx":
         return _parse_docx(path)
+    if ext == ".xlsx":
+        return _parse_xlsx(path)
     raw = read_supported_text(path)
     if ext in {".txt", ".md"} and raw.lstrip().lower().startswith("subject:"):
         return _parse_email(path, raw)

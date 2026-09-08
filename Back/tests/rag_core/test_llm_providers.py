@@ -67,6 +67,17 @@ def test_openai_streaming_yields_each_delta_without_buffering():
     assert client.responses.calls[0]["stream"] is True
 
 
+def test_openai_request_can_use_an_orchestrator_specific_reasoning_effort():
+    client = _Client()
+    provider = OpenAIProvider()
+    with patch.object(provider, "_client", return_value=client):
+        provider.generate(
+            [{"role": "user", "content": "Plan this request"}], model="gpt-5.6-sol",
+            temperature=0.6, top_p=0.9, max_tokens=42, settings=_settings(), reasoning_effort="low",
+        )
+    assert client.responses.calls[0]["reasoning"] == {"effort": "low"}
+
+
 def test_openai_missing_key_is_explicit(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY absente"):

@@ -106,7 +106,7 @@ class OpenAIProvider(LLMProvider):
         return OpenAI(api_key=api_key)
 
     @staticmethod
-    def _request_args(messages, *, model, max_tokens, settings, **_ignored):
+    def _request_args(messages, *, model, max_tokens, settings, reasoning_effort=None, **_ignored):
         # Responses separates system instructions from the conversation input.
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
@@ -119,7 +119,7 @@ class OpenAIProvider(LLMProvider):
             "model": model,
             "input": input_items,
             "max_output_tokens": max_tokens,
-            "reasoning": {"effort": settings.reasoning_effort},
+            "reasoning": {"effort": reasoning_effort or settings.reasoning_effort},
         }
         if instructions:
             args["instructions"] = instructions

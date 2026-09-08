@@ -36,6 +36,10 @@ class EvidenceSufficiency:
     sufficient: bool
     reason: str
     next_action: RetrievalAction | None = None
+    critical_structural_evidence_incomplete: bool = False
+    optional_structural_evidence_remaining: bool = False
+    critical_structural_gaps: tuple[dict[str, Any], ...] = ()
+    optional_structural_gaps: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass
@@ -289,6 +293,10 @@ def _topic_relation(
     Shared names, organisations and location labels do not establish topical
     relation by themselves.  They need an accompanying non-entity topic term.
     """
+    # Set only after the candidate text has passed the same topical/anchor
+    # checks against an equivalent documentary query variant upstream.
+    if meta.get("variant_aware_promotion_applied"):
+        return "direct_subject_match", "unknown" if _is_header_only(meta) else "true"
     candidate_text = str(meta.get("text") or "") if chunk_text_only else _title_text(meta)
     query_terms, candidate_terms = _terms(query), _terms(candidate_text)
     shared = query_terms & candidate_terms
@@ -688,6 +696,76 @@ def _trace_leads(leads: list[CandidateLead]) -> list[dict[str, Any]]:
     } for lead in leads]
 
 
+def _classify_remaining_structural_gaps(
+    *, evidence: EvidenceSet, items: list[tuple[float, dict[str, Any]]], gaps: list[EvidenceGap],
+    leads: list[CandidateLead], corpus: list[dict[str, Any]], query: str, semantics: QuerySemantics,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Classify only answer-changing structural work as critical.
+
+    This runs on final retained evidence. A body already inspected for the
+    selected email resolves its header gap; old/secondary traversals remain
+    observable but cannot veto an explicit, direct answer.
+    """
+    answer_available = _has_answer_bearing_content(items, semantics, query)
+    latest_date = max((_date_key(meta) for _, meta in items if _date_key(meta)), default="")
+    critical, optional = [], []
+    gap_documents = {gap.document_id for gap in gaps}
+    if _requires_email_content(query, semantics):
+        for _score, meta in items:
+            document_id = str(meta.get("document_id") or "")
+            if not document_id or document_id in gap_documents or not _is_header_only(meta):
+                continue
+            if any(not _is_header_only(other) and str(other.get("document_id") or "") == document_id for _, other in items):
+                continue
+            critical.append({
+                "document_id": document_id, "chunk_uid": meta.get("chunk_uid"),
+                "gap_type": "email_header_only", "available_actions": [], "date": _date_key(meta),
+                "criticality": "critical", "criticality_reason": "email_content_required_body_uninspected",
+                "resolved_by_chunk_uid": None,
+            })
+    for gap in gaps:
+        document_items = [meta for _, meta in items if str(meta.get("document_id") or "") == gap.document_id]
+        resolved_body = next((meta for meta in document_items if not _is_header_only(meta)), None)
+        is_newer_state = (
+            semantics in {"decision", "current_state"}
+            and gap.state_change_potential != "false"
+            and gap.temporal_relation == "newer_than_existing_state_evidence"
+        )
+        header_needs_body = gap.gap_type == "email_header_only" and _requires_email_content(query, semantics) and not resolved_body
+        attachment_required = (
+            semantics == "decision"
+            and any(action.type == "FOLLOW" and action.relation == "attachment" for action in gap.available_actions)
+        )
+        needed_to_answer = not answer_available and gap.semantic_fit != "weak_selected_evidence"
+        is_critical = is_newer_state or header_needs_body or attachment_required or needed_to_answer
+        item = {
+            **_trace_gaps([gap])[0],
+            "criticality": "critical" if is_critical else "optional",
+            "criticality_reason": (
+                "newer_state_resolution_required" if is_newer_state else
+                "email_content_required_body_uninspected" if header_needs_body else
+                "declared_attachment_required" if attachment_required else
+                "no_answer_bearing_core_evidence" if needed_to_answer else
+                "direct_answer_bearing_evidence_already_resolves_requested_information"
+            ),
+            "resolved_by_chunk_uid": resolved_body.get("chunk_uid") if resolved_body and not is_critical else None,
+        }
+        (critical if is_critical else optional).append(item)
+    for lead in leads:
+        is_newer_state = (
+            semantics in {"decision", "current_state"}
+            and bool(lead.date) and (not latest_date or lead.date > latest_date)
+        )
+        item = {
+            **_trace_leads([lead])[0], "gap_type": "candidate_lead",
+            "criticality": "critical" if is_newer_state else "optional",
+            "criticality_reason": "newer_state_resolution_required" if is_newer_state else "unselected_secondary_candidate",
+            "resolved_by_chunk_uid": None,
+        }
+        (critical if is_newer_state else optional).append(item)
+    return critical, optional
+
+
 def _lead_trace_fields(
     action: RetrievalAction | None, gaps: list[EvidenceGap], leads: list[CandidateLead],
 ) -> dict[str, Any]:
@@ -707,6 +785,7 @@ def _lead_trace_fields(
 def run_iterative_evidence_retrieval(
     *, candidate_pool: list[tuple[float, dict[str, Any]]], initial_evidence: list[tuple[float, dict[str, Any]]], corpus: list[dict[str, Any]],
     query: str, semantics: QuerySemantics = "general_document_question", max_rounds: int = 3,
+    query_variants: list[tuple[str, str]] | None = None,
     max_expanded_chunks: int = 4,
     on_action: Callable[[RetrievalAction], None] | None = None,
 ) -> tuple[list[tuple[float, dict[str, Any]]], list[dict[str, Any]], EvidenceSufficiency]:
@@ -722,12 +801,13 @@ def run_iterative_evidence_retrieval(
         uid = str(meta.get("chunk_uid") or "")
         profile = profiles.get(str(meta.get("document_id") or ""))
         best = max((float(value) for value, _ in initial_added), default=1.0) or 1.0
-        if profile and profile.is_anchor or float(score) / best >= 0.82:
+        if meta.get("variant_aware_promotion_applied") or (profile and profile.is_anchor) or float(score) / best >= 0.82:
             evidence.core_chunk_uids.add(uid)
     selection_started = time.perf_counter()
     rounds: list[dict[str, Any]] = [{
         "round": 1, "action": {"type": "SEARCH", "query": query},
         "candidate_pool_count": len(pool.items), "candidate_pool": pool.trace_items(),
+        "evidence_query_variants": [{"type": kind, "query": value} for kind, value in (query_variants or [])],
         "evidence_count": len(evidence.items),
         "added_chunk_uids": [meta.get("chunk_uid") for _, meta in initial_added],
         "anchor_documents": [profile.__dict__ for profile in profiles.values() if profile.is_anchor],
@@ -879,4 +959,23 @@ def run_iterative_evidence_retrieval(
         if str(meta.get("chunk_uid") or "") not in final_uids
         and (profiles.get(str(meta.get("document_id") or "")) and profiles[str(meta.get("document_id") or "")].relative_score < 0.35)
     ]
+    final_gaps = _evidence_gaps(evidence, corpus=corpus, query=query, semantics=semantics)
+    final_leads = _candidate_leads(pool, evidence, corpus=corpus, query=query, semantics=semantics)
+    critical_gaps, optional_gaps = _classify_remaining_structural_gaps(
+        evidence=evidence, items=final_items, gaps=final_gaps, leads=final_leads,
+        corpus=corpus, query=query, semantics=semantics,
+    )
+    decision = EvidenceSufficiency(
+        sufficient=decision.sufficient,
+        reason=decision.reason,
+        next_action=decision.next_action,
+        critical_structural_evidence_incomplete=bool(critical_gaps),
+        optional_structural_evidence_remaining=bool(optional_gaps),
+        critical_structural_gaps=tuple(critical_gaps),
+        optional_structural_gaps=tuple(optional_gaps),
+    )
+    rounds[-1]["critical_structural_gaps"] = critical_gaps
+    rounds[-1]["optional_structural_gaps"] = optional_gaps
+    rounds[-1]["critical_structural_evidence_incomplete"] = decision.critical_structural_evidence_incomplete
+    rounds[-1]["optional_structural_evidence_remaining"] = decision.optional_structural_evidence_remaining
     return final_items, rounds, decision

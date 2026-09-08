@@ -120,6 +120,40 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(sources[0]["document_id"], "doc_policy")
         self.assertEqual(sources[0]["type"], "local_file")
 
+    def test_orchestrator_execution_observability_distinguishes_fast_slow_and_failures(self):
+        from api import answer_pipeline as pipeline
+
+        settings = pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"timeout_seconds": 25, "slow_warning_seconds": 10})
+        with patch.object(pipeline, "ORCHESTRATOR_SETTINGS", settings):
+            fast = pipeline._orchestrator_observability(latency_ms=2_000, failed=False)
+            slow = pipeline._orchestrator_observability(latency_ms=12_000, failed=False)
+            timeout = pipeline._orchestrator_observability(latency_ms=25_000, failed=True, failure_type="timeout")
+            api_error = pipeline._orchestrator_observability(latency_ms=100, failed=True, failure_type="api_error")
+            validation_error = pipeline._orchestrator_observability(latency_ms=100, failed=True, failure_type="validation_error")
+
+        self.assertFalse(fast["orchestrator_slow"])
+        self.assertFalse(fast["orchestrator_timed_out"])
+        self.assertTrue(slow["orchestrator_slow"])
+        self.assertFalse(slow["orchestrator_failed"])
+        self.assertTrue(timeout["orchestrator_timed_out"])
+        self.assertTrue(timeout["orchestrator_failed"])
+        self.assertEqual(api_error["orchestrator_failure_type"], "api_error")
+        self.assertEqual(validation_error["orchestrator_failure_type"], "validation_error")
+
+    def test_timeout_cancels_queued_orchestrator_work_without_a_retry(self):
+        from api import answer_pipeline as pipeline
+
+        future = Mock()
+        future.result.side_effect = pipeline.FuturesTimeout()
+        executor = Mock()
+        executor.submit.return_value = future
+        with patch.object(pipeline, "EXEC", executor):
+            with self.assertRaises(pipeline.FuturesTimeout):
+                pipeline._with_timeout(lambda: None, timeout=25)
+
+        future.cancel.assert_called_once_with()
+        executor.submit.assert_called_once()
+
     def _patch_pipeline(
         self,
         *,
@@ -796,6 +830,151 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(result.mode, "STRICT(local)")
         self.assertGreaterEqual(len(self.index.search_calls), 1)
 
+    def test_gefa_followup_keeps_previous_local_source_before_web(self):
+        from api import answer_pipeline as pipeline
+        from api.source_planner import SourcePlanItem
+
+        price_chunk = (0.99, {
+            **self.chunk[1],
+            "file": "TARIF GEFA 2025.pdf",
+            "path": "C:/docs/TARIF GEFA 2025.pdf",
+            "text": "GEFA KG2 DN50 purchase price HT 2023: 54.21 EUR.",
+        })
+        index = _Index([price_chunk], [0.99])
+        plan = OrchestrationPlan(
+            intent="refine_previous_search", needs_retrieval=True,
+            retrieval_query="GEFA KG2 DN50 price", use_history=True,
+            reuse_previous_subject=True, response_strategy="answer",
+            source_plan=[
+                SourcePlanItem(source="web", priority=1),
+                SourcePlanItem(source="local", priority=2, required=True),
+            ],
+        )
+        with (
+            self._patch_pipeline(
+                index=index,
+                context_text="[1] GEFA KG2 DN50 purchase price HT 2023: 54.21 EUR.",
+                post_review_enabled=False, faithfulness_enabled=False,
+            ),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+            patch.object(pipeline, "web_search_context", side_effect=AssertionError("Web must not run before active local source")),
+        ):
+            result = run_answer_pipeline(AskIn(
+                q="Tu pourrais me donner le prix d'une KG2 DN50 ?", source_mode="auto",
+                history=[
+                    {"role": "user", "content": "Tu as acces a la price list GEFA ?"},
+                    {"role": "assistant", "content": "Oui.", "meta": {
+                        "generation_mode": "STRICT(local)",
+                        "sources": [{"path": "C:/docs/TARIF GEFA 2025.pdf", "document_id": "doc_policy"}],
+                    }},
+                ],
+            ), _request())
+
+        self.assertNotEqual(result.route_mode, "web_live")
+        self.assertEqual(result.validations["source_plan"][0]["source"], "local")
+        self.assertEqual(result.validations["active_source_context"]["source"], "local")
+        self.assertGreaterEqual(len(index.search_calls), 1)
+
+    def test_blocking_orchestrator_clarification_skips_retrieval(self):
+        from api import answer_pipeline as pipeline
+        from api.source_planner import SourcePlanItem
+
+        plan = OrchestrationPlan(
+            intent="document_question", needs_retrieval=True,
+            retrieval_query="GEFA KG2 DN50 price", response_strategy="ask_for_missing_information",
+            source_plan=[SourcePlanItem(source="local", priority=1, required=True)],
+            clarification_needed=True,
+            clarification_reason="purchase_and_sale_prices_differ",
+            missing_information=["price_type"],
+            clarification_question="Tu veux le prix d'achat ou le prix de vente France ?",
+            ambiguity_level="blocking",
+        )
+        with (
+            self._patch_pipeline(post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+            patch.object(pipeline, "web_search_context", side_effect=AssertionError("No source should run before clarification")),
+        ):
+            result = run_answer_pipeline(AskIn(q="Quel est le prix de la KG2 DN50 ?", source_mode="auto"), _request())
+
+        self.assertEqual(result.route_mode, "clarification")
+        self.assertEqual(result.validations["next_source_action"], "ASK_CLARIFICATION")
+        self.assertEqual(self.index.search_calls, [])
+
+    def test_local_fact_can_use_a_separate_general_complement(self):
+        from api import answer_pipeline as pipeline
+        from api.source_planner import SourcePlanItem
+
+        seen = {}
+        def llm(_fn, _question, context_text="", **kwargs):
+            if context_text:
+                seen.update(kwargs)
+                return "La conservation dure trente jours. Explication generale. <CITATIONS>[1]</CITATIONS>"
+            return "Explication generale."
+
+        plan = OrchestrationPlan(
+            intent="document_question", needs_retrieval=True,
+            retrieval_query="duree conservation", response_strategy="answer",
+            source_plan=[
+                SourcePlanItem(source="local", priority=1, required=True),
+                SourcePlanItem(source="general", priority=2, complementary=True),
+            ],
+        )
+        with (
+            self._patch_pipeline(post_review_enabled=False, faithfulness_enabled=False, llm=llm),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+        ):
+            result = run_answer_pipeline(AskIn(
+                q="Quelle est la duree de conservation et a quoi sert cette regle ?",
+                source_mode="auto",
+            ), _request())
+
+        self.assertEqual(result.mode, "STRICT(multi-source+general)")
+        self.assertTrue(seen["allow_general_complement"])
+        self.assertEqual(result.validations["sources_checked"], ["local", "general"])
+        self.assertEqual(result.validations["claim_sources"][-1]["source_type"], "general")
+        self.assertFalse(result.validations["claim_sources"][-1]["citation_required"])
+
+    def test_required_web_complement_runs_after_local_product_evidence(self):
+        from api import answer_pipeline as pipeline
+        from api.source_planner import SourcePlanItem
+
+        local_chunk = (0.99, {
+            **self.chunk[1],
+            "text": "The 82.7 HV02 product is certified NACE MR0175.",
+        })
+        index = _Index([local_chunk], [0.99])
+        plan = OrchestrationPlan(
+            intent="document_question", needs_retrieval=True,
+            retrieval_query="82.7 HV02 NACE certification", response_strategy="answer",
+            source_plan=[
+                SourcePlanItem(source="local", priority=1, required=True),
+                SourcePlanItem(source="web", priority=2, required=True),
+            ],
+        )
+        web = Mock(return_value="[WEB] NACE standard\nhttps://example.test/nace\nNACE MR0175 remains current.")
+        with (
+            self._patch_pipeline(
+                index=index,
+                context_text="[1] The 82.7 HV02 product is certified NACE MR0175.",
+                post_review_enabled=False, faithfulness_enabled=False,
+            ),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+            patch.object(pipeline, "web_search_context", web),
+        ):
+            result = run_answer_pipeline(AskIn(
+                q="Le 82.7 HV02 est-il NACE et cette certification est-elle encore valable ?",
+                source_mode="auto",
+            ), _request())
+
+        self.assertEqual(result.mode, "STRICT(multi-source)")
+        self.assertEqual(result.validations["sources_checked"], ["local", "web"])
+        self.assertTrue(result.validations["multi_source_used"])
+        self.assertEqual(web.call_count, 1)
+
     def test_faithfulness_review_preserves_draft_and_adds_inference_caveat(self):
         calls = {"strict": 0}
 
@@ -1102,6 +1281,8 @@ class AnswerPipelineTests(unittest.TestCase):
             result = run_answer_pipeline(AskIn(q="Le module AX-17 est-il compatible ?", source_mode="local"), _request())
 
         self.assertEqual(observed["evidence_mode"], "related")
+        self.assertTrue(observed["exact_entity_guard"])
+        self.assertEqual(observed["missing_exact_entities"], ["ax-17"])
         self.assertIn("AX-18", result.answer)
 
     def test_related_evidence_bypasses_lexical_relevance_abstention_and_keeps_sources(self):
@@ -1706,6 +1887,102 @@ class AnswerPipelineTests(unittest.TestCase):
 
         self.assertEqual((first.answer, changed_history.answer, exact_repeat.answer), ("history-one", "history-two", "history-one"))
         self.assertEqual(generated.call_count, 5)
+
+
+    @staticmethod
+    def _supported_history(answer="La bande morte se règle avec PSCS et le kit de paramétrage. La plage est de 0,5 à 5 %. La procédure détaillée n’est pas disponible."):
+        return [
+            {"role": "user", "content": "Comment régler la bande morte des actionneurs PS AMS ?"},
+            {"role": "assistant", "content": answer, "meta": {
+                "message_id": "assistant-1",
+                "sources": [{"path": "20260701_Confirmation Dead Band PS-AMS_signed_PSA.pdf", "chunk": 2}],
+                "evidence_provenance": {"evidence_sufficient": True, "evidence_chunk_uids": ["ps-ams:2"]},
+            }},
+        ]
+
+    def test_email_transformation_reuses_previous_supported_answer_without_retrieval(self):
+        from api import answer_pipeline as pipeline
+
+        generated = json.dumps({"answer": "Voici un brouillon :", "artifacts": [{"type": "email_draft", "subject": "Réglage de la bande morte PS-AMS", "content": "Bonjour,\n\nLa bande morte se règle avec PSCS et le kit de paramétrage. La plage est de 0,5 à 5 %.\n\nCordialement,"}], "citations": [1]})
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=OrchestrationPlan(intent="document_question", needs_retrieval=True, retrieval_query="PS AMS dead band", response_strategy="answer")),
+            patch.object(pipeline, "_generate_answer", return_value=generated) as generate,
+        ):
+            result = run_answer_pipeline(AskIn(q="Je réponds quoi par mail ?", history=self._supported_history()), _request())
+
+        self.assertEqual(self.index.search_calls, [])
+        self.assertEqual(result.mode, "GROUNDED_TRANSFORMATION")
+        self.assertEqual(result.validations["response_format"], "email_draft")
+        self.assertTrue(result.validations["reuse_previous_answer"])
+        self.assertTrue(result.validations["previous_evidence_reused"])
+        self.assertEqual(result.sources[0]["path"], "20260701_Confirmation Dead Band PS-AMS_signed_PSA.pdf")
+        self.assertTrue(generate.call_args.kwargs["grounded_transformation"])
+        self.assertIn("PREVIOUS_SUPPORTED_ANSWER", generate.call_args.args[1])
+
+    def test_invalid_orchestrator_json_recovers_grounded_transformation(self):
+        from api import answer_pipeline as pipeline
+
+        invalid = OrchestrationPlanOutputError(raw_model_output='{"intent":"document_question",', validation_error_details=[{"message": "Unterminated string"}])
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", side_effect=invalid),
+            patch.object(pipeline, "_generate_answer", return_value="La bande morte se règle avec PSCS et le kit de paramétrage. <CITATIONS>[1]</CITATIONS>"),
+        ):
+            result = run_answer_pipeline(AskIn(q="Fais-moi un mail avec ça", history=self._supported_history()), _request())
+
+        self.assertEqual(self.index.search_calls, [])
+        self.assertTrue(result.validations["grounded_transformation"])
+        self.assertTrue(result.validations["orchestrator_failure_recovery"])
+        self.assertEqual(result.validations["orchestrator_failure_recovery_reason"], "previous_supported_answer_and_evidence")
+
+    def test_transformation_without_previous_evidence_requests_content_without_retrieval(self):
+        from api import answer_pipeline as pipeline
+
+        with self._patch_pipeline(), patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})):
+            result = run_answer_pipeline(AskIn(q="Fais-moi un mail avec ça", history=[{"role": "assistant", "content": "Une ancienne réponse sans provenance."}]), _request())
+
+        self.assertEqual(self.index.search_calls, [])
+        self.assertEqual(result.mode, "CLARIFICATION")
+        self.assertFalse(result.validations["reuse_previous_answer"])
+
+    def test_detail_and_verification_requests_are_not_transformations(self):
+        from api import answer_pipeline as pipeline
+        from api.answer_pipeline import _detect_response_transformation
+
+        self.assertEqual(_detect_response_transformation("On me demande par mail cette information. Je réponds quoi ?"), "email_draft")
+        self.assertEqual(_detect_response_transformation("Fais-en une réponse client"), "email_draft")
+        self.assertEqual(_detect_response_transformation("Rédige-moi ça proprement"), "rewrite")
+        self.assertIsNone(_detect_response_transformation("Peux-tu me donner la procédure détaillée étape par étape ?"))
+        self.assertIsNone(_detect_response_transformation("Vérifie si c’est toujours valable aujourd’hui"))
+        plan = OrchestrationPlan(intent="refine_previous_search", needs_retrieval=True, retrieval_query="PS AMS dead band detailed procedure", use_history=True, reuse_previous_subject=True, response_strategy="answer")
+        with (
+            self._patch_pipeline(),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+        ):
+            run_answer_pipeline(AskIn(q="Peux-tu me donner la procédure détaillée étape par étape ?", history=self._supported_history()), _request())
+        self.assertGreaterEqual(len(self.index.search_calls), 1)
+
+
+    def test_new_factual_email_draft_without_previous_answer_uses_retrieval(self):
+        from api import answer_pipeline as pipeline
+
+        plan = OrchestrationPlan(
+            intent="document_question", needs_retrieval=True, retrieval_query="product approval status",
+            response_strategy="answer", response_format="email_draft",
+        )
+        with (
+            self._patch_pipeline(post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+        ):
+            result = run_answer_pipeline(AskIn(q="A client asks if the product is approved. What should I reply by email?"), _request())
+
+        self.assertGreaterEqual(len(self.index.search_calls), 1)
+        self.assertNotEqual(result.mode, "CLARIFICATION")
 
 
 class TransportParityTests(unittest.TestCase):

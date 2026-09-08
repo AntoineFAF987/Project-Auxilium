@@ -164,8 +164,9 @@ def _extract_office_xml_text(path: str, members: List[str]) -> str:
                 parts.append("\n".join(texts))
     return "\n\n".join(parts)
 
-def _extract_xlsx_text(path: str) -> str:
-    parts: List[str] = []
+def extract_xlsx_table_rows(path: str) -> List[dict]:
+    """Extract row/column/value relations without requiring openpyxl."""
+    extracted: List[dict] = []
     with zipfile.ZipFile(path) as zf:
         shared_strings: List[str] = []
         try:
@@ -176,35 +177,81 @@ def _extract_xlsx_text(path: str) -> str:
         except ET.ParseError:
             shared_strings = []
 
-        for name in zf.namelist():
-            if not re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name):
-                continue
+        sheet_names: List[str] = []
+        try:
+            workbook = ET.fromstring(zf.read("xl/workbook.xml"))
+            sheet_names = [str(node.attrib.get("name") or "") for node in workbook.iter() if node.tag.endswith("sheet")]
+        except (KeyError, ET.ParseError):
+            pass
+
+        sheet_files = sorted(name for name in zf.namelist() if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name))
+        for sheet_index, name in enumerate(sheet_files):
             try:
                 root = ET.fromstring(zf.read(name))
             except ET.ParseError:
                 continue
-            rows: List[str] = []
-            for cell in root.iter():
-                if not cell.tag.endswith("c"):
+            sheet_name = sheet_names[sheet_index] if sheet_index < len(sheet_names) else Path(name).stem
+            matrix: List[tuple[int, dict[str, dict]]] = []
+            for row in (node for node in root.iter() if node.tag.endswith("row")):
+                values: dict[str, dict] = {}
+                row_index = int(row.attrib.get("r") or len(matrix) + 1)
+                for cell in (node for node in row if node.tag.endswith("c")):
+                    ref = str(cell.attrib.get("r") or "")
+                    column = re.match(r"[A-Z]+", ref)
+                    if not column:
+                        continue
+                    value = next((child.text.strip() for child in cell if child.tag.endswith("v") and child.text), "")
+                    if not value and cell.attrib.get("t") == "inlineStr":
+                        value = " ".join(
+                            node.text.strip() for node in cell.iter()
+                            if node.tag.endswith("t") and node.text and node.text.strip()
+                        )
+                    if not value:
+                        continue
+                    if cell.attrib.get("t") == "s":
+                        try:
+                            value = shared_strings[int(value)]
+                        except Exception:
+                            pass
+                    computed = any(child.tag.endswith("f") for child in cell)
+                    values[column.group(0)] = {"value": value, "value_origin": "computed" if computed else "explicit"}
+                if values:
+                    matrix.append((row_index, values))
+            if not matrix:
+                continue
+            header_cells = matrix[0][1]
+            headers = {column: data["value"] for column, data in header_cells.items()}
+            table_id = f"{Path(path).stem}:{sheet_name}"
+            for row_index, values in matrix[1:]:
+                cells = []
+                for column, data in values.items():
+                    cells.append({
+                        "column_name": headers.get(column) or column,
+                        "column_key": headers.get(column) or column,
+                        "cell_value": data["value"],
+                        "value_origin": data["value_origin"],
+                    })
+                if not cells:
                     continue
-                cell_type = cell.attrib.get("t")
-                value = None
-                for child in cell:
-                    if child.tag.endswith("v") and child.text is not None:
-                        value = child.text.strip()
-                        break
-                if not value:
-                    continue
-                if cell_type == "s":
-                    try:
-                        idx = int(value)
-                        value = shared_strings[idx]
-                    except Exception:
-                        pass
-                rows.append(value)
-            if rows:
-                parts.append("\n".join(rows))
-    return "\n\n".join(parts)
+                row_key = str(cells[0]["cell_value"])
+                extracted.append({
+                    "sheet_name": sheet_name, "table_id": table_id,
+                    "row_index": row_index, "row_key": row_key, "cells": cells,
+                })
+    return extracted
+
+
+def _extract_xlsx_text(path: str) -> str:
+    parts: List[str] = []
+    for row in extract_xlsx_table_rows(path):
+        rendered = [str(row["sheet_name"]), f"{row['cells'][0]['column_name']} {row['row_key']}"]
+        rendered.extend(
+            f"{cell['column_name']}: {cell['cell_value']}"
+            + (" [computed]" if cell["value_origin"] == "computed" else "")
+            for cell in row["cells"][1:]
+        )
+        parts.append(" | ".join(rendered))
+    return "\n".join(parts)
 
 def read_supported_text(path: str) -> str:
     """

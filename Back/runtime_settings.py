@@ -62,6 +62,7 @@ class RetrievalSettings(_FrozenSettings):
     fuse_adjacent_gap: int = Field(default=1, ge=0)
     max_retry_rounds: int = Field(default=1, ge=0, le=1)
     max_retry_queries: int = Field(default=2, ge=1, le=2)
+    max_source_expansions: int = Field(default=2, ge=0, le=4)
 
     @field_validator(
         "embedding_model",
@@ -92,12 +93,25 @@ class FeatureSettings(_FrozenSettings):
     enable_post_generation_review: bool = False
     enable_faithfulness_check: bool = False
     faithfulness_strict_only: bool = True
+    enable_multi_source_orchestration: bool = True
+
+
+class ClarificationSettings(_FrozenSettings):
+    enable: bool = True
+    blocking_only: bool = True
+
+
+class MultiSourceSettings(_FrozenSettings):
+    allow_general_complement: bool = True
 
 
 class OrchestratorSettings(_FrozenSettings):
     enabled: bool = False
     model: str | None = None
-    timeout: int = Field(default=8, ge=1, le=30)
+    timeout_seconds: int = Field(default=25, ge=1, le=120)
+    slow_warning_seconds: int = Field(default=10, ge=1, le=119)
+    reasoning_effort: Literal["none", "low", "medium", "high"] = "medium"
+    max_output_tokens: int = Field(default=420, ge=100, le=1200)
     history_max_messages: int = Field(default=6, ge=4, le=8)
 
 
@@ -160,6 +174,8 @@ class RuntimeSettings(_FrozenSettings):
     timeouts: TimeoutSettings = Field(default_factory=TimeoutSettings)
     rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     conversation: ConversationSettings = Field(default_factory=ConversationSettings)
+    clarification: ClarificationSettings = Field(default_factory=ClarificationSettings)
+    multi_source: MultiSourceSettings = Field(default_factory=MultiSourceSettings)
 
     def effective_dict(self) -> dict[str, Any]:
         """Retourne uniquement les paramètres runtime, sans secret."""
@@ -296,7 +312,7 @@ def _runtime_payload(config: Mapping[str, Any]) -> dict[str, Any]:
             }.items()
             if source in rag
         },
-        "features": {
+        "features": _deep_merge({
             target: rag[source]
             for target, source in {
                 "enable_reranker": "enable_reranker",
@@ -309,7 +325,7 @@ def _runtime_payload(config: Mapping[str, Any]) -> dict[str, Any]:
                 "faithfulness_strict_only": "faithfulness_strict_only",
             }.items()
             if source in rag
-        },
+        }, dict(config.get("features") or {})),
         "orchestrator": dict(config.get("orchestrator") or {}),
         "debug": dict(config.get("debug") or {}),
         "generation": {
@@ -344,6 +360,8 @@ def _runtime_payload(config: Mapping[str, Any]) -> dict[str, Any]:
             }.items()
             if source in rag
         },
+        "clarification": dict(config.get("clarification") or {}),
+        "multi_source": dict(config.get("multi_source") or {}),
     }
 
 
@@ -364,6 +382,7 @@ _ENV_PATHS: dict[str, tuple[str, str]] = {
     "AUXILIUM_NORMALIZE_EMBEDDINGS": ("retrieval", "normalize_embeddings"),
     "AUXILIUM_MAX_CONTEXT_CHARS": ("retrieval", "max_context_chars"),
     "AUXILIUM_FUSE_ADJACENT_GAP": ("retrieval", "fuse_adjacent_gap"),
+    "AUXILIUM_MAX_SOURCE_EXPANSIONS": ("retrieval", "max_source_expansions"),
     "AUXILIUM_ANSWERABILITY_THRESHOLD": ("thresholds", "answerability"),
     "AUXILIUM_CONTEXT_RELEVANCE_THRESHOLD": ("thresholds", "context_relevance"),
     "AUXILIUM_OVERLAP_MIN": ("thresholds", "overlap_min"),
@@ -373,7 +392,10 @@ _ENV_PATHS: dict[str, tuple[str, str]] = {
     "AUXILIUM_ENABLE_QUERY_CONDENSATION": ("features", "enable_query_condensation"),
     "AUXILIUM_ORCHESTRATOR_ENABLED": ("orchestrator", "enabled"),
     "AUXILIUM_ORCHESTRATOR_MODEL": ("orchestrator", "model"),
-    "AUXILIUM_ORCHESTRATOR_TIMEOUT": ("orchestrator", "timeout"),
+    "AUXILIUM_ORCHESTRATOR_TIMEOUT_SECONDS": ("orchestrator", "timeout_seconds"),
+    "AUXILIUM_ORCHESTRATOR_SLOW_WARNING_SECONDS": ("orchestrator", "slow_warning_seconds"),
+    "AUXILIUM_ORCHESTRATOR_REASONING_EFFORT": ("orchestrator", "reasoning_effort"),
+    "AUXILIUM_ORCHESTRATOR_MAX_OUTPUT_TOKENS": ("orchestrator", "max_output_tokens"),
     "AUXILIUM_ENABLE_QUERY_EXPANSION": ("features", "enable_query_expansion"),
     "AUXILIUM_ENABLE_INTELLIGENT_RETRY": ("features", "enable_intelligent_retry"),
     "AUXILIUM_MAX_RETRY_ROUNDS": ("retrieval", "max_retry_rounds"),

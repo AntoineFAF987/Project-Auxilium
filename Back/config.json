@@ -22,14 +22,28 @@
     "preliminary_pool_multiplier": 2,
     "normalize_embeddings": true,
     "max_context_chars": 12000,
-    "fuse_adjacent_gap": 1
-    ,"max_retry_rounds": 1
-    ,"max_retry_queries": 2
+    "fuse_adjacent_gap": 1,
+    "max_retry_rounds": 1,
+    "max_retry_queries": 2,
+    "max_source_expansions": 2
+  },
+  "features": {
+    "enable_multi_source_orchestration": true
+  },
+  "clarification": {
+    "enable": true,
+    "blocking_only": true
+  },
+  "multi_source": {
+    "allow_general_complement": true
   },
   "orchestrator": {
     "enabled": true,
     "model": null,
-    "timeout": 8,
+    "timeout_seconds": 25,
+    "slow_warning_seconds": 10,
+    "reasoning_effort": "medium",
+    "max_output_tokens": 420,
     "history_max_messages": 6
   },
   "debug": {

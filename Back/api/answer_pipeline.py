@@ -28,22 +28,30 @@ from rag_core.faithfulness import (
 )
 from rag_core.llm_stream import ask_mistral_with_context_stream
 from rag_core.turn_type import classify_turn
-from rag_core.context_sufficiency import AnswerabilityDecision, evaluate_answerability
+from rag_core.context_sufficiency import AnswerabilityDecision, evaluate_answerability, evaluate_exact_entity_support
 from runtime_settings import get_runtime_settings
 from .orchestration import (
-    OrchestrationPlan, OrchestrationPlanOutputError, build_prompt, compact_history,
+    OrchestrationPlan, OrchestrationPlanOutputError, SYSTEM_PROMPT, compact_history,
     explain_candidate_rejection, filter_retrieval_candidates, plan_once, plan_json_retry,
     sanitize_plan_for_retrieval,
 )
 from .orchestration_debug import record_snapshot
 from .response_trace import ResponseTraceStore
 from .iterative_retrieval import run_iterative_evidence_retrieval
-from .multi_query_retrieval import build_retrieval_queries, reciprocal_rank_fusion, resolve_retrieval_query
-from .intelligent_retry import build_retry_queries, derive_retrieval_gap, merge_cumulative_evidence
+from .multi_query_retrieval import (
+    _canonical as retrieval_canonical, _specific_anchors as retrieval_specific_anchors, build_retrieval_queries, detect_query_language,
+    evaluate_cross_language_query, reciprocal_rank_fusion, resolve_retrieval_query,
+)
+from .intelligent_retry import build_retry_queries, derive_retrieval_gap, evaluate_aspect_coverage, merge_cumulative_evidence
 from .catalog_probe import probe_document_catalog
 from .chats_db import create_chat, append_message, mark_chat_title_generation_attempted, set_generated_chat_title, should_generate_chat_title
 from .chat_titles import generate_chat_title
 from .source_references import select_cited_references
+from .source_planner import (
+    ActiveSourceContext, SourcePlanItem, annotate_active_source_candidates, decide_next_source_action,
+    derive_active_source_context, explicit_source_constraint, match_structured_values, normalize_source_plan,
+    structured_clarification,
+)
 from .answer_presentation import (
     enforce_final_citation_contract, extract_citations_and_clean_answer,
     remap_inline_citations, select_web_source_indices,
@@ -235,6 +243,49 @@ def _previous_validated_evidence(history: List[Dict[str, Any]]) -> tuple[Dict[st
     return None, None
 
 
+def _detect_response_transformation(question: str) -> str | None:
+    """Recognise presentation-only follow-ups without classifying every intent."""
+    text = " ".join((question or "").casefold().split())
+    # A requested format is not evidence that there is an answer to transform.
+    # Only an explicit anaphora may take the grounded-transformation branch.
+    previous_content_reference = bool(re.search(
+        r"\b(?:r[eé]ponse pr[eé]c[eé]dente|ce que tu (?:viens de|as) (?:trouv[eé]|dit)|"
+        r"avec (?:[çc]a|cela|ce r[eé]sultat)|fais-en|fais en)\b", text,
+    ))
+    # These requests need new documentary work even when phrased as a follow-up.
+    if re.search(r"\b(?:vérifie|verifie|toujours valable|à jour|a jour|cherche|autre source|détaille|detaille|étape par étape|etape par etape)\b", text):
+        return None
+    if (
+        re.search(r"\b(?:mail|e-mail|email|courriel)\b", text)
+        and re.search(r"\b(?:je réponds quoi|je reponds quoi|fais(?:-moi)?|rédige|redige|réponds?(?:-moi)?|reponds?(?:-moi)?|écris(?:-moi)?|ecris(?:-moi)?|envoyer)\b", text)
+    ) or re.search(r"\b(?:je réponds quoi|je reponds quoi|réponds? au client|reponds? au client|réponse client|reponse client|écris-moi ça pour l'envoyer|ecris-moi ca pour l'envoyer)\b", text):
+        return "email_draft"
+    if re.search(r"\b(?:reformule|réécris|reecris|rédige-moi ça proprement|redige-moi ca proprement)\b", text):
+        return "rewrite"
+    if re.search(r"\b(?:résume|resume)\b", text):
+        return "summarize"
+    if re.search(r"\b(?:explique(?:-le)? plus simplement|simplifie)\b", text):
+        return "simplify"
+    if re.search(r"\b(?:traduis|translate)\b", text):
+        return "translate"
+    return None
+
+
+def _grounded_transformation_context(previous_answer: str, previous_meta: Dict[str, Any]) -> str:
+    """Make the already-supported answer the sole factual input for a rewrite."""
+    sources = previous_meta.get("sources") or []
+    source_names = [str(source.get("path") or source.get("name") or "") for source in sources if isinstance(source, dict)]
+    provenance = previous_meta.get("evidence_provenance") or {}
+    return (
+        "PREVIOUS_SUPPORTED_ANSWER:\n"
+        f"{previous_answer.strip()}\n\n"
+        "PREVIOUS_EVIDENCE_PROVENANCE:\n"
+        f"sources={source_names}\n"
+        f"evidence_chunk_uids={provenance.get('evidence_chunk_uids', [])}\n"
+        "END_PREVIOUS_SUPPORTED_CONTENT"
+    )
+
+
 class _GeneratedArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["email_draft"]
@@ -403,7 +454,13 @@ LLM_SEM = threading.Semaphore(4)  # limite d'appels LLM en parallèle
 
 def _with_timeout(fn, *args, timeout=10, **kwargs):
     fut = EXEC.submit(fn, *args, **kwargs)
-    return fut.result(timeout=timeout)
+    try:
+        return fut.result(timeout=timeout)
+    except FuturesTimeout:
+        # Cancel succeeds for queued work; a running provider request cannot be
+        # force-killed safely by ThreadPoolExecutor, so it is never retried.
+        fut.cancel()
+        raise
 
 def _call_llm_with_retries(fn, *args, timeout=18, retries=2, **kwargs):
     for attempt in range(retries + 1):
@@ -435,13 +492,20 @@ def _run_orchestration(q: str, history: List[Dict]) -> OrchestrationPlan:
         call_llm = lambda prompt, **kwargs: _with_timeout(ask_mistral_with_context, prompt, **kwargs)
         model = ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model
         try:
-            return plan_once(q, recent_history, call_llm, model=model, timeout=ORCHESTRATOR_SETTINGS.timeout)
+            return plan_once(
+                q, recent_history, call_llm, model=model,
+                timeout=ORCHESTRATOR_SETTINGS.timeout_seconds,
+                reasoning_effort=ORCHESTRATOR_SETTINGS.reasoning_effort,
+                max_output_tokens=ORCHESTRATOR_SETTINGS.max_output_tokens,
+            )
         except OrchestrationPlanOutputError:
             logger.warning("orchestrator_invalid_json_retrying_once")
             try:
                 return plan_json_retry(
                     q, recent_history, call_llm, model=model,
-                    timeout=min(ORCHESTRATOR_SETTINGS.timeout, 5),
+                    timeout=min(ORCHESTRATOR_SETTINGS.timeout_seconds, 5),
+                    reasoning_effort=ORCHESTRATOR_SETTINGS.reasoning_effort,
+                    max_output_tokens=ORCHESTRATOR_SETTINGS.max_output_tokens,
                 )
             except OrchestrationPlanOutputError:
                 logger.warning("orchestrator_json_retry_failed")
@@ -468,20 +532,24 @@ def _orchestration_failure_details(exc: Exception) -> dict[str, Any]:
         "request_schema_version": "orchestration_plan_v2",
         "endpoint": endpoint,
         "reasoning_effort": _RUNTIME_SETTINGS.generation.reasoning_effort,
-        "timeout": ORCHESTRATOR_SETTINGS.timeout,
+        "orchestrator_reasoning_effort": ORCHESTRATOR_SETTINGS.reasoning_effort,
+        "timeout_seconds": ORCHESTRATOR_SETTINGS.timeout_seconds,
+        "configured_provider_timeout_seconds": _RUNTIME_SETTINGS.generation.http_timeout_sec,
+        "configured_http_timeout_seconds": _RUNTIME_SETTINGS.generation.http_timeout_sec,
+        "slow_warning_seconds": ORCHESTRATOR_SETTINGS.slow_warning_seconds,
     }
     if isinstance(exc, OrchestrationPlanOutputError):
         return {
             **details, "error_category": "model_output_validation_error",
             "provider_error_type": None, "provider_error_code": None,
             "provider_error_message": None,
-            "validation_error_details": exc.validation_error_details,
+            "validation_error_details": exc.validation_error_details, "timeout_origin": None,
         }
     if isinstance(exc, FuturesTimeout):
         return {
             **details, "error_category": "timeout", "provider_error_type": type(exc).__name__,
             "provider_error_code": None, "provider_error_message": "orchestration call timed out",
-            "validation_error_details": None,
+            "validation_error_details": None, "timeout_origin": "outer_watchdog",
         }
     response = getattr(exc, "response", None)
     body: Any = None
@@ -502,11 +570,33 @@ def _orchestration_failure_details(exc: Exception) -> dict[str, Any]:
         }
     else:
         safe_response = None
+    provider_error = bool(response is not None or code is not None or type(exc).__module__.startswith(("requests", "openai")))
     return {
-        **details, "error_category": "provider_error", "provider_error_type": type(exc).__name__,
+        **details, "error_category": "provider_error" if provider_error else "exception", "provider_error_type": type(exc).__name__,
         "provider_error_code": str(code) if code is not None else None,
         "provider_error_message": _sanitize_provider_error_message(message),
         "validation_error_details": {"provider_response": safe_response} if safe_response else None,
+        "timeout_origin": (
+            "provider" if "timeout" in type(exc).__name__.casefold() else None
+        ),
+    }
+
+
+def _orchestrator_observability(*, latency_ms: float, failed: bool, failure_type: str = "none", timeout_origin: str | None = None) -> dict[str, Any]:
+    """Execution-only planner state; it never influences plan or routing."""
+    return {
+        "orchestrator_timeout_seconds": ORCHESTRATOR_SETTINGS.timeout_seconds,
+        "orchestrator_slow_warning_seconds": ORCHESTRATOR_SETTINGS.slow_warning_seconds,
+        "orchestrator_latency_ms": latency_ms,
+        "orchestrator_slow": latency_ms >= ORCHESTRATOR_SETTINGS.slow_warning_seconds * 1000,
+        "orchestrator_timed_out": failure_type == "timeout",
+        "orchestrator_failed": failed,
+        "orchestrator_failure_type": failure_type,
+        "orchestrator_timeout_origin": timeout_origin,
+        "orchestrator_reasoning_effort": ORCHESTRATOR_SETTINGS.reasoning_effort,
+        "orchestrator_max_output_tokens": ORCHESTRATOR_SETTINGS.max_output_tokens,
+        "orchestrator_configured_provider_timeout_seconds": _RUNTIME_SETTINGS.generation.http_timeout_sec,
+        "orchestrator_configured_http_timeout_seconds": _RUNTIME_SETTINGS.generation.http_timeout_sec,
     }
 
 
@@ -662,7 +752,7 @@ def _try_get_auth_ids(request: Request):
         return None, None
 
 # ==================== Query Rewriting Helpers (Tier 0 improvements) ====================
-def _check_context_relevance(question: str, context: str, threshold: float = None) -> bool:
+def _check_context_relevance(question: str, context: str, threshold: float = None, *, query_variants: List[Tuple[str, str]] | None = None) -> bool:
     """
     Vérifie si le contexte trouvé est réellement pertinent pour la question.
     Utilise le keyword overlap comme proxy rapide de pertinence thématique.
@@ -673,23 +763,31 @@ def _check_context_relevance(question: str, context: str, threshold: float = Non
     if not context or not context.strip():
         return False
     # Si peu de mots en commun ET contexte long, probablement hors sujet
-    overlap = keyword_overlap_count(question, context)
-    q_words = len([w for w in question.lower().split() if len(w) > 3])
-    if q_words == 0:
-        return True  # question trop courte pour juger
+    variants = query_variants or [("original_autonomous", question)]
+    for _kind, variant in variants:
+        overlap = keyword_overlap_count(variant, context)
+        q_words = len([w for w in variant.lower().split() if len(w) > 3])
+        if q_words == 0:
+            return True  # question trop courte pour juger
     # A lexical ratio alone makes a lone shared location/person/year look
     # relevant. Keep it only as a first gate, then require alignment with the
     # information need itself.
-    ratio = overlap / max(1, q_words)
-    return ratio >= threshold and _has_information_need_alignment(question, context)
+        ratio = overlap / max(1, q_words)
+        if ratio >= threshold and _has_information_need_alignment(variant, context):
+            return True
+    return False
 
 
 def _specific_anchors(text: str) -> set[str]:
     """Extract stable, domain-neutral identifiers (serial/model/reference-like tokens)."""
-    return {
+    anchors = {
         token.lower()
         for token in re.findall(r"\b(?:[A-Za-z]+[A-Za-z0-9-]*\d[A-Za-z0-9-]*|\d+(?:\.\d+)+|\d{2,})\b", text or "")
     }
+    # All-caps reference groups (for example "PS AMS") are identifiers too,
+    # even when they do not contain digits.
+    anchors.update(token.lower() for token in re.findall(r"\b[A-Z]{2,}(?:[ -][A-Z0-9]{2,})*\b", text or ""))
+    return anchors
 
 
 def _classify_evidence_mode(question: str, context: str, *, relevant: bool) -> EvidenceMode:
@@ -802,6 +900,179 @@ def _has_information_need_alignment(question: str, context: str) -> bool:
     return morphology and bool(requested) and bool(documented)
 
 
+def _variant_term_coverage(query: str, context: str) -> float:
+    """Coverage for one equivalent documentary query, including close morphology."""
+    requested = _informational_terms(query)
+    documented = _informational_terms(context)
+    if not requested:
+        return 1.0
+    matched = 0
+    for term in requested:
+        if term in documented:
+            matched += 1
+            continue
+        if any(
+            min(len(term), len(candidate)) >= 5
+            and (term.startswith(candidate) or candidate.startswith(term))
+            for candidate in documented
+        ):
+            matched += 1
+    return matched / len(requested)
+
+
+_EVIDENCE_GENERIC_SUBJECT_TERMS = frozenset({"actuator", "valve", "positioner", "product", "overview", "device"})
+
+
+def _information_need_terms(query: str) -> set[str]:
+    """Query concepts that are not merely the named product or identifier."""
+    terms = _informational_terms(query) - _EVIDENCE_GENERIC_SUBJECT_TERMS
+    anchors = _specific_anchors(query)
+    anchor_words = {word for anchor in anchors for word in retrieval_canonical(anchor).split()}
+    return terms - anchor_words
+
+
+def _information_need_match(query: str, context: str) -> tuple[str, float]:
+    requested = _information_need_terms(query)
+    if not requested:
+        return "complete", 1.0
+    documented = _informational_terms(context)
+    matched = sum(
+        term in documented or any(
+            min(len(term), len(candidate)) >= 5 and (term.startswith(candidate) or candidate.startswith(term))
+            for candidate in documented
+        )
+        for term in requested
+    )
+    score = matched / len(requested)
+    return ("complete" if score >= 0.999 else "partial" if score > 0 else "none"), score
+
+
+def _anchors_supported_by_variant(query: str, context: str) -> bool:
+    requested = _specific_anchors(query)
+    if not requested:
+        return True
+    documented = _specific_anchors(context)
+    canonical = lambda value: re.sub(r"[^a-z0-9]", "", value.casefold())
+    return {canonical(value) for value in requested}.issubset({canonical(value) for value in documented})
+
+
+def _best_evidence_variant(
+    context: str, query_variants: List[Tuple[str, str]],
+) -> dict[str, Any]:
+    """Choose the strongest semantic comparison; variants are one intent."""
+    scored = []
+    for kind, query in query_variants:
+        coverage = _variant_term_coverage(query, context)
+        morphology = _morphological_topic_overlap(query, context)
+        aligned = _has_information_need_alignment(query, context)
+        anchors_supported = _anchors_supported_by_variant(query, context)
+        # Alignment cannot be inferred merely from the source query: the
+        # chunk must match its concepts and, when present, its identifiers.
+        direct = anchors_supported and (aligned or coverage >= CONTEXT_RELEVANCE_THRESHOLD)
+        scored.append((coverage, int(direct), morphology, kind, query, aligned, anchors_supported))
+    if not scored:
+        return {"type": None, "query": None, "coverage": 0.0, "morphology": 0, "aligned": False, "anchors_supported": False, "direct": False}
+    coverage, direct, morphology, kind, query, aligned, anchors_supported = max(scored)
+    return {"type": kind, "query": query, "coverage": coverage, "morphology": morphology, "aligned": aligned, "anchors_supported": anchors_supported, "direct": bool(direct)}
+
+
+def _annotate_variant_aware_candidates(
+    rows: List[Tuple[float, Dict]], query_variants: List[Tuple[str, str]],
+) -> List[Tuple[float, Dict]]:
+    """Annotate strong, evaluated mono-variant matches without changing RRF."""
+    maxima: dict[str, float] = {}
+    for _score, meta in rows:
+        for kind, value in (meta.get("per_query_score") or {}).items():
+            maxima[kind] = max(maxima.get(kind, float("-inf")), float(value))
+    result = []
+    for score, meta in rows:
+        enriched = dict(meta)
+        evaluation = _best_evidence_variant(str(enriched.get("text") or ""), query_variants)
+        need_status, need_score = _information_need_match(evaluation["query"] or "", str(enriched.get("text") or ""))
+        kind = evaluation["type"]
+        per_score = float((enriched.get("per_query_score") or {}).get(kind, 0.0)) if kind else 0.0
+        rank = (enriched.get("per_query_rank") or {}).get(kind) if kind else None
+        relative = per_score / maxima[kind] if kind and maxima.get(kind, 0.0) > 0 else 0.0
+        # This is a relative, content-gated promotion. It cannot affect a
+        # cross-language result whose chunk lacks the requested predicate.
+        answer_bearing = bool(evaluation["anchors_supported"] and need_status != "none" and evaluation["direct"])
+        promote = bool(
+            answer_bearing and rank is not None and int(rank) <= 3 and relative >= 0.90
+        )
+        enriched.update({
+            "evidence_query_variants": [{"type": item_kind, "query": item_query} for item_kind, item_query in query_variants],
+            "best_matching_query_type": kind,
+            "best_matching_query": evaluation["query"],
+            "best_query_term_coverage": round(float(evaluation["coverage"]), 4),
+            "best_topic_relation_score": round(float(evaluation["coverage"]), 4),
+            "best_per_query_score": per_score,
+            "best_per_query_rank": rank,
+            "answers_information_need": answer_bearing,
+            "information_need_match_score": round(need_score, 4),
+            "information_need_coverage": need_status,
+            "best_information_need_query_variant": kind,
+            "answer_bearing_candidate": answer_bearing,
+            "variant_aware_promotion_applied": promote,
+            "variant_aware_promotion_reason": "strong_answer_bearing_match_on_equivalent_query_variant" if promote else "no_strong_answer_bearing_match_on_equivalent_query_variant",
+        })
+        result.append((score, enriched))
+    return result
+
+
+def _evidence_selection_order(rows: List[Tuple[float, Dict]]) -> List[Tuple[float, Dict]]:
+    """Keep RRF ranking intact while protecting evaluated direct evidence.
+
+    This only changes the bounded evidence-context input; fused retrieval
+    scores and their order in ``prelim`` remain the RRF result.
+    """
+    promoted = [item for item in rows if item[1].get("variant_aware_promotion_applied")]
+    active = [
+        item for item in rows
+        if not item[1].get("variant_aware_promotion_applied") and item[1].get("active_source_context_match")
+    ]
+    regular = [
+        item for item in rows
+        if not item[1].get("variant_aware_promotion_applied") and not item[1].get("active_source_context_match")
+    ]
+    return [*promoted, *active, *regular]
+
+
+def _protect_answer_bearing_fused_blocks(
+    fused: List[Tuple[float, Dict]], answer_bearing_uids: set[str],
+) -> List[Tuple[float, Dict]]:
+    """Reapply evidence protection after passage fusion reorders by mean RRF."""
+    protected, regular = [], []
+    for item in fused:
+        members = {str(uid) for uid in (item[1].get("fused_chunk_uids") or [item[1].get("chunk_uid")]) if uid}
+        (protected if members & answer_bearing_uids else regular).append(item)
+    return [*protected, *regular]
+
+
+def _final_information_need_coverage(
+    blocks: List[Tuple[float, Dict]], query_variants: List[Tuple[str, str]],
+) -> tuple[str, float, str | None]:
+    text = _evidence_text(blocks)
+    scored = [(*_information_need_match(query, text), kind) for kind, query in query_variants]
+    if not scored:
+        return "none", 0.0, None
+    status, score, kind = max(scored, key=lambda item: item[1])
+    return status, score, kind
+
+
+def _gate_answerability_on_information_need(
+    decision: AnswerabilityDecision, *, requested_information_need: str | None,
+    coverage: str, query_semantics: str | None,
+) -> AnswerabilityDecision:
+    """Do not let product-topic coverage alone settle a precise request."""
+    if not requested_information_need or decision.status != "answerable":
+        return decision
+    if coverage == "none":
+        return replace(decision, status="partial", reasons=(*decision.reasons, "requested_information_need_not_covered"))
+    if query_semantics == "procedure" and coverage == "partial":
+        return replace(decision, status="partial", reasons=(*decision.reasons, "requested_procedure_information_partially_covered"))
+    return decision
+
+
 def _evaluate_evidence(
     question: str,
     blocks: List[Tuple[float, Dict]],
@@ -809,27 +1080,30 @@ def _evaluate_evidence(
     guard_ok: bool,
     context_is_relevant: bool,
     overlap: int,
+    query_variants: List[Tuple[str, str]] | None = None,
 ) -> EvidenceDecision:
     """Single source of truth for usable local evidence after final block selection."""
     if not blocks:
         return EvidenceDecision("none", "no_final_blocks", context_is_relevant, "empty_context", 0)
 
-    requested = _specific_anchors(question)
     evidence_text = _evidence_text(blocks)
+    variants = query_variants or [("original_autonomous", question)]
+    best = _best_evidence_variant(evidence_text, variants)
+    requested = _specific_anchors(best["query"] or question)
     documented = _specific_anchors(evidence_text)
-    morphological_overlap = _morphological_topic_overlap(question, evidence_text)
-    information_need_aligned = _has_information_need_alignment(question, evidence_text)
+    morphological_overlap = best["morphology"]
+    information_need_aligned = best["aligned"]
     relevance_reason = (
         "information_need_aligned" if context_is_relevant else
         ("information_need_misaligned" if not information_need_aligned else "lexical_relevance_below_threshold")
     )
     usable_direct_signal = bool(guard_ok or context_is_relevant or overlap >= OVERLAP_MIN)
 
-    if requested and requested.issubset(documented) and usable_direct_signal:
+    if requested and _anchors_supported_by_variant(best["query"] or question, evidence_text) and best["direct"] and usable_direct_signal:
         return EvidenceDecision(
             "direct", "requested_anchors_in_final_blocks", context_is_relevant, relevance_reason, morphological_overlap
         )
-    if not requested and context_is_relevant and usable_direct_signal:
+    if not requested and context_is_relevant and best["direct"] and usable_direct_signal:
         return EvidenceDecision(
             "direct", "context_relevant_without_specific_anchor", context_is_relevant, relevance_reason, morphological_overlap
         )
@@ -1377,7 +1651,11 @@ def run_answer_pipeline(
                           "response_format": result.validations.get("response_format", "normal"),
                           "timestamp": datetime.now(timezone.utc).isoformat(),
                           "evidence_provenance": result.validations.get("evidence_provenance", {}),
-                          "retrieval_query": result.validations.get("retrieval_query")},
+                          "retrieval_query": result.validations.get("retrieval_query"),
+                          "source_plan": result.validations.get("source_plan", []),
+                          "sources_checked": result.validations.get("sources_checked", []),
+                          "source_answerability": result.validations.get("source_answerability", {}),
+                          "claim_sources": result.validations.get("claim_sources", [])},
                 )
             except Exception as exc:
                 log_stream_error(request_id, "message_persistence", exc)
@@ -1418,7 +1696,9 @@ def run_answer_pipeline(
         raw_hist: List[Dict] = [{"role": m.role, "content": m.content, "meta": m.meta or {}} for m in (body.history or [])]
         hist = trim_history(raw_hist, max_turns=HISTORY_MAX_TURNS)
 
-    trace("request", {"history_used": hist, "orchestrator_enabled": ORCHESTRATOR_SETTINGS.enabled, "provider": _RUNTIME_SETTINGS.generation.provider, "orchestrator_model": ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model, "generation_model": _RUNTIME_SETTINGS.generation.model})
+    active_source_context = derive_active_source_context(hist)
+
+    trace("request", {"history_used": hist, "active_source_context": active_source_context.to_dict(), "orchestrator_enabled": ORCHESTRATOR_SETTINGS.enabled, "provider": _RUNTIME_SETTINGS.generation.provider, "orchestrator_model": ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model, "generation_model": _RUNTIME_SETTINGS.generation.model})
 
     thread_id = (body.thread_id or "default").strip() or "default"
     _touch_session(thread_id)
@@ -1506,7 +1786,18 @@ def run_answer_pipeline(
     if mode_in == "general":
         try:
             ans = _generate_answer(q, reply_preamble, history=hist, token_sink=token_sink, progress_sink=emit_status)
-            return finalize_result(_result(answer=ans, sources=[], mode="GENERAL(no-context)", ctx_len=len(reply_preamble), request_id=request_id))
+            return finalize_result(_result(
+                answer=ans, sources=[], mode="GENERAL(no-context)", ctx_len=len(reply_preamble), request_id=request_id,
+                route_mode="general", validations={
+                    "clarification_needed": False, "ambiguity_level": "none",
+                    "source_plan": [{"source": "general", "priority": 1, "required": True, "complementary": False, "reason": "explicit General UI mode"}],
+                    "sources_checked": ["general"], "sources_skipped": [],
+                    "source_answerability": {"general": "answerable"},
+                    "next_source_action": "STOP_AND_ANSWER", "multi_source_used": False,
+                    "active_source_context": active_source_context.to_dict(),
+                    "claim_sources": [{"claim": "general_answer", "source_type": "general", "source_id": "model_general_knowledge", "support_level": "general", "citation_required": False, "confidence": 0.6}],
+                },
+            ))
         except FuturesTimeout:
             raise HTTPException(status_code=504, detail="LLM timeout")
         except Exception as e:
@@ -1524,12 +1815,20 @@ def run_answer_pipeline(
         emit_status("identify_response_mode", "Identification du mode de réponse")
         started = time.perf_counter()
         try:
-            trace("orchestrator_input", {"system_prompt": build_prompt(q, hist).split("\nCURRENT_DATE_UTC:", 1)[0], "user_message": q, "history": hist, "active_subject_candidates": compact_history(hist).get("active_subject_candidates", [])})
+            # Avoid rebuilding the expensive JSON schema merely to trace the static instructions.
+            trace("orchestrator_input", {"system_prompt": SYSTEM_PROMPT, "user_message": q, "history": hist, "active_subject_candidates": compact_history(hist).get("active_subject_candidates", [])})
             set_stage("orchestration")
             raw_orchestration_plan = _run_orchestration(q, hist)
+            orchestration_metrics = dict(raw_orchestration_plan._orchestration_metrics)
             sanitized_plan = sanitize_plan_for_retrieval(raw_orchestration_plan, user_message=q)
             orchestration_plan = sanitized_plan.plan
             orchestration_ms = round((time.perf_counter() - started) * 1000, 1)
+            orchestrator_observability = _orchestrator_observability(latency_ms=orchestration_ms, failed=False)
+            if orchestrator_observability["orchestrator_slow"]:
+                logger.warning(
+                    "Orchestrator slow but successful request_id=%s model=%s latency_ms=%s",
+                    request_id, ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model, orchestration_ms,
+                )
             constraints_count = len(orchestration_plan.temporal_constraints) + sum(
                 bool(value) for value in orchestration_plan.metadata_constraints.model_dump().values()
             )
@@ -1542,6 +1841,8 @@ def run_answer_pipeline(
                 # Preserve observability without exposing a sensitive standalone query.
                 "orchestration_query": hashlib.sha256((orchestration_plan.retrieval_query or "").encode("utf-8")).hexdigest()[:12] if orchestration_plan.retrieval_query else None,
                 "orchestration_constraints_count": constraints_count,
+                **orchestrator_observability,
+                **orchestration_metrics,
             })
             record_snapshot(raw_orchestration_plan, orchestration_ms=orchestration_ms, fallback_used=False)
             trace("orchestration", {
@@ -1553,6 +1854,8 @@ def run_answer_pipeline(
                     "removed": sanitized_plan.removed_constraints,
                 },
                 "orchestration_latency_ms": orchestration_ms,
+                **orchestrator_observability,
+                **orchestration_metrics,
                 "fallback_used": False,
                 "validation_error": None,
                 "validation_error_details": None,
@@ -1567,11 +1870,28 @@ def run_answer_pipeline(
             orchestration_failed = True
             orchestration_ms = round((time.perf_counter() - started) * 1000, 1)
             orchestration_failure = _orchestration_failure_details(exc)
+            orchestration_metrics = dict(getattr(exc, "orchestration_metrics", {}) or {})
+            failure_type = (
+                "timeout" if isinstance(exc, FuturesTimeout)
+                else "validation_error" if isinstance(exc, OrchestrationPlanOutputError)
+                else "api_error" if orchestration_failure["error_category"] == "provider_error"
+                else "exception"
+            )
+            if failure_type == "timeout":
+                logger.warning(
+                    "Orchestrator timed out request_id=%s model=%s timeout_seconds=%s elapsed_ms=%s",
+                    request_id, ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model,
+                    ORCHESTRATOR_SETTINGS.timeout_seconds, orchestration_ms,
+                )
+            orchestrator_observability = _orchestrator_observability(
+                latency_ms=orchestration_ms, failed=True, failure_type=failure_type,
+                timeout_origin=orchestration_failure["timeout_origin"],
+            )
             documentary_orchestration_fallback = _looks_like_documentary_fallback(q, hist)
             fallback_strategy = "documentary_retrieval" if documentary_orchestration_fallback else (
                 "conversation" if not _looks_like_documentary_fallback(q, hist) else "legacy_routing"
             )
-            _log_event(request_id, {"event": "orchestration_fallback", "orchestration_ms": orchestration_ms, "reason": type(exc).__name__, "error_category": orchestration_failure["error_category"], "fallback_strategy": fallback_strategy})
+            _log_event(request_id, {"event": "orchestration_fallback", "orchestration_ms": orchestration_ms, "reason": type(exc).__name__, "error_category": orchestration_failure["error_category"], "fallback_strategy": fallback_strategy, **orchestrator_observability, **orchestration_metrics})
             trace("orchestration_context_recovery", {
                 "enabled": bool(hist), "recovered_query": _recover_query_from_history(q, hist),
             })
@@ -1581,6 +1901,8 @@ def run_answer_pipeline(
                 "validated_orchestration_plan": None,
                 "constraints": {"hard_filters": [], "soft_preferences": [], "removed": []},
                 "orchestration_latency_ms": orchestration_ms,
+                **orchestrator_observability,
+                **orchestration_metrics,
                 "fallback_used": True,
                 "validation_error": type(exc).__name__,
                 "validation_error_details": orchestration_failure["validation_error_details"],
@@ -1593,9 +1915,150 @@ def run_answer_pipeline(
                 "request_schema_version": orchestration_failure["request_schema_version"],
                 "endpoint": orchestration_failure["endpoint"],
                 "reasoning_effort": orchestration_failure["reasoning_effort"],
-                "timeout": orchestration_failure["timeout"],
+                "timeout_seconds": orchestration_failure["timeout_seconds"],
                 "fallback_strategy": fallback_strategy,
             })
+
+    # A wording-only follow-up is answered from the prior supported turn, not
+    # by treating its conversational framing as a new documentary query.
+    response_transform_type = _detect_response_transformation(q)
+    previous_meta, previous_index = _previous_validated_evidence(hist)
+    # Output format never chooses the factual operation.  A draft request is a
+    # transformation only when it can reuse grounded content; otherwise the
+    # already-computed orchestration plan continues as a new question.
+    if response_transform_type == "email_draft" and not previous_meta:
+        response_transform_type = None
+    if (
+        response_transform_type == "email_draft"
+        and orchestration_plan is not None
+        and orchestration_plan.needs_retrieval
+        and re.search(r"\b(?:si|if|whether|quel(?:le)?|what|which|est-ce)\b", q.casefold())
+    ):
+        response_transform_type = None
+    if response_transform_type:
+        if not previous_meta:
+            recovery_reason = "no_previous_validated_evidence"
+            trace("response_transformation", {
+                "reuse_previous_answer": False, "previous_answer_reused": False,
+                "previous_evidence_reused": False, "response_transform_type": response_transform_type,
+                "grounded_transformation": False, "orchestrator_failure_recovery": orchestration_failed,
+                "orchestrator_failure_recovery_reason": recovery_reason if orchestration_failed else None,
+            })
+            return finalize_result(_result(
+                answer="Je peux le reformuler, mais je n’ai pas de réponse précédente suffisamment sourcée à reprendre. Peux-tu me transmettre le contenu à reformuler ?",
+                sources=[], mode="CLARIFICATION", ctx_len=0, request_id=request_id, route_mode="clarification",
+                validations={"response_format": "email_draft" if response_transform_type == "email_draft" else "normal",
+                             "reuse_previous_answer": False, "previous_answer_reused": False,
+                             "previous_evidence_reused": False, "response_transform_type": response_transform_type,
+                             "grounded_transformation": False, "orchestrator_failure_recovery": orchestration_failed,
+                             "orchestrator_failure_recovery_reason": recovery_reason if orchestration_failed else None,
+                             "active_source_context": active_source_context.to_dict()},
+            ))
+
+        previous_answer = str(hist[previous_index].get("content", ""))
+        response_format = "email_draft" if response_transform_type == "email_draft" else "normal"
+        context_for_llm = f"{reply_preamble}{_grounded_transformation_context(previous_answer, previous_meta)}"
+        if response_format == "email_draft":
+            context_for_llm += f"\nCURRENT_USER_FIRST_NAME: {_sender_first_name_from_request(request) or '[Prénom]'}\n"
+        recovery_reason = "previous_supported_answer_and_evidence" if orchestration_failed else None
+        trace("response_transformation", {
+            "reuse_previous_answer": True, "previous_answer_reused": True,
+            "previous_evidence_reused": True, "response_transform_type": response_transform_type,
+            "conversation_operation": "transform_existing_answer",
+            "grounded_transformation": True, "previous_history_index": previous_index,
+            "orchestrator_failure_recovery": orchestration_failed,
+            "orchestrator_failure_recovery_reason": recovery_reason,
+        })
+        _log_event(request_id, {"event": "response_transformation", "reuse_previous_answer": True,
+                                "response_transform_type": response_transform_type,
+                                "conversation_operation": "transform_existing_answer",
+                                "grounded_transformation": True,
+                                "orchestrator_failure_recovery": orchestration_failed})
+        try:
+            generated = _generate_answer(
+                q, context_for_llm, history=hist, token_sink=token_sink, artifact_sink=artifact_sink,
+                progress_sink=emit_status, response_format=response_format,
+                grounded_transformation=True, evidence_mode="direct",
+            )
+            artifacts: List[Dict[str, str]] = []
+            if response_format == "email_draft":
+                try:
+                    answer, artifacts, _ = _parse_email_draft_generation(generated)
+                except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+                    logger.warning("grounded_email_draft_generation_invalid: %s", type(exc).__name__)
+                    answer = generated
+            else:
+                answer, _ = extract_citations_and_clean_answer(generated)
+            return finalize_result(_result(
+                answer=answer, artifacts=artifacts, sources=previous_meta.get("sources", []),
+                mode="GROUNDED_TRANSFORMATION", ctx_len=len(context_for_llm), request_id=request_id,
+                route_mode="grounded_transformation",
+                validations={"response_format": response_format, "reuse_previous_answer": True,
+                             "previous_answer_reused": True, "previous_evidence_reused": True,
+                             "response_transform_type": response_transform_type,
+                             "grounded_transformation": True, "evidence_mode": "direct",
+                             "evidence_provenance": previous_meta.get("evidence_provenance", {}),
+                             "sources_checked": ["history"], "sources_skipped": ["local_retrieval_not_needed"],
+                             "source_answerability": {"history": "answerable"},
+                             "next_source_action": "STOP_AND_ANSWER", "multi_source_used": False,
+                             "active_source_context": active_source_context.to_dict(),
+                             "orchestrator_failure_recovery": orchestration_failed,
+                             "orchestrator_failure_recovery_reason": recovery_reason},
+            ))
+        except FuturesTimeout:
+            raise HTTPException(status_code=504, detail="LLM timeout")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"LLM error: {e}")
+
+    multi_source_enabled = bool(_RUNTIME_SETTINGS.features.enable_multi_source_orchestration)
+    hard_source_constraint = explicit_source_constraint(q)
+    effective_source_plan: list[SourcePlanItem] = []
+    if orchestration_plan and multi_source_enabled:
+        effective_source_plan = normalize_source_plan(
+            orchestration_plan.source_plan,
+            mode=mode_in,
+            intent=orchestration_plan.intent,
+            web_request_explicit=orchestration_plan.web_request_explicit or _has_explicit_web_request(q),
+            active=active_source_context,
+            explicit_sources=hard_source_constraint,
+        )
+    if orchestration_plan and hard_source_constraint and hard_source_constraint <= {"general", "history"}:
+        # "Sans chercher" is a hard execution constraint even if the advisory
+        # planner accidentally requested documentary retrieval.
+        orchestration_plan = orchestration_plan.model_copy(update={
+            "intent": "general_question", "needs_retrieval": False,
+            "retrieval_query": None, "source_types": [], "temporal_constraints": [],
+            "response_strategy": "general_answer",
+        })
+    trace("source_planning", {
+        "clarification_needed": bool(orchestration_plan and orchestration_plan.clarification_needed),
+        "clarification_reason": orchestration_plan.clarification_reason if orchestration_plan else None,
+        "missing_information": orchestration_plan.missing_information if orchestration_plan else [],
+        "ambiguity_level": orchestration_plan.ambiguity_level if orchestration_plan else "none",
+        "source_plan": [item.model_dump(mode="json") for item in effective_source_plan],
+        "active_source_context": active_source_context.to_dict(),
+    })
+    if (
+        orchestration_plan and multi_source_enabled
+        and _RUNTIME_SETTINGS.clarification.enable
+        and orchestration_plan.clarification_needed
+        and (not _RUNTIME_SETTINGS.clarification.blocking_only or orchestration_plan.ambiguity_level == "blocking")
+    ):
+        validations.update({
+            "clarification_needed": True,
+            "clarification_reason": orchestration_plan.clarification_reason,
+            "missing_information": orchestration_plan.missing_information,
+            "ambiguity_level": orchestration_plan.ambiguity_level,
+            "source_plan": [item.model_dump(mode="json") for item in effective_source_plan],
+            "active_source_context": active_source_context.to_dict(),
+            "next_source_action": "ASK_CLARIFICATION",
+            "sources_checked": [],
+        })
+        return finalize_result(_result(
+            answer=orchestration_plan.clarification_question or "Peux-tu préciser l’information recherchée ?",
+            sources=[], mode="CLARIFICATION", ctx_len=0, request_id=request_id,
+            route_mode="clarification", validations=validations,
+        ))
 
     # Explicit mode wins. In auto mode, the planner may explicitly choose the
     # live Web route. This branch intentionally runs before the local-index
@@ -1617,10 +2080,55 @@ def run_answer_pipeline(
         and _looks_fresh_news(q)
         and not _looks_like_documentary_fallback(q, hist)
     )
-    web_requested = mode_in == "web_live" or explicit_web_request or local_web_override or auto_live_web_request or (
-        mode_in == "auto" and orchestration_plan is not None and orchestration_plan.intent == "web_search"
+    planner_supplied_source_plan = bool(orchestration_plan and orchestration_plan.source_plan)
+    planned_primary_source = effective_source_plan[0].source if planner_supplied_source_plan and effective_source_plan else None
+    planned_internal_sources = {
+        item.source for item in effective_source_plan if item.source in {"local", "email"}
+    } if planner_supplied_source_plan else set()
+    if mode_in == "auto" and planned_primary_source in {"local", "email"}:
+        # Documents and indexed emails share the existing local index. When
+        # both are planned, one scoped pass executes both without a second
+        # retrieval engine or index.
+        allowed_sources = set()
+        if "local" in planned_internal_sources:
+            allowed_sources.update({"pdf", "file"})
+        if "email" in planned_internal_sources:
+            allowed_sources.add("email")
+    local_followup_continuity = bool(
+        orchestration_plan and orchestration_plan.intent == "refine_previous_search"
+        and active_source_context.source in {"local", "email"}
+        and not orchestration_plan.web_request_explicit and not explicit_web_request
+    )
+    web_plan_has_required_complement = bool(
+        planned_primary_source == "web"
+        and any(
+            item.source != "web" and (item.required or item.complementary)
+            for item in effective_source_plan
+        )
+    )
+    web_requested = mode_in == "web_live" or explicit_web_request or local_web_override or (
+        not local_followup_continuity and (
+            (auto_live_web_request and not web_plan_has_required_complement)
+            or (mode_in == "auto" and planned_primary_source == "web" and not web_plan_has_required_complement)
+            or (mode_in == "auto" and not planner_supplied_source_plan and orchestration_plan is not None and orchestration_plan.intent == "web_search")
+            or (not multi_source_enabled and mode_in == "auto" and orchestration_plan is not None and orchestration_plan.intent == "web_search")
+        )
     )
     if web_requested:
+        web_execution_validations = {
+            "clarification_needed": False,
+            "ambiguity_level": orchestration_plan.ambiguity_level if orchestration_plan else "none",
+            "source_plan": [item.model_dump(mode="json") for item in effective_source_plan],
+            "active_source_context": active_source_context.to_dict(),
+            "sources_checked": ["web"],
+            "sources_skipped": [
+                {"source": item.source, "reason": "not_allowed_by_explicit_or_primary_web_route"}
+                for item in effective_source_plan if item.source != "web"
+            ],
+            "source_answerability": {"web": "not_checked"},
+            "source_expansion_triggered": False,
+            "multi_source_used": False,
+        }
         web_follow_up = bool(
             orchestration_plan
             and orchestration_plan.reuse_previous_subject
@@ -1653,7 +2161,7 @@ def run_answer_pipeline(
             return finalize_result(_result(
                 answer="Recherche web trop longue. Reessaie ou passe en mode local.", sources=[],
                 mode="STRICT(web_live)", ctx_len=0, request_id=request_id, route_mode="web_live",
-                validations={"evidence_mode": "web_live"},
+                validations={**web_execution_validations, "evidence_mode": "web_live", "source_answerability": {"web": "unanswerable"}, "next_source_action": "ABSTAIN"},
             ))
         except Exception:
             web_text = ""
@@ -1663,7 +2171,7 @@ def run_answer_pipeline(
             return finalize_result(_result(
                 answer="Je n'ai rien trouve via la recherche web en direct.", sources=[],
                 mode="STRICT(web_live)", ctx_len=0, request_id=request_id, route_mode="web_live",
-                validations={"evidence_mode": "web_live"},
+                validations={**web_execution_validations, "evidence_mode": "web_live", "source_answerability": {"web": "unanswerable"}, "next_source_action": "ABSTAIN"},
             ))
 
         emit_status("analyze_web_sources", "Analyse des sources trouvees")
@@ -1711,9 +2219,22 @@ def run_answer_pipeline(
             review = _post_generation_review(q, answer, web_text, sources, faithfulness_result, claim_review)
             validations["post_answer"] = {"performed": True, **review.to_dict()}
         validations.update({
+            **web_execution_validations,
             "evidence_mode": "web_live",
             "orchestration_intent": orchestration_plan.intent if orchestration_plan else None,
             "orchestration_needs_retrieval": orchestration_plan.needs_retrieval if orchestration_plan else None,
+            "source_answerability": {"web": "answerable"},
+            "next_source_action": "STOP_AND_ANSWER",
+            "claim_sources": [{
+                "claim": f"citation:{index}", "source_type": "web", "source_id": source.get("path"),
+                "support_level": "direct", "citation_required": True, "confidence": 1.0,
+            } for index, source in enumerate(sources, start=1)],
+            "source_results": [{
+                "source_type": "web", "source_confidence": 1.0,
+                "evidence_blocks": ["web-live-context"],
+                "supported_claims": [f"citation:{index}" for index in range(1, len(sources) + 1)],
+                "unsupported_claims": [], "freshness": "live", "source_priority": 1,
+            }],
         })
         _log_event(request_id, {
             "event": "ask", "mode_in": mode_in, "mode_out": "STRICT(web_live)",
@@ -1775,6 +2296,17 @@ def run_answer_pipeline(
                 validations={"orchestration_intent": orchestration_plan.intent,
                              "orchestration_needs_retrieval": False, "evidence_mode": "none",
                              "response_format": orchestration_plan.response_format,
+                             "clarification_needed": False,
+                             "ambiguity_level": orchestration_plan.ambiguity_level,
+                             "source_plan": [item.model_dump(mode="json") for item in effective_source_plan],
+                             "sources_checked": ["history"] if reuse_previous_evidence else ["general"],
+                             "sources_skipped": [],
+                             "source_answerability": {"history" if reuse_previous_evidence else "general": "answerable"},
+                             "next_source_action": "STOP_AND_ANSWER",
+                             "multi_source_used": False,
+                             "active_source_context": active_source_context.to_dict(),
+                             "claim_sources": [{"claim": "general_answer", "source_type": "general", "source_id": "model_general_knowledge", "support_level": "general", "citation_required": False, "confidence": 0.6}],
+                             "source_results": [{"source_type": "general", "source_confidence": 0.6, "evidence_blocks": [], "supported_claims": ["general_answer"], "unsupported_claims": [], "freshness": None, "source_priority": 1}],
                              "evidence_provenance": (previous_meta.get("evidence_provenance", {}) if reuse_previous_evidence else {}),
                              "follow_up_reused_evidence": reuse_previous_evidence,
                              "previous_evidence_source_message_id": previous_meta.get("message_id") if previous_meta else None},
@@ -1871,10 +2403,24 @@ def run_answer_pipeline(
             allowed_sources = {"__no_matching_source__"}
     follow_up = bool(orchestration_plan and orchestration_plan.intent == "refine_previous_search" and orchestration_plan.reuse_previous_subject)
     resolved_retrieval_query = resolve_retrieval_query(raw_user_message=q, orchestrator_query=orchestration_plan.retrieval_query or q, history=hist) if follow_up else None
-    retrieval_queries = build_retrieval_queries(original_query=q, orchestrator_query=orchestration_plan.retrieval_query, resolved_query=resolved_retrieval_query, follow_up=follow_up) if orchestration_plan else [("original_autonomous", q_eff)]
+    detected_query_language = detect_query_language(q)
+    cross_language_decision = evaluate_cross_language_query(
+        original_user_query=q,
+        # For a resolved follow-up the standalone subject, not the raw prompt,
+        # is the documentary base for expansion.
+        orchestrator_query=resolved_retrieval_query or (orchestration_plan.retrieval_query if orchestration_plan else None),
+        detected_language=detected_query_language,
+        anchors=retrieval_specific_anchors(" ".join(part for part in (q, resolved_retrieval_query, orchestration_plan.retrieval_query if orchestration_plan else None) if part)),
+        query_semantics=orchestration_plan.query_semantics if orchestration_plan and orchestration_plan.needs_retrieval else None,
+        proposed_query=orchestration_plan.cross_language_retrieval_query if orchestration_plan else None,
+    )
+    retrieval_queries = build_retrieval_queries(original_query=q, orchestrator_query=orchestration_plan.retrieval_query, resolved_query=resolved_retrieval_query, follow_up=follow_up, cross_language_query=cross_language_decision.query) if orchestration_plan else [("original_autonomous", q_eff)]
+    # These are equivalent retrieval formulations of one information need,
+    # not independent questions. Downstream evidence uses the best comparison.
+    evidence_query_variants = retrieval_queries[:]
     if resolved_retrieval_query:
         q_eff = resolved_retrieval_query
-    trace("retrieval_input", {"raw_user_message": q, "resolved_retrieval_query": resolved_retrieval_query, "follow_up_retrieval": follow_up, "raw_query_used_for_retrieval": not follow_up, "raw_query_exclusion_reason": "conversational_followup" if follow_up else None, "original_query": q, "orchestrator_query": orchestration_plan.retrieval_query if orchestration_plan else None, "q_eff": q_eff, "q_eff_source": "resolved_retrieval_query" if resolved_retrieval_query else ("orchestrator_query" if orchestration_plan else ("condensed_query" if should_condense else "original_query")), "retrieval_queries": [{"type": kind, "source": kind, "query": query} for kind, query in retrieval_queries], "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": orchestration_plan.source_types if orchestration_plan else [], "temporal_constraints": [item.model_dump(mode="json") for item in orchestration_plan.temporal_constraints] if orchestration_plan else [], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
+    trace("retrieval_input", {"raw_user_message": q, "resolved_retrieval_query": resolved_retrieval_query, "follow_up_retrieval": follow_up, "raw_query_used_for_retrieval": not follow_up, "raw_query_exclusion_reason": "conversational_followup" if follow_up else None, "original_query": q, "orchestrator_query": orchestration_plan.retrieval_query if orchestration_plan else None, "detected_query_language": detected_query_language, "cross_language_source_query": cross_language_decision.source_query, "cross_language_query_semantics": orchestration_plan.query_semantics if orchestration_plan else None, "cross_language_information_need": cross_language_decision.information_need, "cross_language_information_need_retained": cross_language_decision.information_need_retained, "cross_language_semantic_intent_retained": cross_language_decision.semantic_intent_retained, "cross_language_validation_passed": cross_language_decision.validation_passed, "cross_language_validation_reasons": list(cross_language_decision.validation_reasons), "cross_language_query_before_validation": cross_language_decision.query_before_validation, "cross_language_query_after_validation": cross_language_decision.query_after_validation, "cross_language_query_generated": cross_language_decision.query is not None, "cross_language_target_language": cross_language_decision.target_language, "cross_language_query": cross_language_decision.query, "cross_language_query_rejected": cross_language_decision.query is None, "cross_language_rejection_reason": cross_language_decision.rejection_reason, "q_eff": q_eff, "q_eff_source": "resolved_retrieval_query" if resolved_retrieval_query else ("orchestrator_query" if orchestration_plan else ("condensed_query" if should_condense else "original_query")), "retrieval_queries": [{"type": kind, "source": kind, "query": query} for kind, query in retrieval_queries], "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": orchestration_plan.source_types if orchestration_plan else [], "temporal_constraints": [item.model_dump(mode="json") for item in orchestration_plan.temporal_constraints] if orchestration_plan else [], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
     set_stage("retrieval")
     if allowed_sources == {"email"}:
         emit_status("search_emails", "Recherche dans vos e-mails")
@@ -1902,11 +2448,20 @@ def run_answer_pipeline(
         query_rankings.append((query_kind, rows))
         query_trace.append({"type": query_kind, "query": query_text, "candidate_count": before_filter, "after_constraint_filter": len(rows)})
     prelim = reciprocal_rank_fusion(query_rankings) if len(query_rankings) > 1 else (query_rankings[0][1] if query_rankings else [])
+    prelim = _annotate_variant_aware_candidates(prelim, evidence_query_variants)
+    if local_followup_continuity:
+        prelim = annotate_active_source_candidates(prelim, active_source_context)
+    answer_bearing_candidate_uids = {
+        str(meta.get("chunk_uid")) for _score, meta in prelim
+        if meta.get("answers_information_need") and meta.get("chunk_uid")
+    }
     emit_status("analyze_results", "Analyse des résultats trouvés")
     before_constraints = sum(item["candidate_count"] for item in query_trace)
-    trace("retrieval", {"retrieval_ms": round((time.perf_counter() - retrieval_started) * 1000, 1), "retrieval_queries": query_trace, "idx_search_candidates": before_constraints, "after_constraint_filter": len(prelim), "candidate_fusion": {"fusion_method": "rrf" if len(query_rankings) > 1 else "single_query", "unique_candidates_before_final_pool": len(prelim)}, "initial_candidates": [{"filename": meta.get("file"), "source": meta.get("source"), "score": score, "retrieved_by": meta.get("retrieved_by"), "per_query_rank": meta.get("per_query_rank"), "per_query_score": meta.get("per_query_score"), "fusion_score": meta.get("fusion_score"), "document_metadata": meta.get("document_metadata") or {}} for score, meta in prelim[:20]], "rejected_candidates": rejected_candidates[:20]})
+    trace("retrieval", {"retrieval_ms": round((time.perf_counter() - retrieval_started) * 1000, 1), "evidence_query_variants": [{"type": kind, "query": query} for kind, query in evidence_query_variants], "answer_bearing_chunk_uids": sorted(answer_bearing_candidate_uids), "retrieval_queries": query_trace, "idx_search_candidates": before_constraints, "after_constraint_filter": len(prelim), "candidate_fusion": {"fusion_method": "rrf" if len(query_rankings) > 1 else "single_query", "unique_candidates_before_final_pool": len(prelim)}, "initial_candidates": [{"filename": meta.get("file"), "source": meta.get("source"), "score": score, "retrieved_by": meta.get("retrieved_by"), "per_query_rank": meta.get("per_query_rank"), "per_query_score": meta.get("per_query_score"), "fusion_score": meta.get("fusion_score"), "best_matching_query_type": meta.get("best_matching_query_type"), "best_matching_query": meta.get("best_matching_query"), "best_query_term_coverage": meta.get("best_query_term_coverage"), "best_topic_relation_score": meta.get("best_topic_relation_score"), "best_per_query_score": meta.get("best_per_query_score"), "best_per_query_rank": meta.get("best_per_query_rank"), "answers_information_need": meta.get("answers_information_need"), "information_need_match_score": meta.get("information_need_match_score"), "information_need_coverage": meta.get("information_need_coverage"), "best_information_need_query_variant": meta.get("best_information_need_query_variant"), "variant_aware_promotion_applied": meta.get("variant_aware_promotion_applied"), "variant_aware_promotion_reason": meta.get("variant_aware_promotion_reason"), "document_metadata": meta.get("document_metadata") or {}} for score, meta in prelim[:20]], "rejected_candidates": rejected_candidates[:20]})
     prelim_hits = len(prelim)
-    fused = fuse_contiguous_passages(prelim, gap=FUSE_ADJACENT_GAP)
+    evidence_prelim = _evidence_selection_order(prelim)
+    fused = fuse_contiguous_passages(evidence_prelim, gap=FUSE_ADJACENT_GAP)
+    fused = _protect_answer_bearing_fused_blocks(fused, answer_bearing_candidate_uids)
     blocks = clip_context_blocks(fused, max_chars=MAX_CONTEXT_CHARS, keep=FINAL_K)
     emit_status("select_passages", "Sélection des passages pertinents")
 
@@ -1932,6 +2487,7 @@ def run_answer_pipeline(
             corpus=list(getattr(idx, "corpus", []) or []),
             query=q_eff,
             semantics=orchestration_plan.query_semantics,
+            query_variants=evidence_query_variants,
             max_rounds=3,
             max_expanded_chunks=4,
             on_action=on_retrieval_action,
@@ -1941,6 +2497,10 @@ def run_answer_pipeline(
             "rounds": retrieval_rounds,
             "stop_reason": iterative_sufficiency.reason,
             "evidence_sufficient": iterative_sufficiency.sufficient,
+            "critical_structural_evidence_incomplete": iterative_sufficiency.critical_structural_evidence_incomplete,
+            "optional_structural_evidence_remaining": iterative_sufficiency.optional_structural_evidence_remaining,
+            "critical_structural_gaps": list(iterative_sufficiency.critical_structural_gaps),
+            "optional_structural_gaps": list(iterative_sufficiency.optional_structural_gaps),
             "final_evidence_chunk_uids": [meta.get("chunk_uid") for _, meta in blocks],
             "final_evidence_member_chunk_uids": [
                 member for _, meta in blocks
@@ -1954,22 +2514,28 @@ def run_answer_pipeline(
 
     gated_ok = answerability_guard(ce_scores, threshold=ANS_THRESHOLD)
     context_local = format_context_for_llm(blocks) if blocks else ""
-    overlap = keyword_overlap_count(q, context_local)
+    overlap = max((keyword_overlap_count(query, context_local) for _kind, query in evidence_query_variants), default=0)
 
     # --- NEW: Vérification de cohérence thématique du contexte ---
-    context_is_relevant = _check_context_relevance(q, context_local)
+    context_is_relevant = _check_context_relevance(q, context_local, query_variants=evidence_query_variants)
     emit_status("verify_sources", "Vérification des sources")
     evidence_decision = _evaluate_evidence(
-        q, blocks, guard_ok=bool(gated_ok), context_is_relevant=context_is_relevant, overlap=overlap,
+        q, blocks, guard_ok=bool(gated_ok), context_is_relevant=context_is_relevant, overlap=overlap, query_variants=evidence_query_variants,
     )
     evidence_mode = evidence_decision.mode
-    trace("evidence", {"evidence_mode": evidence_mode, "evidence_mode_reason": evidence_decision.reason, "context_is_relevant": evidence_decision.context_is_relevant, "context_relevance_reason": evidence_decision.context_relevance_reason, "morphological_topic_overlap": evidence_decision.morphological_topic_overlap, "guard_ok": bool(gated_ok), "strict_local_ok": evidence_mode in {"direct", "related"}, "final_context_blocks": [{"metadata": meta, "score": score, "text": meta.get("text")} for score, meta in blocks]})
+    information_need_coverage, information_need_score, information_need_variant = _final_information_need_coverage(blocks, evidence_query_variants)
+    protected_answer_bearing_uids = {
+        str(uid) for _score, meta in blocks
+        for uid in (meta.get("fused_chunk_uids") or [meta.get("chunk_uid")])
+        if uid and str(uid) in answer_bearing_candidate_uids
+    }
+    trace("evidence", {"evidence_query_variants": [{"type": kind, "query": query} for kind, query in evidence_query_variants], "requested_information_need": cross_language_decision.information_need, "information_need_coverage": information_need_coverage, "answer_coverage": information_need_score, "topic_coverage": evidence_decision.morphological_topic_overlap, "best_information_need_query_variant": information_need_variant, "answer_bearing_chunk_uids": sorted(answer_bearing_candidate_uids), "protected_answer_bearing_chunk_uids": sorted(protected_answer_bearing_uids), "answer_bearing_selection_reason": "protected_after_fusion_for_direct_information_need_match" if protected_answer_bearing_uids else "no_answer_bearing_candidate_in_final_context", "evidence_mode": evidence_mode, "evidence_mode_reason": evidence_decision.reason, "context_is_relevant": evidence_decision.context_is_relevant, "context_relevance_reason": evidence_decision.context_relevance_reason, "morphological_topic_overlap": evidence_decision.morphological_topic_overlap, "guard_ok": bool(gated_ok), "strict_local_ok": evidence_mode in {"direct", "related"}, "final_context_blocks": [{"metadata": meta, "score": score, "text": meta.get("text")} for score, meta in blocks]})
 
     # Only the evidence decision controls whether local blocks are usable.
     strict_local_ok = evidence_mode in {"direct", "related"}
     local_context_state = _classify_local_context_state(
         evidence_decision,
-        retrieval_sufficient=(iterative_sufficiency.sufficient if iterative_sufficiency is not None else None),
+        retrieval_sufficient=((not iterative_sufficiency.critical_structural_evidence_incomplete) if iterative_sufficiency is not None else None),
     )
 
     # TIER 0 amélioration: multi-query expansion si peu de hits ou faible overlap OU contexte hors sujet
@@ -2000,16 +2566,16 @@ def run_answer_pipeline(
             fused = fuse_contiguous_passages(merged, gap=FUSE_ADJACENT_GAP)
             blocks = clip_context_blocks(fused, max_chars=MAX_CONTEXT_CHARS, keep=FINAL_K)
             context_local = format_context_for_llm(blocks) if blocks else ""
-            overlap = keyword_overlap_count(q, context_local)
-            context_is_relevant = _check_context_relevance(q, context_local)
+            overlap = max((keyword_overlap_count(query, context_local) for _kind, query in evidence_query_variants), default=0)
+            context_is_relevant = _check_context_relevance(q, context_local, query_variants=evidence_query_variants)
             evidence_decision = _evaluate_evidence(
-                q, blocks, guard_ok=bool(gated_ok), context_is_relevant=context_is_relevant, overlap=overlap,
+                q, blocks, guard_ok=bool(gated_ok), context_is_relevant=context_is_relevant, overlap=overlap, query_variants=evidence_query_variants,
             )
             evidence_mode = evidence_decision.mode
             strict_local_ok = evidence_mode in {"direct", "related"}
             local_context_state = _classify_local_context_state(
                 evidence_decision,
-                retrieval_sufficient=(iterative_sufficiency.sufficient if iterative_sufficiency is not None else None),
+                retrieval_sufficient=((not iterative_sufficiency.critical_structural_evidence_incomplete) if iterative_sufficiency is not None else None),
             )
         except Exception:
             # Fallback silencieux: on garde les résultats initiaux
@@ -2017,13 +2583,27 @@ def run_answer_pipeline(
 
     # This is deliberately after all bounded structural enrichment and any
     # query expansion.  It governs local answer generation, not retrieval.
+    answerability_semantics = orchestration_plan.query_semantics if orchestration_plan else "general_document_question"
+    aspect_coverage = evaluate_aspect_coverage(
+        query=q_eff, context_text=context_local, query_semantics=answerability_semantics,
+    )
     answerability_decision: AnswerabilityDecision = evaluate_answerability(
         query=q,
         evidence_mode=evidence_mode,
         context_is_relevant=context_is_relevant,
-        evidence_sufficient=(iterative_sufficiency.sufficient if iterative_sufficiency is not None else None),
+        evidence_sufficient=((not iterative_sufficiency.critical_structural_evidence_incomplete) if iterative_sufficiency is not None else None),
         reranker_accepted=bool(gated_ok),
         blocks=[meta for _, meta in blocks],
+        requested_aspects=aspect_coverage.requested_aspects,
+        supported_aspects=aspect_coverage.supported_aspects,
+        missing_aspects=aspect_coverage.missing_aspects,
+        query_variants=[query for _kind, query in evidence_query_variants],
+    )
+    answerability_decision = _gate_answerability_on_information_need(
+        answerability_decision,
+        requested_information_need=cross_language_decision.information_need,
+        coverage=information_need_coverage,
+        query_semantics=orchestration_plan.query_semantics if orchestration_plan else None,
     )
     trace("answerability", answerability_decision.to_dict())
 
@@ -2033,8 +2613,10 @@ def run_answer_pipeline(
     retry_trace: Dict[str, Any] = {
         "retry_triggered": False,
         "retry_reason": None,
-        "missing_aspects": [],
+        "requested_aspects": aspect_coverage.requested_aspects,
+        "missing_aspects": aspect_coverage.missing_aspects,
         "preserved_anchors": [],
+        "supported_aspects": aspect_coverage.supported_aspects,
         "retry_queries": [],
         "retry_queries_rejected": [],
         "initial_evidence_chunk_uids": initial_evidence_chunk_uids,
@@ -2042,13 +2624,15 @@ def run_answer_pipeline(
         "merged_evidence_chunk_uids": initial_evidence_chunk_uids,
         "answerability_before_retry": answerability_decision.status,
         "answerability_after_retry": answerability_decision.status,
-        "supported_aspects_before_retry": [],
-        "supported_aspects_after_retry": [],
+        "supported_aspects_before_retry": aspect_coverage.supported_aspects,
+        "supported_aspects_after_retry": aspect_coverage.supported_aspects,
+        "gap_derivation_method": aspect_coverage.gap_derivation_method,
     }
     if ENABLE_INTELLIGENT_RETRY and MAX_RETRY_ROUNDS == 1 and answerability_decision.status in {"partial", "unanswerable"}:
         retry_gap = derive_retrieval_gap(
             query=q_eff, context_text=context_local, answerability=answerability_decision,
             evidence_mode=evidence_mode, evidence_reason=evidence_decision.reason,
+            query_semantics=answerability_semantics,
         )
         retry_queries, retry_rejected = build_retry_queries(
             original_user_query=q, orchestrator_query=(orchestration_plan.retrieval_query if orchestration_plan else None),
@@ -2057,9 +2641,12 @@ def run_answer_pipeline(
         )
         retry_trace.update({
             "retry_reason": retry_gap.reason,
+            "requested_aspects": retry_gap.requested_aspects,
             "missing_aspects": retry_gap.missing_aspects,
             "preserved_anchors": retry_gap.anchors,
+            "supported_aspects": retry_gap.supported_aspects,
             "supported_aspects_before_retry": retry_gap.supported_aspects,
+            "gap_derivation_method": retry_gap.gap_derivation_method,
             "retry_queries": retry_queries,
             "retry_queries_rejected": retry_rejected,
         })
@@ -2086,13 +2673,14 @@ def run_answer_pipeline(
             # thread neighbours, attachments): they are already-confirmed
             # evidence and must survive even if retry ranking omits them.
             prelim = merge_cumulative_evidence([*prelim, *blocks], retry_prelim, retry_query_count=len(retry_queries))
-            fused = fuse_contiguous_passages(prelim, gap=FUSE_ADJACENT_GAP)
+            fused = fuse_contiguous_passages(_evidence_selection_order(prelim), gap=FUSE_ADJACENT_GAP)
             blocks = clip_context_blocks(fused, max_chars=MAX_CONTEXT_CHARS, keep=FINAL_K)
             if orchestration_plan is not None:
                 blocks, retry_rounds, iterative_sufficiency = run_iterative_evidence_retrieval(
                     candidate_pool=prelim, initial_evidence=blocks,
                     corpus=list(getattr(idx, "corpus", []) or []), query=q_eff,
                     semantics=orchestration_plan.query_semantics, max_rounds=3,
+                    query_variants=evidence_query_variants,
                     max_expanded_chunks=4,
                 )
                 retrieval_rounds.extend(retry_rounds)
@@ -2100,23 +2688,38 @@ def run_answer_pipeline(
             ce_scores.extend(retry_scores)
             gated_ok = answerability_guard(ce_scores, threshold=ANS_THRESHOLD)
             context_local = format_context_for_llm(blocks) if blocks else ""
-            overlap = keyword_overlap_count(q, context_local)
-            context_is_relevant = _check_context_relevance(q, context_local)
-            evidence_decision = _evaluate_evidence(q, blocks, guard_ok=bool(gated_ok), context_is_relevant=context_is_relevant, overlap=overlap)
+            overlap = max((keyword_overlap_count(query, context_local) for _kind, query in evidence_query_variants), default=0)
+            context_is_relevant = _check_context_relevance(q, context_local, query_variants=evidence_query_variants)
+            evidence_decision = _evaluate_evidence(q, blocks, guard_ok=bool(gated_ok), context_is_relevant=context_is_relevant, overlap=overlap, query_variants=evidence_query_variants)
             evidence_mode = evidence_decision.mode
             strict_local_ok = evidence_mode in {"direct", "related"}
             local_context_state = _classify_local_context_state(
                 evidence_decision,
-                retrieval_sufficient=(iterative_sufficiency.sufficient if iterative_sufficiency is not None else None),
+                retrieval_sufficient=((not iterative_sufficiency.critical_structural_evidence_incomplete) if iterative_sufficiency is not None else None),
+            )
+            aspect_coverage = evaluate_aspect_coverage(
+                query=q_eff, context_text=context_local, query_semantics=answerability_semantics,
             )
             answerability_decision = evaluate_answerability(
                 query=q, evidence_mode=evidence_mode, context_is_relevant=context_is_relevant,
-                evidence_sufficient=(iterative_sufficiency.sufficient if iterative_sufficiency is not None else None),
+                evidence_sufficient=((not iterative_sufficiency.critical_structural_evidence_incomplete) if iterative_sufficiency is not None else None),
                 reranker_accepted=bool(gated_ok), blocks=[meta for _, meta in blocks],
+                requested_aspects=aspect_coverage.requested_aspects,
+                supported_aspects=aspect_coverage.supported_aspects,
+                missing_aspects=aspect_coverage.missing_aspects,
+                query_variants=[query for _kind, query in evidence_query_variants],
+            )
+            information_need_coverage, information_need_score, information_need_variant = _final_information_need_coverage(blocks, evidence_query_variants)
+            answerability_decision = _gate_answerability_on_information_need(
+                answerability_decision,
+                requested_information_need=cross_language_decision.information_need,
+                coverage=information_need_coverage,
+                query_semantics=orchestration_plan.query_semantics if orchestration_plan else None,
             )
             after_gap = derive_retrieval_gap(
                 query=q_eff, context_text=context_local, answerability=answerability_decision,
                 evidence_mode=evidence_mode, evidence_reason=evidence_decision.reason,
+                query_semantics=answerability_semantics,
             )
             retry_trace.update({
                 "merged_evidence_chunk_uids": [str(meta.get("chunk_uid")) for _, meta in blocks if meta.get("chunk_uid")],
@@ -2124,6 +2727,14 @@ def run_answer_pipeline(
                 "supported_aspects_after_retry": after_gap.supported_aspects,
             })
     trace("intelligent_retry", retry_trace)
+    # Final-context guard: ranking and lexical coverage cannot turn a nearby
+    # identifier into evidence for the exact requested identifier.
+    exact_entity_decision = evaluate_exact_entity_support(
+        requested_anchors=answerability_decision.requested_anchors,
+        supported_anchors=answerability_decision.supported_anchors,
+        blocks=[meta for _, meta in blocks],
+    )
+    trace("exact_entity_guard", exact_entity_decision.to_dict())
     if retry_trace["retry_triggered"]:
         trace("evidence_after_retry", {
             "evidence_mode": evidence_mode,
@@ -2146,11 +2757,54 @@ def run_answer_pipeline(
         "evidence_mode": evidence_mode,
         "local_context_state": local_context_state,
     }
+    if allowed_sources == {"email"}:
+        sources_checked = ["email"]
+    elif allowed_sources and "email" in allowed_sources and allowed_sources & {"pdf", "file"}:
+        sources_checked = ["local", "email"]
+    else:
+        sources_checked = ["local"]
+    source_answerability = {item.source: "not_checked" for item in effective_source_plan}
+    for checked_source in sources_checked:
+        if len(sources_checked) == 1:
+            source_answerability[checked_source] = answerability_decision.status
+            continue
+        source_blocks = [
+            meta for _score, meta in blocks
+            if (str(meta.get("source") or "") == "email") == (checked_source == "email")
+        ]
+        source_text = "\n".join(str(meta.get("text") or "") for meta in source_blocks)
+        if not source_text.strip():
+            source_answerability[checked_source] = "unanswerable"
+            continue
+        source_match = _best_evidence_variant(source_text, evidence_query_variants)
+        source_need_status, _source_need_score = _information_need_match(
+            source_match.get("query") or q_eff, source_text,
+        )
+        source_answerability[checked_source] = (
+            "answerable" if source_match["direct"] and source_need_status == "complete"
+            else "partial" if source_match["direct"] or source_need_status == "partial"
+            else "unanswerable"
+        )
+    next_source_action = decide_next_source_action(
+        answerability=answerability_decision.status,
+        clarification_needed=False,
+        current_sources_checked=sources_checked,
+        source_plan=effective_source_plan,
+        max_source_expansions=_RUNTIME_SETTINGS.retrieval.max_source_expansions,
+    ) if effective_source_plan else ("STOP_AND_ANSWER" if answerability_decision.status == "answerable" else "ABSTAIN")
 
     # --- Choix du mode (règle déterministe actu ⇒ web_live, hors sujet ⇒ general) ---
     if mode_in in {"local", "web_index"}:
         # Explicit local/indexed-source modes are never overridden by a plan.
         route_mode = "strict_local"
+    elif mode_in == "auto" and next_source_action == "SEARCH_WEB" and local_context_state != "irrelevant":
+        route_mode = "multi_source"
+    elif (
+        mode_in == "auto" and next_source_action == "USE_GENERAL"
+        and local_context_state != "irrelevant"
+        and _RUNTIME_SETTINGS.multi_source.allow_general_complement
+    ):
+        route_mode = "multi_source_general"
     elif mode_in == "auto" and local_context_state != "irrelevant":
         # Any useful local evidence wins over an automatic Web fallback,
         # including evidence that cannot settle the exact requested case.
@@ -2165,6 +2819,8 @@ def run_answer_pipeline(
         # A documentary request with insufficient local evidence must not
         # silently become a general-knowledge technical answer.
         route_mode = "strict_local"
+    elif mode_in == "auto" and next_source_action == "SEARCH_WEB":
+        route_mode = "web_live"
     else:
         # With irrelevant local context, the router may select Web for a
         # public/Web-suitable question; it cannot do so for partial evidence.
@@ -2184,6 +2840,7 @@ def run_answer_pipeline(
         "strict_local_ok": strict_local_ok,
         "local_context_state": local_context_state,
         **answerability_decision.to_dict(),
+        **exact_entity_decision.to_dict(),
         "guard_ok": bool(gated_ok),
         "hits": len(prelim),
         "final_context_block_count": len(blocks),
@@ -2194,16 +2851,64 @@ def run_answer_pipeline(
     # ------ Cache court (intègre le route_mode) ------
     rag_context_hash = hashlib.sha256((context_local or "").encode("utf-8")).hexdigest()
     rag_chunk_uids = [str(meta.get("chunk_uid") or f"{meta.get('document_id')}:{meta.get('chunk_id')}") for _, meta in blocks]
+    structured_match = match_structured_values(q_eff, [meta for _score, meta in blocks])
+    sources_skipped = [
+        {"source": item.source, "reason": "not_needed_or_not_reached"}
+        for item in effective_source_plan if item.source not in sources_checked
+    ]
     validations["response_format"] = orchestration_plan.response_format if orchestration_plan else "normal"
     validations["retrieval_query"] = q_eff
     validations["answerability"] = answerability_decision.to_dict()
+    validations["exact_entity_guard"] = exact_entity_decision.to_dict()
     validations["intelligent_retry"] = retry_trace
+    validations.update({
+        "clarification_needed": False,
+        "clarification_reason": orchestration_plan.clarification_reason if orchestration_plan else None,
+        "missing_information": orchestration_plan.missing_information if orchestration_plan else [],
+        "ambiguity_level": orchestration_plan.ambiguity_level if orchestration_plan else "none",
+        "source_plan": [item.model_dump(mode="json") for item in effective_source_plan],
+        "sources_checked": sources_checked,
+        "sources_skipped": sources_skipped,
+        "active_source_context": active_source_context.to_dict(),
+        "source_answerability": source_answerability,
+        "source_expansion_triggered": len(sources_checked) > 1,
+        "source_expansion_reason": "planned_required_or_insufficient_primary_source" if len(sources_checked) > 1 else None,
+        "next_source_action": next_source_action,
+        "multi_source_used": len(sources_checked) > 1,
+        **structured_match,
+    })
     validations["evidence_provenance"] = {
-        "evidence_sufficient": bool(iterative_sufficiency.sufficient) if iterative_sufficiency is not None else bool(strict_local_ok),
+        "evidence_sufficient": (not iterative_sufficiency.critical_structural_evidence_incomplete) if iterative_sufficiency is not None else bool(strict_local_ok),
+        "critical_structural_evidence_incomplete": iterative_sufficiency.critical_structural_evidence_incomplete if iterative_sufficiency is not None else False,
+        "optional_structural_evidence_remaining": iterative_sufficiency.optional_structural_evidence_remaining if iterative_sufficiency is not None else False,
         "evidence_chunk_uids": rag_chunk_uids,
         "evidence_document_ids": sorted({str(meta.get("document_id")) for _, meta in blocks if meta.get("document_id")}),
         "anchor_documents": retrieval_rounds[0].get("anchor_documents", []) if retrieval_rounds else [],
     }
+    table_clarification = structured_clarification(
+        q_eff,
+        structured_match,
+        enabled=bool(_RUNTIME_SETTINGS.clarification.enable),
+    )
+    if table_clarification and (
+        not _RUNTIME_SETTINGS.clarification.blocking_only
+        or table_clarification["ambiguity_level"] == "blocking"
+    ):
+        validations.update(table_clarification)
+        validations["next_source_action"] = "ASK_CLARIFICATION"
+        trace("source_execution", {
+            "sources_checked": sources_checked,
+            "sources_skipped": sources_skipped,
+            "source_answerability": source_answerability,
+            "next_source_action": "ASK_CLARIFICATION",
+            "structured_match": True,
+            "structured_match_details": structured_match.get("structured_match_details", []),
+        })
+        return finalize_result(_result(
+            answer=table_clarification["clarification_question"],
+            sources=[], mode="CLARIFICATION", ctx_len=len(context_local or ""),
+            request_id=request_id, route_mode="clarification", validations=validations,
+        ))
     history_hash = _stable_hash(hist)
     cache_conversation_id = chat_id or (body.thread_id or "").strip()
     reply_to_cache_value = ({
@@ -2211,7 +2916,7 @@ def run_answer_pipeline(
     } if body.reply_to else None)
     # The web context is fetched after this point, so it cannot safely share a
     # final-answer cache entry before its actual context is known.
-    cache_enabled = bool(cache_conversation_id) and route_mode != "web_live"
+    cache_enabled = bool(cache_conversation_id) and route_mode not in {"web_live", "multi_source"}
     ck = _cache_key(
         conversation_id=cache_conversation_id, q=q, mode_in=mode_in, route_mode=route_mode,
         reply_to=reply_to_cache_value, history_hash=history_hash, rag_context_hash=rag_context_hash,
@@ -2234,14 +2939,18 @@ def run_answer_pipeline(
         return finalize_result(_result(**cached, route_mode=route_mode))
 
     # -------- Verrou post-maths + RESPECT strict du route_mode --------
+    structured_value_note = (
+        "VALEUR_STRUCTUREE: toute valeur marquee [computed] est calculee par le fichier; indique explicitement son origine calculee.\n"
+        if structured_match.get("value_origin") == "computed" else ""
+    )
     if sess.get("no_context_once"):
         context_for_llm = reply_preamble
         use_strict = False
         sess["no_context_once"] = False
         SESSIONS[thread_id] = sess
     else:
-        if route_mode == "strict_local":
-            context_for_llm = reply_preamble + (context_local or "")
+        if route_mode in {"strict_local", "multi_source", "multi_source_general"}:
+            context_for_llm = reply_preamble + structured_value_note + (context_local or "")
             use_strict = True
         elif route_mode == "web_live":
             # on posera le contexte après la recherche web
@@ -2255,6 +2964,54 @@ def run_answer_pipeline(
     # ------------------- Exécution selon le mode -------------------
     web_sources_list: List[Dict[str, str]] = []
     mode_label = "GENERAL(no-context)"  # défaut
+
+    # Complementary Web evidence runs only after local answerability. Model it
+    # as another cited block so existing generation/citation contracts remain.
+    if route_mode == "multi_source":
+        emit_status("search_web", "Recherche complémentaire sur internet")
+        try:
+            web_text = _with_timeout(
+                web_search_context, q_eff, max_chars=WEB_MAX_CHARS,
+                k=WEB_RESULT_K, timeout=WEB_TIMEOUT_SEC,
+            ) or ""
+        except Exception:
+            web_text = ""
+        web_sources_list = _parse_web_links(web_text)
+        if web_text.strip():
+            web_url = web_sources_list[0]["url"] if web_sources_list else "web://live-search"
+            blocks = [*blocks, (0.0, {
+                "text": web_text, "file": web_url, "path": web_url,
+                "chunk_id": -1, "chunk_uid": "web-live-context",
+                "document_id": "web-live-context", "source": "web",
+            })]
+            context_for_llm = reply_preamble + structured_value_note + format_context_for_llm(blocks)
+            web_match = _best_evidence_variant(web_text, evidence_query_variants)
+            web_need_status, _web_need_score = _information_need_match(
+                web_match.get("query") or q_eff, web_text,
+            )
+            source_answerability["web"] = (
+                "answerable" if web_match["direct"] and web_need_status == "complete"
+                else "partial" if web_match["direct"] or web_need_status == "partial"
+                else "unanswerable"
+            )
+            sources_checked.append("web")
+            mode_label = "STRICT(multi-source)"
+        else:
+            source_answerability["web"] = "unanswerable"
+            mode_label = "STRICT(local)"
+        use_strict = True
+
+    if route_mode == "multi_source_general":
+        if "general" not in sources_checked:
+            sources_checked.append("general")
+        # General knowledge can satisfy only the separately requested generic
+        # explanation. It cannot repair an unsupported internal fact.
+        source_answerability["general"] = (
+            "answerable" if answerability_decision.status == "answerable" else "partial"
+        )
+        context_for_llm = reply_preamble + structured_value_note + (context_local or "")
+        use_strict = True
+        mode_label = "STRICT(multi-source+general)"
 
     # A) web_live
     if route_mode == "web_live":
@@ -2316,7 +3073,7 @@ def run_answer_pipeline(
                 response_cache.set(ck, out)
             return finalize_result(_result(**out, request_id=request_id, route_mode=route_mode, validations=validations))
 
-        context_for_llm = reply_preamble + context_local
+        context_for_llm = reply_preamble + structured_value_note + context_local
         use_strict = True
         mode_label = "STRICT(local)"
 
@@ -2329,13 +3086,29 @@ def run_answer_pipeline(
     # ===================== Appel LLM principal =====================
     try:
         generation_started = time.perf_counter()
+        generation_answerability = answerability_decision.status
+        if route_mode in {"multi_source", "multi_source_general"}:
+            generation_answerability = (
+                "answerable" if any(value == "answerable" for value in source_answerability.values())
+                else "partial" if any(value == "partial" for value in source_answerability.values())
+                else "unanswerable"
+            )
+        generation_source_options = (
+            {"allow_general_complement": True}
+            if route_mode == "multi_source_general" and _RUNTIME_SETTINGS.multi_source.allow_general_complement
+            else {}
+        )
         trace("generation_input", {"generation_mode": mode_label, "question": q, "context_length": len(context_for_llm or ""), "context": context_for_llm, "provider": _RUNTIME_SETTINGS.generation.provider, "model": _RUNTIME_SETTINGS.generation.model, "reasoning_effort": _RUNTIME_SETTINGS.generation.reasoning_effort, "configured_temperature": _RUNTIME_SETTINGS.generation.strict_temperature if use_strict else _RUNTIME_SETTINGS.generation.temperature, "configured_top_p": _RUNTIME_SETTINGS.generation.strict_top_p if use_strict else _RUNTIME_SETTINGS.generation.top_p, "rag_context_hash": rag_context_hash, "rag_chunk_uids": rag_chunk_uids, "system_prompt": "constructed by rag_core.llm from generation mode and evidence mode", "evidence_mode": evidence_mode if use_strict else "none"})
         set_stage("generation")
         generated = _generate_answer(
             q, context_for_llm, history=hist, token_sink=token_sink, artifact_sink=artifact_sink, progress_sink=emit_status,
             evidence_mode="web_live" if route_mode == "web_live" else (evidence_mode if use_strict else "none"),
-            answerability=(answerability_decision.status if use_strict and route_mode == "strict_local" else "answerable"),
+            answerability=(generation_answerability if use_strict and route_mode in {"strict_local", "multi_source", "multi_source_general"} else "answerable"),
+            exact_entity_guard=exact_entity_decision.guard_applied,
+            missing_exact_entities=list(exact_entity_decision.missing_exact_entities),
+            related_evidence_only=bool(exact_entity_decision.related_only_entities),
             response_format="email_draft" if email_draft_requested else "normal",
+            **generation_source_options,
         )
         trace("generation", {"generation_total_ms": round((time.perf_counter() - generation_started) * 1000, 1), "first_token_ms": None if token_sink is None else None})
         # The citation tail is private metadata. Keep it out of the answer
@@ -2361,16 +3134,18 @@ def run_answer_pipeline(
     if ENABLE_POST_GENERATION_REVIEW and ENABLE_FAITHFULNESS_CHECK:
         try:
             # Déterminer le contexte pour la vérification (local strict ou web strict)
-            if route_mode == "strict_local":
+            if route_mode in {"strict_local", "multi_source", "multi_source_general"}:
                 context_for_check = context_local or ""
+                if route_mode == "multi_source":
+                    context_for_check = format_context_for_llm(blocks)
             elif route_mode == "web_live":
                 # web_text peut ne pas exister si pas de branche web; utiliser locals() pour vérifier
                 context_for_check = locals().get("web_text", "") or ""
 
             # Si demandé en strict only, ne vérifier que quand on a un contexte strict
-            should_check_here = (not FAITHFULNESS_STRICT_ONLY) or (route_mode in {"strict_local", "web_live"})
+            should_check_here = (not FAITHFULNESS_STRICT_ONLY) or (route_mode in {"strict_local", "web_live", "multi_source", "multi_source_general"})
             if should_check_here and (context_for_check.strip()):
-                if route_mode == "strict_local":
+                if route_mode in {"strict_local", "multi_source", "multi_source_general"}:
                     evidence_blocks = [dict(block[1]) for block in blocks]
                 else:
                     evidence_blocks = [{
@@ -2395,7 +3170,7 @@ def run_answer_pipeline(
             pass
 
     # ===================== Sources à renvoyer =====================
-    if use_strict and context_for_llm and web_sources_list:
+    if use_strict and route_mode == "web_live" and context_for_llm and web_sources_list:
         # web strict
         selected_web_indices, web_citation_map = select_web_source_indices(len(web_sources_list), citations_idx)
         answer = remap_inline_citations(answer, web_citation_map)
@@ -2411,6 +3186,116 @@ def run_answer_pipeline(
 
     if not sources:
         answer = remap_inline_citations(answer, {})
+
+    def claim_source_type(source: Dict[str, Any]) -> str:
+        source_kind = str(source.get("type") or "").casefold()
+        path = str(source.get("path") or source.get("origin_path") or source.get("indexed_path") or "")
+        if path.startswith(("http://", "https://", "web://")):
+            return "web"
+        if source_kind == "email" or "email" in source_kind:
+            return "email"
+        return "local"
+
+    claim_sources = [
+        {
+            "claim": f"citation:{index}",
+            "source_type": claim_source_type(source),
+            "source_id": source.get("document_id") or source.get("path") or source.get("origin_path") or source.get("indexed_path"),
+            "support_level": "direct" if use_strict else "general",
+            "citation_required": use_strict,
+            "confidence": 1.0 if use_strict else 0.6,
+        }
+        for index, source in enumerate(sources, start=1)
+    ]
+    if route_mode == "multi_source_general":
+        claim_sources.append({
+            "claim": "general_explanation",
+            "source_type": "general",
+            "source_id": "model_general_knowledge",
+            "support_level": "general",
+            "citation_required": False,
+            "confidence": 0.6,
+        })
+    combined_source_answerability = (
+        "answerable" if any(value == "answerable" for value in source_answerability.values())
+        else "partial" if any(value == "partial" for value in source_answerability.values())
+        else "unanswerable"
+    )
+    next_source_action = decide_next_source_action(
+        answerability=combined_source_answerability,
+        clarification_needed=False,
+        current_sources_checked=sources_checked,
+        source_plan=effective_source_plan,
+        max_source_expansions=_RUNTIME_SETTINGS.retrieval.max_source_expansions,
+    ) if effective_source_plan else (
+        "STOP_AND_ANSWER" if combined_source_answerability == "answerable"
+        else "ANSWER_PARTIAL" if combined_source_answerability == "partial"
+        else "ABSTAIN"
+    )
+    sources_skipped = [
+        {"source": item.source, "reason": "not_needed_or_not_reached"}
+        for item in effective_source_plan if item.source not in sources_checked
+    ]
+    plan_priority = {item.source: item.priority for item in effective_source_plan}
+    source_results = []
+    for source_kind in sources_checked:
+        def belongs_to_source(meta: Dict[str, Any]) -> bool:
+            native = str(meta.get("source") or "")
+            if source_kind == "email":
+                return native == "email"
+            if source_kind == "web":
+                return native == "web"
+            if source_kind == "local":
+                return native not in {"email", "web"}
+            return False
+
+        source_block_ids = [
+            str(meta.get("chunk_uid") or meta.get("document_id") or "")
+            for _score, meta in blocks if belongs_to_source(meta)
+        ]
+        state = source_answerability.get(source_kind, "not_checked")
+        source_claims = [
+            item["claim"] for item in claim_sources if item["source_type"] == source_kind
+        ]
+        source_results.append({
+            "source_type": source_kind,
+            "source_confidence": 1.0 if state == "answerable" else 0.6 if state == "partial" else 0.0,
+            "evidence_blocks": [value for value in source_block_ids if value],
+            "supported_claims": source_claims,
+            "unsupported_claims": [] if state == "answerable" else [cross_language_decision.information_need] if cross_language_decision.information_need else [],
+            "freshness": "live" if source_kind == "web" else None,
+            "source_priority": plan_priority.get(source_kind),
+        })
+    validations.update({
+        "sources_checked": sources_checked,
+        "sources_skipped": sources_skipped,
+        "source_skip_reason": {item["source"]: item["reason"] for item in sources_skipped},
+        "source_answerability": source_answerability,
+        "unanswerable_from_current_sources": combined_source_answerability == "unanswerable",
+        "source_expansion_triggered": len(sources_checked) > 1,
+        "source_expansion_reason": "planned_required_or_insufficient_primary_source" if len(sources_checked) > 1 else None,
+        "multi_source_used": len(sources_checked) > 1,
+        "next_source_action": next_source_action,
+        "claim_sources": claim_sources,
+        "source_results": source_results,
+        **match_structured_values(q_eff, [meta for _score, meta in blocks]),
+    })
+    trace("source_execution", {
+        "sources_checked": sources_checked,
+        "sources_skipped": validations.get("sources_skipped", []),
+        "source_skip_reason": validations.get("source_skip_reason", {}),
+        "source_answerability": source_answerability,
+        "unanswerable_from_current_sources": combined_source_answerability == "unanswerable",
+        "source_expansion_triggered": len(sources_checked) > 1,
+        "source_expansion_reason": validations.get("source_expansion_reason"),
+        "next_source_action": next_source_action,
+        "multi_source_used": len(sources_checked) > 1,
+        "claim_sources": claim_sources,
+        "source_results": source_results,
+        "structured_match": validations.get("structured_match", False),
+        "structured_match_details": validations.get("structured_match_details", []),
+        "value_origin": validations.get("value_origin"),
+    })
 
     # Contrat API conservé : lorsque les post-checks sont désactivés, la revue
     # reste neutre et aucun travail n'est exécuté après la génération.

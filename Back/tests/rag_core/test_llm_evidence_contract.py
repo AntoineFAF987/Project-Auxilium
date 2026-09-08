@@ -69,3 +69,17 @@ def test_streaming_strict_prompt_keeps_the_same_partial_evidence_contract():
     assert "ordre chronologique" in prompt
     assert "related evidence" in prompt
     assert 'réponds exactement : "Je ne sais pas"' not in prompt
+
+
+def test_general_complement_keeps_internal_facts_grounded_and_uncited():
+    captured = {}
+    with patch("rag_core.llm.generate_from_payload", side_effect=lambda payload: captured.update(payload) or "ok"):
+        assert ask_mistral_with_context(
+            "Quel est le prix et a quoi sert ce produit ?", CONTEXT, history=[],
+            evidence_mode="direct", allow_general_complement=True,
+        ) == "ok"
+
+    prompt = _system_message(captured)
+    assert "Exception multi-source" in prompt
+    assert "faits propres a l'entreprise" in prompt
+    assert "ne lui attribue aucune citation documentaire" in prompt

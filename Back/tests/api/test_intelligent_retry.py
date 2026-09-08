@@ -1,4 +1,5 @@
 import sys
+import sys
 import types
 from pathlib import Path
 
@@ -24,9 +25,12 @@ def _decision(query, text, mode="direct", relevant=True):
     )
 
 
-def _retry(query, text, mode="direct", relevant=True, resolved=None):
+def _retry(query, text, mode="direct", relevant=True, resolved=None, semantics="general_document_question"):
     decision = _decision(query, text, mode, relevant)
-    gap = derive_retrieval_gap(query=query, context_text=text, answerability=decision, evidence_mode=mode)
+    gap = derive_retrieval_gap(
+        query=query, context_text=text, answerability=decision,
+        evidence_mode=mode, query_semantics=semantics,
+    )
     queries, rejected = build_retry_queries(
         original_user_query=query, orchestrator_query=query,
         resolved_retrieval_query=resolved or query, gap=gap,
@@ -42,6 +46,16 @@ def test_answerable_question_does_not_need_retry_gap():
     assert queries == []
 
 
+def test_all_requested_aspects_supported_produces_no_gap():
+    decision, gap, queries, _ = _retry(
+        "Is HV02 NACE certified and what are its temperature limits?",
+        "HV02 has NACE certification and operating temperature limits.",
+    )
+    assert decision.status == "answerable"
+    assert gap.missing_aspects == []
+    assert queries == []
+
+
 def test_partial_question_targets_only_missing_aspect_and_keeps_initial_evidence():
     query = "Is HV02 NACE certified and what are its temperature limits?"
     decision, gap, queries, _ = _retry(query, "HV02 is NACE certified.", mode="related")
@@ -54,15 +68,65 @@ def test_partial_question_targets_only_missing_aspect_and_keeps_initial_evidence
     assert {meta["chunk_uid"] for _, meta in merged} == {"nace", "temp"}
 
 
+def test_requested_minus_supported_keeps_nace_and_targets_temperature_only():
+    decision, gap, queries, _ = _retry(
+        "Is 82.7 HV02 NACE certified and what are its temperature limits?",
+        "82.7 HV02 is certified according to NACE.", mode="related",
+    )
+    assert gap.requested_aspects == ["operating temperature limits", "NACE certification"]
+    assert gap.supported_aspects == ["NACE certification"]
+    assert gap.missing_aspects == ["operating temperature limits"]
+    assert gap.anchors == ["82.7", "HV02"]
+    assert queries == ["82.7 HV02 operating temperature limits"]
+    assert gap.gap_derivation_method == "requested_minus_supported"
+
+
+def test_decision_pending_evidence_targets_final_outcome_not_subject_rewrite():
+    query = "Is the request approved?"
+    decision, gap, queries, _ = _retry(
+        query, "The request was submitted and the decision is pending.",
+        mode="related", semantics="decision",
+    )
+    assert "final decision / approval status" in gap.missing_aspects
+    assert query not in gap.missing_aspects
+    assert "decision pending" in gap.supported_aspects
+    assert gap.gap_derivation_method == "decision_semantics_missing_final_outcome"
+    assert queries and "final decision" in queries[0]
+
+
+def test_current_state_with_old_evidence_targets_latest_state():
+    decision, gap, queries, _ = _retry(
+        "What is the current status of the case?", "The previous status was pending.",
+        mode="related", semantics="current_state",
+    )
+    assert gap.missing_aspects == ["latest/current state"]
+    assert gap.gap_derivation_method == "current_state_semantics_missing_latest_state"
+
+
+def test_unknown_gap_never_falls_back_to_the_original_query():
+    query = "Antoine asks whether he may leave the territory. What should I reply?"
+    decision = _decision(query, "The request was submitted and is pending.", mode="related")
+    gap = derive_retrieval_gap(
+        query=query, context_text="The request was submitted and is pending.",
+        answerability=decision, evidence_mode="related",
+    )
+    assert query not in gap.missing_aspects
+    assert gap.missing_aspects == []
+
+
 def test_technical_anchor_hv02_is_never_replaced_by_hv01():
-    _, gap, queries, _ = _retry("HV02 temperature limits", "HV01 temperature limits", mode="related")
+    _, gap, queries, _ = _retry(
+        "HV02 NACE certification and temperature limits", "HV01 NACE certification.", mode="related",
+    )
     assert "HV02" in gap.anchors
     assert queries and all("hv02" in item.casefold() for item in queries)
     assert all("hv01" not in item.casefold() for item in queries)
 
 
 def test_exact_type_2420_survives_neighbouring_2422_evidence():
-    _, _gap, queries, _ = _retry("What are type 2420 technical limits?", "Type 2422 technical limits", mode="related")
+    _, _gap, queries, _ = _retry(
+        "Type 2420 NACE certification and temperature limits", "Type 2422 NACE certification.", mode="related",
+    )
     assert queries and all("2420" in item for item in queries)
     assert all("2422" not in item for item in queries)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -18,6 +19,199 @@ def _obviously_duplicate(left: str, right: str) -> bool:
     if left_canonical == right_canonical:
         return True
     return bool(left_canonical and set(left_canonical.split()) == set(right_canonical.split()))
+
+
+def _specific_anchors(text: str) -> set[str]:
+    """Return exact, domain-neutral identifiers and uppercase reference groups.
+
+    These are deliberately lexical rather than product-specific: model names,
+    dimensions, versions and all-caps reference groups must survive a query
+    expansion byte-for-byte (apart from harmless surrounding whitespace).
+    """
+    anchors = set(re.findall(
+        r"\b(?:[A-Za-z]+[A-Za-z0-9-]*\d[A-Za-z0-9-]*|\d+(?:\.\d+)+|\d{2,})\b",
+        text or "",
+    ))
+    anchors.update(re.findall(r"\b[A-Z]{2,}(?:[ -][A-Z0-9]{2,})*\b", text or ""))
+    return anchors
+
+
+_FRENCH_MARKERS = {
+    "quel", "quelle", "quels", "quelles", "est", "sont", "le", "la", "les",
+    "du", "des", "pour", "avec", "dans", "cherche", "encore", "anglais", "et",
+    "temperature", "pression", "course",
+    "vanne", "actionneur", "etancheite", "certification", "limite", "plage",
+}
+_ENGLISH_MARKERS = {
+    "what", "which", "is", "are", "the", "of", "for", "with", "in", "actuator",
+    "valve", "pressure", "temperature", "dead", "band", "certification", "range",
+}
+
+
+def detect_query_language(query: str) -> str:
+    """Classify only the languages supported by the first expansion release."""
+    tokens = set(_canonical(query).split())
+    french = len(tokens & _FRENCH_MARKERS)
+    english = len(tokens & _ENGLISH_MARKERS)
+    # Diacritics are a useful tie breaker for short French technical queries.
+    has_french_diacritic = bool(re.search(r"[àâçéèêëîïôùûüÿœ]", query.casefold()))
+    if french > english or (french and has_french_diacritic):
+        return "fr"
+    if english > french:
+        return "en"
+    return "unknown"
+
+
+# A compact vocabulary of common engineering concepts, not a catalogue or a
+# product-specific glossary.  It intentionally emits search terms, never a
+# natural-language sentence or a free translation.
+_FR_DOCUMENTARY_TERMS: tuple[tuple[str, str], ...] = (
+    ("bande morte", "dead band"),
+    ("plage de reglage", "adjustment range"),
+    ("temperature maximale", "maximum temperature"),
+    ("temperature max", "maximum temperature"),
+    ("pression maximale", "maximum pressure"),
+    ("pression max", "maximum pressure"),
+    ("etancheite", "tightness"),
+    ("certification", "certification"),
+    ("materiau", "material"),
+    ("actionneurs", "actuator"),
+    ("actionneur", "actuator"),
+    ("vannes", "valve"),
+    ("vanne", "valve"),
+    ("couple", "torque"),
+    ("course", "stroke"),
+    ("pression", "pressure"),
+    ("temperature", "temperature"),
+    ("limite", "limit"),
+    ("plage", "range"),
+)
+
+
+@dataclass(frozen=True)
+class CrossLanguageQueryDecision:
+    query: str | None
+    target_language: str | None
+    rejection_reason: str | None = None
+    source_query: str | None = None
+    information_need: str | None = None
+    information_need_retained: bool = False
+    semantic_intent_retained: bool = False
+    validation_passed: bool = False
+    validation_reasons: tuple[str, ...] = ()
+    query_before_validation: str | None = None
+    query_after_validation: str | None = None
+
+
+_GENERIC_ENTITY_TERMS = frozenset({"actuator", "valve", "positioner", "device", "product", "overview"})
+_SEMANTIC_INTENT_TERMS = {
+    "procedure": frozenset({"adjustment", "setting", "procedure", "configuration", "configure", "installation", "mounting"}),
+    "decision": frozenset({"decision", "approval", "status", "accepted", "rejected"}),
+    "current_state": frozenset({"current", "latest", "status", "state"}),
+    "comparison": frozenset({"comparison", "difference", "versus"}),
+}
+
+
+def _anchor_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.casefold())
+
+
+def validate_cross_language_query(
+    *, candidate: str, anchors: set[str], query_semantics: str | None,
+) -> CrossLanguageQueryDecision:
+    """Reject a translated search query that retained only its product subject."""
+    candidate = candidate.strip()[:240]
+    candidate_anchors = {_anchor_key(value) for value in _specific_anchors(candidate)}
+    required_anchors = {_anchor_key(value) for value in anchors}
+    anchors_preserved = required_anchors.issubset(candidate_anchors)
+    terms = set(_canonical(candidate).split())
+    anchor_terms = set()
+    for anchor in anchors:
+        anchor_terms.update(_canonical(anchor).split())
+        anchor_terms.add(_anchor_key(anchor))
+    need_terms = terms - anchor_terms - _GENERIC_ENTITY_TERMS
+    semantic_terms = _SEMANTIC_INTENT_TERMS.get(query_semantics or "", frozenset())
+    semantic_retained = not semantic_terms or bool(terms & semantic_terms)
+    # Intent words are not themselves a property; a procedure still needs a
+    # documentary target in addition to "procedure" or "adjustment".
+    information_terms = need_terms - semantic_terms
+    information_retained = bool(information_terms) or (
+        query_semantics in {"procedure", "decision", "current_state"} and bool(terms & semantic_terms)
+    )
+    reasons: list[str] = []
+    if not anchors_preserved:
+        reasons.append("anchors_not_preserved")
+    if not information_retained:
+        reasons.append("information_need_lost")
+    if not semantic_retained:
+        reasons.append("semantic_intent_lost")
+    return CrossLanguageQueryDecision(
+        candidate if not reasons else None, "en", reasons[0] if reasons else None,
+        information_need=" ".join(sorted(information_terms)) or None,
+        information_need_retained=information_retained,
+        semantic_intent_retained=semantic_retained,
+        validation_passed=not reasons,
+        validation_reasons=tuple(reasons),
+        query_before_validation=candidate,
+        query_after_validation=candidate if not reasons else None,
+    )
+
+
+def evaluate_cross_language_query(
+    *, original_user_query: str, orchestrator_query: str | None,
+    detected_language: str, anchors: set[str] | None = None,
+    query_semantics: str | None = "general_document_question",
+    proposed_query: str | None = None,
+) -> CrossLanguageQueryDecision:
+    """Build at most one conservative French-to-English documentary variant."""
+    if detected_language != "fr":
+        return CrossLanguageQueryDecision(None, None, "source_language_not_french")
+    if query_semantics is None:
+        return CrossLanguageQueryDecision(None, "en", "non_documentary_query")
+
+    source = " ".join(part for part in (orchestrator_query, original_user_query) if part).strip()
+    exact_anchors = anchors if anchors is not None else _specific_anchors(source)
+    if proposed_query:
+        validated = validate_cross_language_query(
+            candidate=proposed_query, anchors=exact_anchors, query_semantics=query_semantics,
+        )
+        return CrossLanguageQueryDecision(
+            **{**validated.__dict__, "source_query": orchestrator_query or original_user_query}
+        )
+    canonical_source = _canonical(source)
+    translated: list[str] = []
+    for french, english in _FR_DOCUMENTARY_TERMS:
+        if french in canonical_source and english not in translated:
+            translated.append(english)
+    if not translated:
+        return CrossLanguageQueryDecision(None, "en", "no_supported_documentary_terms", source_query=orchestrator_query or original_user_query)
+
+    # The union makes planner rewrites additive: an anchor present only in the
+    # raw user wording cannot disappear from the English documentary query.
+    ordered_anchors = [anchor for anchor in _specific_anchors(source) if anchor in exact_anchors]
+    for anchor in sorted(exact_anchors, key=lambda value: (value.casefold(), value)):
+        if anchor not in ordered_anchors:
+            ordered_anchors.append(anchor)
+    # Search headings conventionally put the equipment/entity before the
+    # requested property ("actuator dead band", not a translated sentence).
+    entity_terms = {"actuator", "valve"}
+    translated.sort(key=lambda term: (term not in entity_terms,))
+    if query_semantics == "procedure" and "adjustment" not in translated:
+        translated.append("adjustment")
+    candidate = " ".join([*ordered_anchors, *translated]).strip()
+    if len(candidate) < 3:
+        return CrossLanguageQueryDecision(None, "en", "empty_cross_language_query", source_query=orchestrator_query or original_user_query)
+    if _obviously_duplicate(candidate, original_user_query) or (
+        orchestrator_query and _obviously_duplicate(candidate, orchestrator_query)
+    ):
+        return CrossLanguageQueryDecision(None, "en", "duplicate_existing_query", source_query=orchestrator_query or original_user_query)
+    validated = validate_cross_language_query(candidate=candidate, anchors=exact_anchors, query_semantics=query_semantics)
+    return CrossLanguageQueryDecision(**{**validated.__dict__, "source_query": orchestrator_query or original_user_query})
+
+
+def build_cross_language_query(**kwargs: Any) -> str | None:
+    """Public convenience API for callers that only need the optional query."""
+    return evaluate_cross_language_query(**kwargs).query
 
 
 def normalized_query(original: str) -> str | None:
@@ -79,7 +273,7 @@ def resolve_retrieval_query(*, raw_user_message: str, orchestrator_query: str, h
     return " ".join(part for part in (subject, additions) if part).strip()
 
 
-def build_retrieval_queries(*, original_query: str, orchestrator_query: str | None, resolved_query: str | None = None, follow_up: bool = False) -> list[tuple[str, str]]:
+def build_retrieval_queries(*, original_query: str, orchestrator_query: str | None, resolved_query: str | None = None, follow_up: bool = False, cross_language_query: str | None = None) -> list[tuple[str, str]]:
     """Build factual query variants independently of any response presentation.
 
     An autonomous user query is retained because it can contain exact anchors
@@ -101,6 +295,8 @@ def build_retrieval_queries(*, original_query: str, orchestrator_query: str | No
             ("normalized", normalized_query(standalone or original_query)),
         ]
     )
+    if cross_language_query:
+        options.append(("cross_language", cross_language_query))
     result: list[tuple[str, str]] = []
     for kind, query in options:
         if not query or len(query.strip()) < 3:
@@ -108,7 +304,7 @@ def build_retrieval_queries(*, original_query: str, orchestrator_query: str | No
         if any(_obviously_duplicate(query, existing) for _, existing in result):
             continue
         result.append((kind, query.strip()))
-    return result[:3]
+    return result[:4]
 
 
 def reciprocal_rank_fusion(

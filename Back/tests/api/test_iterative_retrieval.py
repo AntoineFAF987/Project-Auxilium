@@ -1,4 +1,5 @@
 import sys
+import sys
 import types
 from pathlib import Path
 
@@ -104,6 +105,43 @@ def test_header_only_email_expands_its_existing_body_before_generation():
     assert rounds[1]["action"]["type"] == "EXPAND"
     assert actions[0].type == "EXPAND"
     assert decision.sufficient is True
+    assert decision.critical_structural_evidence_incomplete is False
+
+
+def test_header_without_body_is_a_critical_structural_gap():
+    header = _row("email-no-body", "header-only", "Subject: Decision", blocks=[{"block_type": "email_header"}])
+    _evidence, _rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.9, header)], initial_evidence=[(0.9, header)], corpus=[header],
+        query="What decision was made in this email?", semantics="decision",
+    )
+    assert decision.critical_structural_evidence_incomplete is True
+    assert decision.critical_structural_gaps[0]["gap_type"] == "email_header_only"
+
+
+def test_optional_old_email_does_not_block_new_direct_decision():
+    old = _row("old", "old-body", "The decision is pending.", date="2026-08-01T00:00:00Z")
+    recent = _row("recent", "recent-body", "The request is approved.", date="2026-08-28T00:00:00Z")
+    old_extra = _row("old", "old-extra", "Signature", date="2026-08-01T00:00:00Z", order=1)
+    _evidence, _rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.9, recent), (0.7, old)], initial_evidence=[(0.9, recent), (0.7, old)],
+        corpus=[recent, old, old_extra], query="What is the final decision?", semantics="decision",
+    )
+    assert decision.critical_structural_evidence_incomplete is False
+    assert decision.optional_structural_evidence_remaining is True
+
+
+def test_newer_uninspected_decision_lead_is_critical():
+    old = _row("request", "old", "Project Atlas decision was pending.", date="2026-08-01T00:00:00Z")
+    newer = _row("newer", "newer-header", "Project Atlas", date="2026-08-28T00:00:00Z", blocks=[{"block_type": "email_header"}])
+    _evidence, _rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.9, old), (0.8, newer)], initial_evidence=[(0.9, old)],
+        corpus=[old, newer], query="What is the final decision for Project Atlas?",
+        semantics="decision", max_rounds=1,
+    )
+    assert decision.critical_structural_evidence_incomplete is True
+    assert any(item["criticality_reason"] == "newer_state_resolution_required" for item in decision.critical_structural_gaps)
+
+
 
 
 def test_august_email_header_expansion_places_the_body_in_final_context():

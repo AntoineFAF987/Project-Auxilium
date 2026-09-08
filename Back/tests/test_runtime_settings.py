@@ -26,6 +26,7 @@ class RuntimeSettingsLoadingTests(unittest.TestCase):
         self.assertEqual(settings.retrieval.mmr_lambda, 0.7)
         self.assertEqual(settings.retrieval.max_retry_rounds, 1)
         self.assertEqual(settings.retrieval.max_retry_queries, 2)
+        self.assertEqual(settings.retrieval.max_source_expansions, 2)
         self.assertEqual(settings.generation.model, "mistral-small-latest")
         self.assertEqual(settings.generation.temperature, 0.6)
         self.assertEqual(settings.generation.strict_temperature, 0.45)
@@ -33,6 +34,10 @@ class RuntimeSettingsLoadingTests(unittest.TestCase):
         self.assertFalse(settings.features.enable_post_generation_review)
         self.assertFalse(settings.features.enable_faithfulness_check)
         self.assertTrue(settings.features.enable_intelligent_retry)
+        self.assertTrue(settings.features.enable_multi_source_orchestration)
+        self.assertTrue(settings.clarification.enable)
+        self.assertTrue(settings.clarification.blocking_only)
+        self.assertTrue(settings.multi_source.allow_general_complement)
         self.assertFalse(settings.orchestrator.enabled)
 
     def test_config_file_values_override_defaults(self):
@@ -44,7 +49,11 @@ class RuntimeSettingsLoadingTests(unittest.TestCase):
                     "retrieve_k": 7,
                     "hybrid_alpha": 0.55,
                     "exact_match_bonus": 0.2,
+                    "max_source_expansions": 1,
                 },
+                "features": {"enable_multi_source_orchestration": False},
+                "clarification": {"enable": False, "blocking_only": False},
+                "multi_source": {"allow_general_complement": False},
                 "rag_params": {"faithfulness_threshold": 0.66},
                 "llm": {
                     "provider": "mistral",
@@ -59,6 +68,11 @@ class RuntimeSettingsLoadingTests(unittest.TestCase):
         self.assertEqual(settings.retrieval.retrieve_k, 7)
         self.assertEqual(settings.retrieval.hybrid_alpha, 0.55)
         self.assertEqual(settings.retrieval.exact_match_bonus, 0.2)
+        self.assertEqual(settings.retrieval.max_source_expansions, 1)
+        self.assertFalse(settings.features.enable_multi_source_orchestration)
+        self.assertFalse(settings.clarification.enable)
+        self.assertFalse(settings.clarification.blocking_only)
+        self.assertFalse(settings.multi_source.allow_general_complement)
         self.assertEqual(settings.thresholds.faithfulness, 0.66)
         self.assertEqual(settings.generation.model, "custom-model")
         self.assertEqual(settings.generation.temperature, 0.3)
@@ -68,12 +82,25 @@ class RuntimeSettingsLoadingTests(unittest.TestCase):
         from runtime_settings import load_runtime_settings
 
         settings = load_runtime_settings(
-            config_data={"orchestrator": {"enabled": True, "model": "planner-model", "timeout": 7}},
+            config_data={"orchestrator": {"enabled": True, "model": "planner-model", "timeout_seconds": 25, "slow_warning_seconds": 10, "reasoning_effort": "low", "max_output_tokens": 420}},
             env={},
         )
         self.assertTrue(settings.orchestrator.enabled)
         self.assertEqual(settings.orchestrator.model, "planner-model")
-        self.assertEqual(settings.orchestrator.timeout, 7)
+        self.assertEqual(settings.orchestrator.timeout_seconds, 25)
+        self.assertEqual(settings.orchestrator.slow_warning_seconds, 10)
+        self.assertEqual(settings.orchestrator.reasoning_effort, "low")
+        self.assertEqual(settings.orchestrator.max_output_tokens, 420)
+
+    def test_orchestrator_execution_thresholds_can_be_overridden_by_environment(self):
+        from runtime_settings import load_runtime_settings
+
+        settings = load_runtime_settings(
+            config_data={"orchestrator": {"timeout_seconds": 25, "slow_warning_seconds": 10}},
+            env={"AUXILIUM_ORCHESTRATOR_TIMEOUT_SECONDS": "40", "AUXILIUM_ORCHESTRATOR_SLOW_WARNING_SECONDS": "12"},
+        )
+        self.assertEqual(settings.orchestrator.timeout_seconds, 40)
+        self.assertEqual(settings.orchestrator.slow_warning_seconds, 12)
 
     def test_environment_values_override_the_config_file(self):
         from runtime_settings import load_runtime_settings

@@ -40,6 +40,24 @@ def test_plan_requires_standalone_query_for_retrieval():
         })
 
 
+def test_source_plan_requires_an_executable_retrieval_source():
+    with pytest.raises(ValueError):
+        OrchestrationPlan(
+            intent="document_question", needs_retrieval=True,
+            retrieval_query="internal price", response_strategy="answer",
+            source_plan=[{"source": "general", "priority": 1}],
+        )
+
+
+def test_non_retrieval_plan_cannot_schedule_document_search():
+    with pytest.raises(ValueError):
+        OrchestrationPlan(
+            intent="general_question", needs_retrieval=False,
+            response_strategy="general_answer",
+            source_plan=[{"source": "local", "priority": 1}],
+        )
+
+
 def test_invalid_provider_json_is_rejected_for_safe_fallback():
     with pytest.raises(OrchestrationPlanOutputError):
         plan_once("Question", [], lambda *_args, **_kwargs: "not json", model=None, timeout=1)
@@ -62,6 +80,45 @@ def test_json_only_retry_accepts_valid_repair_after_truncated_planner_output():
     assert plan.needs_retrieval is True
     assert "Return ONLY one valid JSON object" in captured[0]
     assert "Pourquoi tu n'étudies pas le contenu du mail ?" in build_json_repair_prompt("Pourquoi tu n'étudies pas le contenu du mail ?", [])
+
+
+def test_orchestration_metrics_measure_prompt_provider_parse_and_validation():
+    raw = json.dumps({
+        "intent": "general_question", "needs_retrieval": False,
+        "response_strategy": "general_answer",
+    })
+    captured = {}
+
+    def call(_prompt, **kwargs):
+        captured.update(kwargs)
+        return raw
+
+    plan = plan_once(
+        "Explain REST APIs", [{"role": "user", "content": "A short earlier question."}], call,
+        model="planner", timeout=25, reasoning_effort="low", max_output_tokens=420,
+    )
+    metrics = plan._orchestration_metrics
+    assert captured["reasoning_effort"] == "low"
+    assert captured["max_tokens"] == 420
+    assert metrics["orchestrator_prompt_chars"] > 0
+    assert metrics["orchestrator_schema_chars"] > 0
+    assert metrics["orchestrator_history_turns"] == 1
+    assert metrics["orchestrator_provider_call_ms"] >= 0
+    assert metrics["orchestrator_parse_ms"] >= 0
+    assert metrics["orchestrator_validation_ms"] >= 0
+    assert metrics["orchestrator_total_ms"] >= 0
+    assert metrics["orchestrator_time_to_first_byte_ms"] is None
+    assert metrics["orchestrator_finish_reason"] is None
+
+
+def test_invalid_orchestration_output_keeps_latency_diagnostics():
+    with pytest.raises(OrchestrationPlanOutputError) as raised:
+        plan_once("Question", [], lambda *_args, **_kwargs: "{\"intent\":", model=None, timeout=25)
+    metrics = raised.value.orchestration_metrics
+    assert metrics["orchestrator_output_chars"] > 0
+    assert metrics["orchestrator_provider_call_ms"] >= 0
+    assert metrics["orchestrator_parse_ms"] >= 0
+    assert metrics["orchestrator_total_ms"] >= 0
 
 
 def test_temporal_and_sender_constraints_filter_existing_candidates():

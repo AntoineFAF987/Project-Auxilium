@@ -61,6 +61,35 @@ class SufficiencyDecision:
 
 
 Answerability = Literal["answerable", "partial", "unanswerable"]
+ExactEntitySupport = Literal["complete", "partial", "missing", "not_applicable"]
+
+
+@dataclass(frozen=True)
+class ExactEntitySupportDecision:
+    """Exact-identifier support in the final evidence, independent of ranking."""
+
+    support: ExactEntitySupport
+    requested_exact_entities: Tuple[str, ...]
+    supported_exact_entities: Tuple[str, ...]
+    missing_exact_entities: Tuple[str, ...]
+    related_only_entities: Tuple[str, ...]
+
+    @property
+    def guard_applied(self) -> bool:
+        return self.support in {"partial", "missing"}
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "exact_entity_guard_applied": self.guard_applied,
+            "exact_entity_support": self.support,
+            "requested_exact_entities": list(self.requested_exact_entities),
+            "supported_exact_entities": list(self.supported_exact_entities),
+            "missing_exact_entities": list(self.missing_exact_entities),
+            "related_only_entities": list(self.related_only_entities),
+            "exact_entity_guard_reason": (
+                "requested_exact_entities_not_in_final_evidence" if self.guard_applied else None
+            ),
+        }
 
 
 @dataclass(frozen=True)
@@ -78,6 +107,11 @@ class AnswerabilityDecision:
     requested_anchors: Tuple[str, ...]
     supported_anchors: Tuple[str, ...]
     context_sufficiency: SufficiencyDecision
+    semantic_aspect_coverage_complete: bool = False
+    aspect_coverage_ratio: float = 0.0
+    aspect_coverage_override_applied: bool = False
+    override_reason: str | None = None
+    critical_structural_evidence_incomplete: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -86,6 +120,11 @@ class AnswerabilityDecision:
             "query_term_coverage": self.query_term_coverage,
             "requested_anchors": list(self.requested_anchors),
             "supported_anchors": list(self.supported_anchors),
+            "semantic_aspect_coverage_complete": self.semantic_aspect_coverage_complete,
+            "aspect_coverage_ratio": self.aspect_coverage_ratio,
+            "aspect_coverage_override_applied": self.aspect_coverage_override_applied,
+            "override_reason": self.override_reason,
+            "critical_structural_evidence_incomplete": self.critical_structural_evidence_incomplete,
             "context_sufficiency": self.context_sufficiency.to_dict(),
         }
 
@@ -96,8 +135,15 @@ def _normalize(value: str) -> str:
 
 
 def _tokens(value: str) -> Set[str]:
-    return {
-        token for token in re.findall(r"[a-z0-9][a-z0-9_.-]*", _normalize(value))
+    # Preserve reference groups across separators: ``PS AMS`` and ``PS-AMS``
+    # are one identifier, rather than unrelated short tokens.
+    reference_groups = {
+        re.sub(r"[^a-z0-9]", "", group.casefold())
+        for group in re.findall(r"\b[A-Z]{2,}(?:[ -][A-Z0-9]{2,})*\b", value or "")
+    }
+    without_groups = re.sub(r"\b[A-Z]{2,}(?:[ -][A-Z0-9]{2,})*\b", " ", value or "")
+    return reference_groups | {
+        token for token in re.findall(r"[a-z0-9][a-z0-9_.-]*", _normalize(without_groups))
         if len(token) > 1 and token not in _STOPWORDS
     }
 
@@ -108,6 +154,37 @@ def _technical_anchors(value: str) -> Set[str]:
         token.casefold()
         for token in re.findall(r"\b(?:[A-Za-z]+[A-Za-z0-9-]*\d[A-Za-z0-9-]*|\d+(?:\.\d+)+|\d{2,})\b", value or "")
     }
+
+
+def evaluate_exact_entity_support(
+    *, requested_anchors: Sequence[str], supported_anchors: Sequence[str], blocks: Sequence[Mapping[str, Any]],
+) -> ExactEntitySupportDecision:
+    """Keep exact identifiers exact: related evidence never fills an anchor gap.
+
+    ``supported_anchors`` is reused from answerability; final block text is
+    consulted only to identify that useful evidence names other identifiers.
+    No similarity or product-specific rule is involved.
+    """
+    requested = {str(anchor).casefold() for anchor in requested_anchors if str(anchor).strip()}
+    supported = requested & {str(anchor).casefold() for anchor in supported_anchors if str(anchor).strip()}
+    missing = requested - supported
+    documented = _technical_anchors("\n".join(str(block.get("text") or "") for block in blocks))
+    related_only = missing if missing and (documented - requested) else set()
+    if not requested:
+        support: ExactEntitySupport = "not_applicable"
+    elif not missing:
+        support = "complete"
+    elif supported:
+        support = "partial"
+    else:
+        support = "missing"
+    return ExactEntitySupportDecision(
+        support=support,
+        requested_exact_entities=tuple(sorted(requested)),
+        supported_exact_entities=tuple(sorted(supported)),
+        missing_exact_entities=tuple(sorted(missing)),
+        related_only_entities=tuple(sorted(related_only)),
+    )
 
 
 def classify_evidence_intent(query: str) -> QueryEvidenceIntent:
@@ -159,7 +236,18 @@ def _coverage(query_terms: Set[str], selected_texts: Sequence[str]) -> float:
     evidence_terms: Set[str] = set()
     for text in selected_texts:
         evidence_terms.update(_tokens(text))
-    return len(query_terms & evidence_terms) / len(query_terms)
+    matched = 0
+    for term in query_terms:
+        if term in evidence_terms:
+            matched += 1
+            continue
+        if any(
+            min(len(term), len(candidate)) >= 5
+            and (term.startswith(candidate) or candidate.startswith(term))
+            for candidate in evidence_terms
+        ):
+            matched += 1
+    return matched / len(query_terms)
 
 
 def evaluate_context_sufficiency(
@@ -171,6 +259,7 @@ def evaluate_context_sufficiency(
     candidate_signals: Mapping[int, Mapping[str, Any]],
     protected_candidate_ids: Set[int] | None = None,
     intent: QueryEvidenceIntent | None = None,
+    query_variants: Sequence[str] = (),
     policy: SufficiencyPolicy = SufficiencyPolicy(),
 ) -> SufficiencyDecision:
     intent = intent or classify_evidence_intent(query)
@@ -178,7 +267,12 @@ def evaluate_context_sufficiency(
     selected_set = set(selected_ids)
     missing_protected = len(protected - selected_set)
     documents = {_document_id(metas[idx]) for idx in selected_ids}
-    coverage = _coverage(_tokens(query), [texts[idx] for idx in selected_ids])
+    # Equivalent documentary variants describe one intent. Coverage is the
+    # best evidence-language match, never the ratio over a concatenation.
+    coverage = max(
+        (_coverage(_tokens(variant), [texts[idx] for idx in selected_ids]) for variant in (query, *query_variants) if variant),
+        default=0.0,
+    )
     top_signal = candidate_signals.get(selected_ids[0], {}) if selected_ids else {}
     top_score = _signal_score(top_signal)
     top_exact = bool(float(top_signal.get("exact_match_bonus") or 0.0))
@@ -327,6 +421,10 @@ def evaluate_answerability(
     evidence_sufficient: bool | None,
     reranker_accepted: bool,
     blocks: Sequence[Mapping[str, Any]],
+    requested_aspects: Sequence[str] = (),
+    supported_aspects: Sequence[str] = (),
+    missing_aspects: Sequence[str] = (),
+    query_variants: Sequence[str] = (),
     policy: SufficiencyPolicy = SufficiencyPolicy(),
 ) -> AnswerabilityDecision:
     """Classify final local evidence as answerable, partial, or unanswerable.
@@ -350,6 +448,7 @@ def evaluate_answerability(
         metas=metas,
         texts=texts,
         candidate_signals=signals,
+        query_variants=query_variants,
         policy=policy,
     ) if texts else SufficiencyDecision(
         sufficient=False, reason="no_final_blocks", confidence=0.0,
@@ -377,10 +476,32 @@ def evaluate_answerability(
     if not reranker_accepted:
         reasons.append("reranker_guard_rejected_context")
 
+    aspect_requested = set(requested_aspects)
+    aspect_supported = set(supported_aspects)
+    semantic_complete = bool(aspect_requested) and not missing_aspects and aspect_requested.issubset(aspect_supported)
+    aspect_ratio = len(aspect_requested & aspect_supported) / len(aspect_requested) if aspect_requested else 0.0
+    # This can only waive lexical coverage. It cannot waive hard evidence,
+    # anchor, reranker, or structural safeguards.
+    aspect_override = bool(
+        semantic_complete
+        and context_is_relevant
+        and evidence_mode == "direct"
+        and reranker_accepted
+        and not missing_anchors
+        and evidence_sufficient is not False
+        and context.protected_evidence_missing == 0
+    )
+
     if not texts or evidence_mode == "none" or not context_is_relevant:
         status: Answerability = "unanswerable"
     elif evidence_mode == "related" or missing_anchors or evidence_sufficient is False:
         status = "partial"
+    elif aspect_requested and missing_aspects:
+        status = "partial"
+        reasons.append("requested_aspects_incomplete")
+    elif aspect_override:
+        status = "answerable"
+        reasons.append("all_requested_aspects_supported")
     elif context.query_term_coverage < policy.min_query_term_coverage or not reranker_accepted:
         # Relevant direct evidence remains useful, but cannot settle every
         # requested facet when coverage/reranking does not support it.
@@ -396,4 +517,9 @@ def evaluate_answerability(
         requested_anchors=tuple(sorted(requested)),
         supported_anchors=tuple(sorted(supported)),
         context_sufficiency=context,
+        semantic_aspect_coverage_complete=semantic_complete,
+        aspect_coverage_ratio=aspect_ratio,
+        aspect_coverage_override_applied=aspect_override,
+        override_reason="all_requested_aspects_supported" if aspect_override else None,
+        critical_structural_evidence_incomplete=evidence_sufficient is False,
     )

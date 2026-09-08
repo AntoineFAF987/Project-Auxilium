@@ -23,6 +23,8 @@ def ask_mistral_with_context_stream(
     evidence_mode: str = "none",
     answerability: str = "answerable",
     response_format: str = "normal",
+    allow_general_complement: bool = False,
+    grounded_transformation: bool = False,
     **kwargs,
 ) -> Iterator[str]:
     """
@@ -277,6 +279,15 @@ def ask_mistral_with_context_stream(
             ]
 
     messages = [{"role": "system", "content": " ".join(rules)}]
+    if grounded_transformation:
+        messages[0]["content"] += (
+            " Transformation fondée : réécris ou reformate UNIQUEMENT le contenu étayé fourni dans PREVIOUS_SUPPORTED_ANSWER. "
+            "N’ajoute aucun fait, aucune valeur, aucune étape, aucune procédure ni déduction. "
+            "Ne complète pas avec des connaissances générales non demandées."
+            if is_fr else
+            " Grounded transformation: rewrite or reformat ONLY the supported content in PREVIOUS_SUPPORTED_ANSWER. "
+            "Do not add facts, values, steps, procedures, or inferences. Do not supplement it with general knowledge."
+        )
     if response_format == "email_draft":
         messages[0]["content"] += (
             " Produis UNIQUEMENT un objet JSON valide, sans balise Markdown : "
@@ -324,6 +335,23 @@ def ask_mistral_with_context_stream(
             "which precise information is missing to conclude. Never infer the requested case from a neighbouring model, "
             "version, or reference."
         )
+    if kwargs.get("exact_entity_guard") and context_text and context_text.strip():
+        missing = ", ".join(str(item) for item in kwargs.get("missing_exact_entities", []) if str(item))
+        messages[0]["content"] += (
+            f" GARDE D'IDENTITE EXACTE : aucune preuve directe ne couvre {missing}. N'attribue jamais a cette entite un fait provenant d'une autre reference, version, taille ou produit. Tu peux decrire l'autre entite explicitement comme comparaison, puis dire qu'aucune preuve directe ne permet de conclure pour {missing}."
+            if is_fr else
+            f" EXACT ENTITY GUARD: no direct evidence covers {missing}. Never attribute a fact from another reference, version, size, or product to that entity. You may state the other entity explicitly as a comparison, then say there is no direct evidence to conclude for {missing}."
+        )
+    if allow_general_complement and context_text and context_text.strip():
+        messages[0]["content"] += (
+            " Exception multi-source : tu peux ajouter une explication generale uniquement pour le concept generique explicitement demande. "
+            "Tous les faits propres a l'entreprise, au produit, au prix, au dossier ou a son statut doivent rester strictement fondes sur le CONTEXTE et cites. "
+            "Separe clairement l'explication generale et ne lui attribue aucune citation documentaire."
+            if is_fr else
+            " Multi-source exception: you may add general knowledge only for the explicitly requested generic explanation. "
+            "Every company-, product-, price-, case-, or status-specific fact must remain strictly grounded in CONTEXT and cited. "
+            "Clearly separate the general explanation and do not attach a documentary citation to it."
+        )
     for m in (history or []):
         if isinstance(m, dict) and "role" in m and "content" in m:
             messages.append({"role": m["role"], "content": m["content"]})
@@ -334,7 +362,11 @@ def ask_mistral_with_context_stream(
         final_temperature = generation.temperature if temperature is None else temperature
         top_p = generation.top_p
     else:
-        user_content = f"CONTEXTE:\n{context_text}\n\nQUESTION: {question}\nConsigne: réponds factuellement à partir du CONTEXTE uniquement."
+        complement_instruction = (
+            "\nException: une explication generale distincte est autorisee, mais aucun fait specifique ne peut venir hors CONTEXTE."
+            if allow_general_complement else ""
+        )
+        user_content = f"CONTEXTE:\n{context_text}\n\nQUESTION: {question}\nConsigne: réponds factuellement à partir du CONTEXTE uniquement.{complement_instruction}"
         final_temperature = generation.strict_temperature if temperature is None else temperature
         top_p = generation.strict_top_p
 

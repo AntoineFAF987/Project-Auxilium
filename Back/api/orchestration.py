@@ -10,9 +10,11 @@ import re
 import unicodedata
 from datetime import date as CalendarDate, datetime, timezone
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any, Callable, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, field_validator, model_validator
+from .source_planner import AmbiguityLevel, SourcePlanItem
 
 
 Intent = Literal["conversation", "document_question", "refine_previous_search", "general_question", "web_search"]
@@ -74,6 +76,9 @@ class OrchestrationPlan(BaseModel):
     intent: Intent
     needs_retrieval: bool
     retrieval_query: Optional[str] = Field(default=None, min_length=3, max_length=400)
+    # Optional concise English documentary equivalent. It is advisory only:
+    # retrieval validates anchors, information need, and intent before use.
+    cross_language_retrieval_query: Optional[str] = Field(default=None, min_length=3, max_length=240)
     use_history: bool = False
     reuse_previous_subject: bool = False
     web_request_explicit: bool = False
@@ -88,9 +93,16 @@ class OrchestrationPlan(BaseModel):
     # Presentation intent is separate from retrieval intent: an email request
     # may still be a fully documentary/RAG question.
     response_format: ResponseFormat = "normal"
+    source_plan: list[SourcePlanItem] = Field(default_factory=list, max_length=5)
+    clarification_needed: bool = False
+    clarification_reason: Optional[str] = Field(default=None, max_length=300)
+    missing_information: list[str] = Field(default_factory=list, max_length=5)
+    clarification_question: Optional[str] = Field(default=None, max_length=400)
+    ambiguity_level: AmbiguityLevel = "none"
     _raw_model_output: str | None = PrivateAttr(default=None)
+    _orchestration_metrics: dict[str, Any] = PrivateAttr(default_factory=dict)
 
-    @field_validator("source_types", "temporal_constraints", mode="before")
+    @field_validator("source_types", "temporal_constraints", "source_plan", "missing_information", mode="before")
     @classmethod
     def normalize_null_lists(cls, value: Any) -> Any:
         """LLMs commonly emit null for an empty optional collection."""
@@ -116,6 +128,16 @@ class OrchestrationPlan(BaseModel):
             raise ValueError("conversation cannot request retrieval")
         if self.web_request_explicit and self.intent != "web_search":
             raise ValueError("web_request_explicit requires web_search")
+        if self.clarification_needed and (self.ambiguity_level != "blocking" or not self.clarification_question):
+            raise ValueError("blocking clarification requires ambiguity_level=blocking and clarification_question")
+        if not self.clarification_needed and self.ambiguity_level == "blocking":
+            raise ValueError("blocking ambiguity requires clarification_needed")
+        if self.source_plan:
+            planned_sources = {item.source for item in self.source_plan}
+            if self.needs_retrieval and not (planned_sources & {"local", "email", "web"}):
+                raise ValueError("retrieval plans require local, email, or web")
+            if not self.needs_retrieval and (planned_sources & {"local", "email", "web"}):
+                raise ValueError("non-retrieval plans cannot execute documentary sources")
         return self
 
 
@@ -125,9 +147,15 @@ Auxilium is a documentary and conversational assistant. Its core capability is s
 
 Your mission is to choose strategy: retrieval need, standalone retrieval query, history reuse, source scope, temporal/metadata hints, and response strategy. You never retrieve, inspect or cite documents, invent facts, simulate an action, decide evidence quality, or bypass safeguards. The RAG, evidence_mode, and final generator retain those responsibilities.
 
+Also produce a prioritized source_plan using only local, email, web, general, history. Internal prices, offers, decisions, technical files and case status prefer local/email. Fresh public facts prefer web. Generic explanations may use general. History supplies context, not independent factual proof. Mark required=true for an explicitly requested source. Mark complementary=true only when that source supports a distinct requested claim even if an earlier source answers its own claim. Do not add every source by default.
+
+Set ambiguity_level to none, minor, or blocking. Set clarification_needed=true only when missing information can materially change the answer; then provide missing_information and one concise clarification_question. Price type is material when purchase, sale, and catalogue values may differ. Minor ambiguity should not stop execution.
+
 Also set response_format. Use "email_draft" when the user asks for wording they can send as an email (for example a reply to a client, a professional email, or what to answer by email). This is a presentation request only: preserve needs_retrieval=true whenever the underlying answer could be in internal sources. Otherwise use "normal".
 
 Also set query_semantics: use current_state or decision when the user asks for a current status, outcome, or change; otherwise choose the closest supported general documentary need.
+
+When the user message is French and needs documentary retrieval, also set cross_language_retrieval_query to at most one concise English search query when a useful English-document variant can be expressed. Preserve exact references/models, the requested property or information need, and query_semantics (for example a procedure must retain adjustment/configuration intent). Return null when unsure. This is a search query, never a sentence and never a replacement for retrieval_query.
 
 Capabilities: indexed local documents; indexed emails; recent history; live Web search when available; supported metadata and time constraints; general conversation. Limits: no live mailbox outside synchronized/indexed data, no external case files, no unconnected source, no external action. No result in a retrieval is not lack of access to indexed sources.
 
@@ -164,63 +192,125 @@ def compact_history(history: list[dict[str, Any]], *, max_messages: int = 6) -> 
     }
 
 
-def build_prompt(question: str, history: list[dict[str, Any]]) -> str:
+def _prompt_metrics(*, prompt: str, system_prompt: str, history_view: dict[str, Any], question: str, schema_text: str) -> dict[str, Any]:
+    history_chars = sum(len(str(item.get("content") or "")) for item in history_view["recent_turns"])
+    subjects = history_view["active_subject_candidates"]
+    return {
+        "orchestrator_prompt_chars": len(prompt),
+        "orchestrator_prompt_estimated_tokens": (len(prompt) + 3) // 4,
+        "orchestrator_system_prompt_chars": len(system_prompt),
+        "orchestrator_history_chars": history_chars,
+        "orchestrator_history_turns": len(history_view["recent_turns"]),
+        "orchestrator_active_subject_count": len(subjects),
+        "orchestrator_active_subject_chars": sum(len(item) for item in subjects),
+        "orchestrator_user_message_chars": len(question),
+        "orchestrator_schema_chars": len(schema_text),
+    }
+
+
+def _build_prompt_with_metrics(question: str, history: list[dict[str, Any]], *, repair: bool = False) -> tuple[str, dict[str, Any]]:
     view = compact_history(history)
-    schema = OrchestrationPlan.model_json_schema()
-    return (
-        f"{SYSTEM_PROMPT}\nCURRENT_DATE_UTC: {datetime.now(timezone.utc).date().isoformat()}\n"
-        f"COMPACT_HISTORY: {json.dumps(view, ensure_ascii=False)}\n"
-        f"USER_MESSAGE: {question}\n"
-        f"JSON_SCHEMA: {json.dumps(schema, ensure_ascii=False, separators=(',', ':'))}\n"
-        "Return JSON only."
+    schema_text = json.dumps(OrchestrationPlan.model_json_schema(), ensure_ascii=False, separators=(",", ":"))
+    if repair:
+        system_prompt = "Return ONLY one valid JSON object matching this schema. No prose, no markdown, no explanation."
+        prompt = f"{system_prompt}\nUSER_MESSAGE: {question}\nCOMPACT_HISTORY: {json.dumps(view, ensure_ascii=False)}\nJSON_SCHEMA: {schema_text}"
+    else:
+        system_prompt = SYSTEM_PROMPT
+        prompt = (
+            f"{system_prompt}\nCURRENT_DATE_UTC: {datetime.now(timezone.utc).date().isoformat()}\n"
+            f"COMPACT_HISTORY: {json.dumps(view, ensure_ascii=False)}\nUSER_MESSAGE: {question}\n"
+            f"JSON_SCHEMA: {schema_text}\nReturn JSON only."
+        )
+    return prompt, _prompt_metrics(
+        prompt=prompt, system_prompt=system_prompt, history_view=view, question=question, schema_text=schema_text,
     )
+
+
+def build_prompt(question: str, history: list[dict[str, Any]]) -> str:
+    return _build_prompt_with_metrics(question, history)[0]
 
 
 def build_json_repair_prompt(question: str, history: list[dict[str, Any]]) -> str:
     """Small retry prompt used only after the planner emitted invalid JSON."""
-    view = compact_history(history)
-    schema = OrchestrationPlan.model_json_schema()
-    return (
-        "Return ONLY one valid JSON object matching this schema. No prose, no markdown, no explanation.\n"
-        f"USER_MESSAGE: {question}\n"
-        f"COMPACT_HISTORY: {json.dumps(view, ensure_ascii=False)}\n"
-        f"JSON_SCHEMA: {json.dumps(schema, ensure_ascii=False, separators=(',', ':'))}"
-    )
+    return _build_prompt_with_metrics(question, history, repair=True)[0]
 
 
-def _parse_plan(raw: str | None) -> OrchestrationPlan:
+def _parse_plan(raw: str | None, *, metrics: dict[str, Any] | None = None) -> OrchestrationPlan:
     """Validate planner output while retaining it for local diagnostics."""
     try:
+        parse_started = perf_counter()
         parsed = json.loads((raw or "").strip())
+        parse_ms = (perf_counter() - parse_started) * 1000
         if not isinstance(parsed, dict):
             raise ValueError("orchestration output must be a JSON object")
+        validation_started = perf_counter()
         plan = OrchestrationPlan.model_validate(parsed)
+        if metrics is not None:
+            metrics["orchestrator_parse_ms"] = round(parse_ms, 3)
+            metrics["orchestrator_validation_ms"] = round((perf_counter() - validation_started) * 1000, 3)
         plan._raw_model_output = raw or ""
+        plan._orchestration_metrics = dict(metrics or {})
         return plan
     except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+        if metrics is not None:
+            metrics["orchestrator_parse_ms"] = round((perf_counter() - parse_started) * 1000, 3)
+            metrics.setdefault("orchestrator_validation_ms", None)
         details = exc.errors() if isinstance(exc, ValidationError) else [{"message": str(exc)}]
-        raise OrchestrationPlanOutputError(raw_model_output=raw or "", validation_error_details=details) from exc
+        raise OrchestrationPlanOutputError(raw_model_output=raw or "", validation_error_details=details, metrics=metrics or {}) from exc
 
 
-def plan_once(question: str, history: list[dict[str, Any]], call_llm: Callable[..., str], *, model: str | None, timeout: int) -> OrchestrationPlan:
+def _execute_plan(question: str, history: list[dict[str, Any]], call_llm: Callable[..., str], *, model: str | None, timeout: int, reasoning_effort: str | None, max_output_tokens: int, repair: bool) -> OrchestrationPlan:
+    started = perf_counter()
+    prompt_started = perf_counter()
+    prompt, metrics = _build_prompt_with_metrics(question, history, repair=repair)
+    metrics["orchestrator_prompt_build_ms"] = round((perf_counter() - prompt_started) * 1000, 3)
+    metrics["orchestrator_max_output_tokens"] = max_output_tokens
+    provider_started = perf_counter()
+    try:
+        raw = call_llm(prompt, context_text="", history=[], model=model, timeout=timeout, max_tokens=max_output_tokens, reasoning_effort=reasoning_effort)
+    except Exception as exc:
+        metrics["orchestrator_provider_call_ms"] = round((perf_counter() - provider_started) * 1000, 3)
+        metrics["orchestrator_total_ms"] = round((perf_counter() - started) * 1000, 3)
+        setattr(exc, "orchestration_metrics", metrics)
+        raise
+    metrics["orchestrator_provider_call_ms"] = round((perf_counter() - provider_started) * 1000, 3)
+    metrics.update({
+        "orchestrator_output_chars": len(raw or ""),
+        # The current non-streaming provider boundary does not expose these.
+        "orchestrator_time_to_first_byte_ms": None,
+        "orchestrator_generation_ms": None,
+        "orchestrator_finish_reason": None,
+        "orchestrator_response_status": None,
+    })
+    try:
+        plan = _parse_plan(raw, metrics=metrics)
+    except OrchestrationPlanOutputError as exc:
+        metrics["orchestrator_total_ms"] = round((perf_counter() - started) * 1000, 3)
+        exc.orchestration_metrics = dict(metrics)
+        raise
+    metrics["orchestrator_total_ms"] = round((perf_counter() - started) * 1000, 3)
+    plan._orchestration_metrics = dict(metrics)
+    return plan
+
+
+def plan_once(question: str, history: list[dict[str, Any]], call_llm: Callable[..., str], *, model: str | None, timeout: int, reasoning_effort: str | None = None, max_output_tokens: int = 420) -> OrchestrationPlan:
     """Execute exactly one LLM call; malformed output raises for the caller's safe fallback."""
-    raw = call_llm(build_prompt(question, history), context_text="", history=[], model=model, timeout=timeout, max_tokens=420)
-    return _parse_plan(raw)
+    return _execute_plan(question, history, call_llm, model=model, timeout=timeout, reasoning_effort=reasoning_effort, max_output_tokens=max_output_tokens, repair=False)
 
 
-def plan_json_retry(question: str, history: list[dict[str, Any]], call_llm: Callable[..., str], *, model: str | None, timeout: int) -> OrchestrationPlan:
+def plan_json_retry(question: str, history: list[dict[str, Any]], call_llm: Callable[..., str], *, model: str | None, timeout: int, reasoning_effort: str | None = None, max_output_tokens: int = 420) -> OrchestrationPlan:
     """One compact repair attempt; callers decide whether it is appropriate."""
-    raw = call_llm(build_json_repair_prompt(question, history), context_text="", history=[], model=model, timeout=timeout, max_tokens=420)
-    return _parse_plan(raw)
+    return _execute_plan(question, history, call_llm, model=model, timeout=timeout, reasoning_effort=reasoning_effort, max_output_tokens=max_output_tokens, repair=True)
 
 
 class OrchestrationPlanOutputError(ValueError):
     """Safe fallback error retaining local-only diagnostic details."""
 
-    def __init__(self, *, raw_model_output: str, validation_error_details: list[dict[str, Any]]):
+    def __init__(self, *, raw_model_output: str, validation_error_details: list[dict[str, Any]], metrics: dict[str, Any] | None = None):
         super().__init__("invalid orchestration output")
         self.raw_model_output = raw_model_output
         self.validation_error_details = validation_error_details
+        self.orchestration_metrics = dict(metrics or {})
 
 
 @dataclass(frozen=True)
