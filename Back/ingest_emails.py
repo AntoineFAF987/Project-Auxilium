@@ -305,7 +305,9 @@ def save_attachment(att: Dict[str, Any], dest_dir: str, prefix: str) -> Optional
     name = att.get("name") or "attachment"
     safe = re.sub(r"[^\w\-. ]", "_", name)
     path = os.path.join(dest_dir, f"{prefix}__{safe}")
-    if att.get("@odata.type", "").endswith("FileAttachment"):
+    # Graph returns ``#microsoft.graph.fileAttachment``.  Casing is not a
+    # contract, so normalize it before deciding whether binary content exists.
+    if str(att.get("@odata.type") or "").casefold().endswith("fileattachment"):
         import base64
         b64 = att.get("contentBytes")
         if b64:

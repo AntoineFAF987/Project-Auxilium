@@ -3,7 +3,18 @@
   "exclude_globs": [
     "*/data/index_rag/*",
     "*/data/emails_cache/*",
-    "*/data/email_attachments/*"
+    "*/data/email_attachments/*.jpg",
+    "*/data/email_attachments/*.jpeg",
+    "*/data/email_attachments/*.png",
+    "*/data/email_attachments/*.gif",
+    "*/data/email_attachments/*.webp",
+    "*/data/email_attachments/*.bmp",
+    "*/data/email_attachments/*.jpg.json",
+    "*/data/email_attachments/*.jpeg.json",
+    "*/data/email_attachments/*.png.json",
+    "*/data/email_attachments/*.gif.json",
+    "*/data/email_attachments/*.webp.json",
+    "*/data/email_attachments/*.bmp.json"
   ],
   "follow_symlinks": false,
   "retrieval": {

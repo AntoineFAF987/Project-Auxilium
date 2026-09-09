@@ -250,13 +250,9 @@ class RAGIndexer:
         np.save(emb_path, embs.astype("float32"))
         faiss.write_index(faiss_index, str(faiss_path))
         self._validate_generation(corpus_rows, embs, faiss_index)
-        persisted_rows = [
-            json.loads(line) for line in corpus_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
         persisted_embs = np.load(emb_path, mmap_mode="r")
         persisted_faiss = faiss.read_index(str(faiss_path))
-        self._validate_generation(persisted_rows, persisted_embs, persisted_faiss)
+        self._validate_persisted_generation(corpus_path, len(corpus_rows), persisted_embs, persisted_faiss)
         del persisted_embs
         os.replace(staging, final_generation)
 
@@ -320,6 +316,35 @@ class RAGIndexer:
                 expected_next = rows[index + 1]["chunk_uid"] if index + 1 < len(rows) else None
                 if row.get("previous_chunk_uid") != expected_previous or row.get("next_chunk_uid") != expected_next:
                     raise RuntimeError(f"Broken chunk neighbor chain for {row['chunk_uid']}")
+
+    @staticmethod
+    def _validate_persisted_generation(corpus_path: Path, expected_count: int, embs, faiss_index) -> None:
+        """Validate persisted JSONL without materialising the entire corpus again."""
+        if expected_count != int(embs.shape[0]) or expected_count != int(faiss_index.ntotal):
+            raise RuntimeError("Persisted index count mismatch between corpus, embeddings and FAISS")
+        required = {
+            "schema_version", "document_id", "chunk_uid", "chunk_id", "order",
+            "block_ids", "previous_chunk_uid", "next_chunk_uid", "source", "path", "text",
+        }
+        seen: set[str] = set()
+        count = 0
+        with corpus_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                missing = required - set(row)
+                if missing:
+                    raise RuntimeError(f"Invalid persisted v2 chunk metadata; missing {sorted(missing)}")
+                if int(row["schema_version"]) != DOCUMENT_SCHEMA_VERSION:
+                    raise RuntimeError("Mixed persisted index schemas are forbidden")
+                uid = str(row["chunk_uid"])
+                if uid in seen:
+                    raise RuntimeError(f"Duplicate persisted chunk_uid: {uid}")
+                seen.add(uid)
+                count += 1
+        if count != expected_count:
+            raise RuntimeError("Persisted corpus row count mismatch")
 
     @staticmethod
     def _index_summary(corpus_rows) -> Dict:
@@ -604,7 +629,7 @@ class RAGIndexer:
         except Exception:
             return False
 
-    def search(self, query: str, retrieve_k: int = RETRIEVE_K, top_k_faiss: int = TOP_K_FAISS, hybrid_alpha: float = HYBRID_ALPHA, use_rerank: bool = True, allowed_sources: Optional[set] = None) -> Tuple[List[Tuple[float, Dict]], List[float]]:
+    def search(self, query: str, retrieve_k: int = RETRIEVE_K, top_k_faiss: int = TOP_K_FAISS, hybrid_alpha: float = HYBRID_ALPHA, use_rerank: bool = True, allowed_sources: Optional[set] = None, document_ids: Optional[set[str]] = None) -> Tuple[List[Tuple[float, Dict]], List[float]]:
         if self.faiss_index is None:
             raise RuntimeError("Index introuvable; lance build_or_update() d'abord.")
         if not self.metas:
@@ -615,12 +640,21 @@ class RAGIndexer:
             q = self.embed_model.encode(query, convert_to_tensor=True, normalize_embeddings=NORMALIZE_EMBED)
         q_np = q.detach().cpu().numpy().astype("float32").reshape(1, -1)
 
-        k_faiss = min(top_k_faiss, len(self.metas))
+        scoped_ids = {str(value) for value in (document_ids or set()) if value}
+        scope_indices = np.array([i for i, meta in enumerate(self.metas) if not scoped_ids or str(meta.get("document_id") or "") in scoped_ids], dtype=int)
+        if scoped_ids and scope_indices.size == 0:
+            return [], []
+        k_faiss = min(top_k_faiss, len(scope_indices))
         if k_faiss <= 0:
             return [], []
 
-        faiss_scores, faiss_ids = self.faiss_index.search(q_np, k_faiss)
-        faiss_scores, faiss_ids = faiss_scores[0], faiss_ids[0]
+        if scoped_ids:
+            local_scores = np.dot(self.embeddings[scope_indices], q_np[0])
+            order = np.argsort(local_scores)[-k_faiss:][::-1]
+            faiss_scores, faiss_ids = local_scores[order], scope_indices[order]
+        else:
+            faiss_scores, faiss_ids = self.faiss_index.search(q_np, k_faiss)
+            faiss_scores, faiss_ids = faiss_scores[0], faiss_ids[0]
 
         bm25_scores_full = []
         if self.bm25_index is not None:
@@ -633,7 +667,7 @@ class RAGIndexer:
             bmin, bmax = float(np.min(bm25_scores_full)), float(np.max(bm25_scores_full))
             bm25_scores_full = ((bm25_scores_full - bmin) / (bmax - bmin) if bmax > bmin else np.zeros_like(bm25_scores_full, dtype=np.float32))
 
-        top_bm25 = np.argsort(bm25_scores_full)[-TOP_K_BM25:]
+        top_bm25 = scope_indices[np.argsort(bm25_scores_full[scope_indices])[-TOP_K_BM25:]]
         faiss_map = {int(i): float(s) for s, i in zip(faiss_scores, faiss_ids) if i != -1}
         cand_ids_all = np.unique(np.concatenate([top_bm25.astype(int), faiss_ids[faiss_ids != -1].astype(int)]))
 
@@ -698,6 +732,7 @@ class RAGIndexer:
         *,
         variant: RetrievalVariant = "hybrid_current",
         include_trace: bool = True,
+        document_ids: Optional[set[str]] = None,
     ) -> RetrievalResult:
         """Run observable retrieval without changing the production ``search``.
 
@@ -724,12 +759,21 @@ class RAGIndexer:
             q = self.embed_model.encode(query, convert_to_tensor=True, normalize_embeddings=NORMALIZE_EMBED)
         q_np = q.detach().cpu().numpy().astype("float32").reshape(1, -1)
 
-        k_faiss = min(top_k_faiss, len(self.metas))
+        scoped_ids = {str(value) for value in (document_ids or set()) if value}
+        scope_indices = np.array([i for i, meta in enumerate(self.metas) if not scoped_ids or str(meta.get("document_id") or "") in scoped_ids], dtype=int)
+        if scoped_ids and scope_indices.size == 0:
+            return RetrievalResult(items=[], ce_scores=[], trace=None)
+        k_faiss = min(top_k_faiss, len(scope_indices))
         if k_faiss <= 0:
             return RetrievalResult(items=[], ce_scores=[], trace=None)
 
-        faiss_scores, faiss_ids = self.faiss_index.search(q_np, k_faiss)
-        faiss_scores, faiss_ids = faiss_scores[0], faiss_ids[0]
+        if scoped_ids:
+            local_scores = np.dot(self.embeddings[scope_indices], q_np[0])
+            order = np.argsort(local_scores)[-k_faiss:][::-1]
+            faiss_scores, faiss_ids = local_scores[order], scope_indices[order]
+        else:
+            faiss_scores, faiss_ids = self.faiss_index.search(q_np, k_faiss)
+            faiss_scores, faiss_ids = faiss_scores[0], faiss_ids[0]
 
         bm25_scores_full = []
         bm25_available = False
@@ -744,7 +788,7 @@ class RAGIndexer:
             bmin, bmax = float(np.min(bm25_scores_full)), float(np.max(bm25_scores_full))
             bm25_scores_full = ((bm25_scores_full - bmin) / (bmax - bmin) if bmax > bmin else np.zeros_like(bm25_scores_full, dtype=np.float32))
 
-        top_bm25 = np.argsort(bm25_scores_full)[-TOP_K_BM25:]
+        top_bm25 = scope_indices[np.argsort(bm25_scores_full[scope_indices])[-TOP_K_BM25:]]
         faiss_map = {int(i): float(s) for s, i in zip(faiss_scores, faiss_ids) if i != -1}
         cand_ids_all = np.unique(np.concatenate([top_bm25.astype(int), faiss_ids[faiss_ids != -1].astype(int)]))
 

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -6,6 +7,32 @@ from pathlib import Path
 from starlette.requests import Request
 
 import ingest_emails
+
+
+def test_email_attachment_images_are_excluded_from_text_index_config():
+    config = json.loads((Path(__file__).resolve().parents[1] / "config.json").read_text(encoding="utf-8"))
+    excluded = set(config["exclude_globs"])
+    assert "*/data/email_attachments/*.jpeg" in excluded
+    assert "*/data/email_attachments/*.jpeg.json" in excluded
+
+
+def test_file_attachment_is_saved_as_its_binary_document(tmp_path):
+    import base64
+
+    content = b"%PDF-test-content"
+    path = ingest_emails.save_attachment(
+        {
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": "decision.pdf",
+            "contentBytes": base64.b64encode(content).decode("ascii"),
+        },
+        str(tmp_path),
+        "message",
+    )
+
+    assert path is not None
+    assert path.endswith("decision.pdf")
+    assert Path(path).read_bytes() == content
 
 
 def test_delegated_auth_reuses_silent_token_and_persists_refresh(tmp_path, monkeypatch):

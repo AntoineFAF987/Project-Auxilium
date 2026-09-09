@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
+from pathlib import Path
 import re
 import time
 from typing import Any, Callable, Literal
@@ -226,7 +227,7 @@ def _requires_email_content(query: str, semantics: QuerySemantics) -> bool:
     This intentionally models the request category, not any particular subject
     line or email. Decision/state questions are content questions too.
     """
-    if semantics in {"decision", "current_state"}:
+    if semantics in {"decision", "current_state"} or _requires_attachment_content(query):
         return True
     text = query.casefold()
     mentions_email = bool(re.search(r"\b(?:mail|email|e-mail|courriel)\b", text))
@@ -237,12 +238,69 @@ def _requires_email_content(query: str, semantics: QuerySemantics) -> bool:
     return mentions_email and asks_content
 
 
+def _requires_attachment_content(query: str) -> bool:
+    """Whether the user explicitly asks for an attachment's content."""
+    text = query.casefold()
+    return bool(re.search(
+        r"\b(?:pi[eè]ce\s+jointe|document\s+joint|fichier\s+joint|attachment|\w+\s+jointe)\b",
+        text,
+    ))
+
+
 def _attachment_ids(meta: dict[str, Any]) -> list[str]:
     metadata = meta.get("document_metadata") or {}
     return [
         str(item.get("document_id")) for item in metadata.get("attachments", [])
         if isinstance(item, dict) and item.get("relation_type") == "attachment" and item.get("document_id")
     ]
+
+
+def inspect_attachment_state(
+    email_meta: dict[str, Any], corpus: list[dict[str, Any]], *, attachment_document_id: str | None = None,
+) -> dict[str, Any]:
+    """Report availability of an email attachment without searching for it.
+
+    A link in an email sidecar is only a reference.  Content becomes available
+    only when the linked document has been parsed into corpus chunks.  This
+    helper deliberately uses the stable structural relation rather than a
+    semantic search result.
+    """
+    metadata = email_meta.get("document_metadata") or {}
+    attachments = [
+        item for item in metadata.get("attachments", [])
+        if isinstance(item, dict) and item.get("relation_type") == "attachment"
+    ]
+    if attachment_document_id:
+        attachments = [item for item in attachments if str(item.get("document_id")) == str(attachment_document_id)]
+    attachment = attachments[0] if len(attachments) == 1 else None
+    document_id = str((attachment or {}).get("document_id") or "") or None
+    path = str((attachment or {}).get("path") or "")
+    rows = _rows_for_document(corpus, document_id) if document_id else []
+    text_available = any(str(row.get("text") or "").strip() for row in rows)
+    return {
+        "attachment_reference_found": bool(attachment),
+        "attachment_file_found": bool(path and Path(path).is_file()),
+        # There is no persisted intermediate parse record.  Indexed chunks are
+        # the durable proof that parsing completed successfully.
+        "attachment_parsed": bool(rows),
+        "attachment_text_available": text_available,
+        "attachment_indexed": bool(rows),
+        "attachment_chunk_count": len(rows),
+        "attachment_document_id": document_id,
+        "attachment_path": path or None,
+    }
+
+
+def _attachment_states(items: list[tuple[float, dict[str, Any]]], corpus: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    states: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for _score, meta in items:
+        for attachment_id in _attachment_ids(meta):
+            if attachment_id in seen:
+                continue
+            seen.add(attachment_id)
+            states.append(inspect_attachment_state(meta, corpus, attachment_document_id=attachment_id))
+    return states
 
 
 def _thread_id(meta: dict[str, Any]) -> str | None:
@@ -558,6 +616,10 @@ def _inspect(
         if any(action.type == "FOLLOW" and action.relation == "attachment" for action in gap.available_actions)
         and not any(action.type == "EXPAND" for action in gap.available_actions)
     ]
+    unavailable_attachments = [
+        state for state in _attachment_states(evidence.items, corpus)
+        if state["attachment_reference_found"] and not state["attachment_indexed"]
+    ]
     if semantics == "current_state":
         dated = [(_date_key(meta), meta) for _, meta in items if _date_key(meta)]
         if dated:
@@ -570,11 +632,16 @@ def _inspect(
         # A topically related later document can supersede an older answer.
         # Its content must be read before declaring the existing history final.
         return EvidenceSufficiency(False, "newer_related_candidate_requires_resolution", newer_state_leads[0].available_actions[0])
-    if semantics == "decision" and unresolved_attachments:
+    if (semantics == "decision" or _requires_attachment_content(query)) and unresolved_attachments:
         # A declared attachment is structured answer-bearing material.  Do not
         # silently treat an email's surrounding prose as a substitute for it.
         attachment_action = next(action for action in unresolved_attachments[0].available_actions if action.relation == "attachment")
         return EvidenceSufficiency(False, "declared_attachment_requires_resolution", attachment_action)
+    if _requires_attachment_content(query) and unavailable_attachments:
+        # The mail has identified the attachment, but there is no parsed,
+        # indexed content to inspect.  Do not substitute the surrounding mail
+        # body or launch an unrelated semantic search.
+        return EvidenceSufficiency(False, "attachment_content_unavailable")
     if answer_available and not selected_header_requires_body:
         # A resolved answer is sufficient even if optional traversal remains.
         # Criticality is assessed before answer availability only when the
@@ -782,6 +849,47 @@ def _lead_trace_fields(
     return {"selected_lead_type": None, "selected_lead": None, "lead_priority_reason": None}
 
 
+def complete_same_document_evidence(
+    evidence: list[tuple[float, dict[str, Any]]], corpus: list[dict[str, Any]], *, max_neighbors: int = 2,
+) -> tuple[list[tuple[float, dict[str, Any]]], dict[str, Any]]:
+    """Add only immediate structural siblings of one strong selected chunk.
+
+    This is deliberately narrower than document expansion: it never retrieves
+    another document and never loads an entire document.  It is useful when a
+    matching question and its answer occupy adjacent email/document chunks.
+    """
+    if max_neighbors <= 0 or not evidence:
+        return evidence, {"triggered": False, "reason": "no_seed_or_zero_window"}
+    best_score = max(float(score) for score, _meta in evidence) or 1.0
+    seed = next((
+        (score, meta) for score, meta in evidence
+        if meta.get("document_id") and meta.get("chunk_uid")
+        and float(score) / best_score >= 0.82
+        and float(meta.get("best_topic_relation_score") or 0.0) > 0.0
+    ), None)
+    if not seed:
+        return evidence, {"triggered": False, "reason": "no_strong_topical_seed"}
+    seed_score, seed_meta = seed
+    document_id = str(seed_meta["document_id"])
+    seed_uid = str(seed_meta["chunk_uid"])
+    document_rows = sorted(_rows_for_document(corpus, document_id), key=lambda row: int(row.get("order") or row.get("chunk_id") or 0))
+    seed_index = next((index for index, row in enumerate(document_rows) if str(row.get("chunk_uid")) == seed_uid), None)
+    if seed_index is None or len(document_rows) < 2:
+        return evidence, {"triggered": False, "reason": "no_structural_sibling"}
+    existing = {str(meta.get("chunk_uid")) for _score, meta in evidence}
+    neighbours = [
+        row for index, row in enumerate(document_rows)
+        if index != seed_index and abs(index - seed_index) <= max_neighbors and str(row.get("chunk_uid")) not in existing
+    ]
+    neighbours.sort(key=lambda row: (abs(int(row.get("order") or row.get("chunk_id") or 0) - int(seed_meta.get("order") or seed_meta.get("chunk_id") or 0)), int(row.get("order") or row.get("chunk_id") or 0)))
+    added = [(float(seed_score) - (index + 1) * 1e-6, row) for index, row in enumerate(neighbours[:max_neighbors])]
+    return [*evidence, *added], {
+        "triggered": bool(added), "document_id": document_id, "seed_chunk_uid": seed_uid,
+        "added_chunk_uids": [row.get("chunk_uid") for _score, row in added],
+        "reason": "bounded_adjacent_same_document_completion" if added else "all_neighbours_already_selected",
+    }
+
+
 def run_iterative_evidence_retrieval(
     *, candidate_pool: list[tuple[float, dict[str, Any]]], initial_evidence: list[tuple[float, dict[str, Any]]], corpus: list[dict[str, Any]],
     query: str, semantics: QuerySemantics = "general_document_question", max_rounds: int = 3,
@@ -819,6 +927,7 @@ def run_iterative_evidence_retrieval(
     rounds[-1]["evidence_gaps"] = _trace_gaps(gaps)
     rounds[-1]["state_change_candidates"] = [gap.document_id for gap in gaps if gap.state_change_potential != "false" and gap.semantic_fit != "weak_selected_evidence"]
     rounds[-1]["candidate_leads"] = _trace_leads(leads)
+    rounds[-1]["attachment_states"] = _attachment_states(evidence.items, corpus)
     # Kept for trace compatibility; it now means unselected CandidateLeads.
     rounds[-1]["unresolved_leads"] = rounds[-1]["candidate_leads"]
     rounds[-1].update(_lead_trace_fields(decision.next_action, gaps, leads))
@@ -928,6 +1037,7 @@ def run_iterative_evidence_retrieval(
         leads = _candidate_leads(pool, evidence, corpus=corpus, query=query, semantics=semantics)
         round_data["evidence_gaps"] = _trace_gaps(gaps)
         round_data["candidate_leads"] = _trace_leads(leads)
+        round_data["attachment_states"] = _attachment_states(evidence.items, corpus)
         round_data["unresolved_leads"] = round_data["candidate_leads"]
         round_data.update(selected_fields)
         round_data["sufficiency"] = {
@@ -978,4 +1088,5 @@ def run_iterative_evidence_retrieval(
     rounds[-1]["optional_structural_gaps"] = optional_gaps
     rounds[-1]["critical_structural_evidence_incomplete"] = decision.critical_structural_evidence_incomplete
     rounds[-1]["optional_structural_evidence_remaining"] = decision.optional_structural_evidence_remaining
+    rounds[-1]["attachment_states"] = _attachment_states(final_items, corpus)
     return final_items, rounds, decision

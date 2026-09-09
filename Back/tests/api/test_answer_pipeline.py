@@ -46,6 +46,7 @@ from api.answer_pipeline import (
     AnswerPipelineResult,
     PostGenerationReview,
     _post_generation_review,
+    resolve_document_target,
     run_answer_pipeline,
 )
 from api.schemas import AskIn
@@ -936,6 +937,42 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(result.validations["sources_checked"], ["local", "general"])
         self.assertEqual(result.validations["claim_sources"][-1]["source_type"], "general")
         self.assertFalse(result.validations["claim_sources"][-1]["citation_required"])
+
+    def test_inferred_local_source_plan_keeps_indexed_emails_searchable(self):
+        from api import answer_pipeline as pipeline
+        from api.source_planner import SourcePlanItem
+
+        email = (0.99, {**self.chunk[1], "source": "email", "document_id": "email-3730"})
+        index = _Index([email], [0.99])
+        plan = OrchestrationPlan(
+            intent="document_question", needs_retrieval=True, retrieval_query="3730 tropicalisation",
+            response_strategy="answer", source_plan=[SourcePlanItem(source="local", priority=1)],
+        )
+        with (
+            self._patch_pipeline(index=index, post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+        ):
+            run_answer_pipeline(AskIn(q="C'est possible de tropicaliser un positionneur 3730 ?"), _request())
+
+        self.assertIn("email", index.search_calls[0][1]["allowed_sources"])
+
+    def test_explicit_pdf_source_type_remains_a_hard_filter(self):
+        from api import answer_pipeline as pipeline
+
+        plan = OrchestrationPlan(
+            intent="document_question", needs_retrieval=True, retrieval_query="3730 tropicalisation",
+            response_strategy="answer", source_types=["pdf"], source_type_provenance={"pdf": "explicit"},
+        )
+        index = _Index([self.chunk], [0.9])
+        with (
+            self._patch_pipeline(index=index, post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", return_value=plan),
+        ):
+            run_answer_pipeline(AskIn(q="Cherche uniquement dans les PDF pour le 3730"), _request())
+
+        self.assertEqual(index.search_calls[0][1]["allowed_sources"], {"pdf"})
 
     def test_required_web_complement_runs_after_local_product_evidence(self):
         from api import answer_pipeline as pipeline
@@ -2298,6 +2335,25 @@ class TransportParityTests(unittest.TestCase):
             routes_ask.ask(body, _request("/ask"))
         with self.assertRaisesRegex(HTTPException, "Champ 'q' vide"):
             asyncio.run(routes_ask.ask_stream(body, _request("/ask/stream")))
+
+
+class DocumentTargetResolutionTests(unittest.TestCase):
+    def test_ambiguous_email_content_request_requires_clarification(self):
+        blocks = [
+            (0.8, {"source": "email", "document_id": "a", "document_metadata": {
+                "subject": "Prix client Alpha", "sender": "alpha@example.test", "date": "2026-08-28"}}),
+            (0.78, {"source": "email", "document_id": "b", "document_metadata": {
+                "subject": "Prix client Beta", "sender": "beta@example.test", "date": "2026-08-29"}}),
+        ]
+        result = resolve_document_target(blocks, "Que dit le mail du client concernant le prix ?")
+        self.assertEqual(result["document_target_resolution"], "ambiguous")
+
+    def test_unique_email_content_request_does_not_clarify(self):
+        blocks = [(0.8, {"source": "email", "document_id": "a", "document_metadata": {
+            "message_id": "message-a", "subject": "Prix client Alpha", "sender": "alpha@example.test", "date": "2026-08-28"}})]
+        result = resolve_document_target(blocks, "Que dit le mail concernant le prix ?")
+        self.assertEqual(result["document_target_resolution"], "unique")
+        self.assertEqual(result["target"]["document_id"], "a")
 
 
 if __name__ == "__main__":

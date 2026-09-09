@@ -32,7 +32,7 @@ sys.modules.setdefault("api.index_singleton", stub)
 from api.answer_pipeline import (  # noqa: E402
     _annotate_variant_aware_candidates, _check_context_relevance, _evaluate_evidence,
     _evidence_selection_order, _final_information_need_coverage,
-    _protect_answer_bearing_fused_blocks,
+    _protect_answer_bearing_fused_blocks, _documentary_fallback_query,
 )
 
 
@@ -95,6 +95,26 @@ def test_topic_only_candidate_is_not_answer_bearing_for_dead_band_need():
     meta = rows[0][1]
     assert meta["answers_information_need"] is False
     assert meta["information_need_coverage"] == "none"
+
+
+def test_documentary_fallback_unwraps_reply_framing_without_losing_exact_reference():
+    normalized, removed = _documentary_fallback_query(
+        "Un client me demande par mail si le positionneur 3730 peut être tropicalisé. Je lui réponds quoi ?"
+    )
+    assert "3730" in normalized
+    assert "tropicalisé" in normalized
+    assert "Je lui réponds quoi" not in normalized
+    assert removed
+
+
+def test_documentary_fallback_keeps_a_distinct_exact_reference_in_reply_framing():
+    normalized, removed = _documentary_fallback_query(
+        "Un client me demande par mail si le positionneur 3731 peut être tropicalisé. Je lui réponds quoi ?"
+    )
+    assert "3731" in normalized
+    assert "tropicalisé" in normalized.casefold()
+    assert "Je lui réponds quoi" not in normalized
+    assert removed
 
 
 def test_direct_value_is_protected_after_fusion_reorders_by_rrf_score():

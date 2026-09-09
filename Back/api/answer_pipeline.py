@@ -37,7 +37,7 @@ from .orchestration import (
 )
 from .orchestration_debug import record_snapshot
 from .response_trace import ResponseTraceStore
-from .iterative_retrieval import run_iterative_evidence_retrieval
+from .iterative_retrieval import complete_same_document_evidence, inspect_attachment_state, run_iterative_evidence_retrieval
 from .multi_query_retrieval import (
     _canonical as retrieval_canonical, _specific_anchors as retrieval_specific_anchors, build_retrieval_queries, detect_query_language,
     evaluate_cross_language_query, reciprocal_rank_fusion, resolve_retrieval_query,
@@ -49,6 +49,8 @@ from .chat_titles import generate_chat_title
 from .source_references import select_cited_references
 from .source_planner import (
     ActiveSourceContext, SourcePlanItem, annotate_active_source_candidates, decide_next_source_action,
+    ConversationRetrievalDecision, decide_conversation_retrieval, derive_grounded_conversation_context,
+    evaluate_grounding_candidate,
     derive_active_source_context, explicit_source_constraint, match_structured_values, normalize_source_plan,
     structured_clarification,
 )
@@ -627,6 +629,34 @@ def _recover_query_from_history(question: str, history: List[Dict]) -> str:
     return question
 
 
+def _documentary_fallback_query(question: str) -> tuple[str, str | None]:
+    """Deterministically remove conversational framing from a RAG fallback."""
+    original = " ".join((question or "").split())
+    clauses = [part.strip() for part in re.split(r"(?<=[.!?])\s+", original) if part.strip()]
+    retained: list[str] = []
+    removed: list[str] = []
+    report_pattern = re.compile(
+        r"\b(?:asks?|asked|demande\w*|questionne\w*|wants?\s+to\s+know)\b.{0,48}?\b(?:if|whether|si)\b\s+(.+)",
+        re.I,
+    )
+    response_wrapper = re.compile(
+        r"^(?:can|could|peux|pourrais|dois|je\s+dois|tu\s+peux|je\s+lui)\b.*"
+        r"\b(?:reply|answer|respond|r[eé]pond\w*|mail|email|draft|r[eé]dige\w*)\b",
+        re.I,
+    )
+    for clause in clauses:
+        reported = report_pattern.search(clause)
+        if reported and reported.group(1).strip():
+            retained.append(reported.group(1).strip())
+            removed.append(clause[:reported.start(1)].strip())
+        elif response_wrapper.search(clause):
+            removed.append(clause)
+        else:
+            retained.append(clause)
+    normalized = " ".join(retained).strip() or original
+    return normalized, " ".join(part for part in removed if part) or None
+
+
 def _has_explicit_web_request(question: str) -> bool:
     """Recognise only an unambiguous, user-requested Web source override."""
     text = " ".join((question or "").casefold().split())
@@ -1163,6 +1193,63 @@ def _classify_local_context_state(
         return "relevant_but_incomplete"
     return "relevant_and_sufficient"
 
+
+def _email_content_requested(question: str) -> bool:
+    text = (question or "").casefold()
+    mentions_email = bool(re.search(r"\b(?:mail|email|e-mail|courriel)\b", text))
+    asks_content = bool(re.search(
+        r"\b(?:que\s+dit|contenu|qu['’]est.ce\s+qui\s+est\s+[eé]crit|lis(?:.moi)?|r[eé]sume|"
+        r"what\s+does|content\s+of|read)\b",
+        text,
+    ))
+    return mentions_email and asks_content
+
+
+def resolve_document_target(blocks: List[Tuple[float, Dict]], question: str) -> dict[str, Any]:
+    """Resolve an explicit email-content request from already selected evidence.
+
+    This is deliberately post-retrieval: it does not alter ranking or launch a
+    second search.  A date, exact subject terms, or a clearly separated score
+    may identify one email; otherwise incompatible emails require a question.
+    """
+    if not _email_content_requested(question):
+        return {"document_target_resolution": "not_applicable", "candidates": []}
+    candidates: dict[str, dict[str, Any]] = {}
+    question_terms = set(re.findall(r"[a-z0-9à-ÿ]{4,}", question.casefold()))
+    for score, meta in blocks:
+        if meta.get("source") != "email":
+            continue
+        document_id = str(meta.get("document_id") or "")
+        if not document_id:
+            continue
+        metadata = meta.get("document_metadata") or {}
+        subject = str(metadata.get("subject") or meta.get("title") or "")
+        sender = str(metadata.get("sender") or "")
+        date = str(metadata.get("date") or metadata.get("chronological_key") or "")
+        candidate = candidates.setdefault(document_id, {
+            "document_id": document_id, "message_id": metadata.get("message_id"),
+            "subject": subject, "sender": sender, "date": date, "score": float(score),
+        })
+        candidate["score"] = max(float(candidate["score"]), float(score))
+    values = sorted(candidates.values(), key=lambda item: float(item["score"]), reverse=True)
+    if not values:
+        return {"document_target_resolution": "not_found", "candidates": []}
+    if len(values) == 1:
+        return {"document_target_resolution": "unique", "target": values[0], "candidates": values}
+    # A precise date/subject label in the query wins only when it identifies a
+    # single selected email.  We never choose an arbitrary sender/thread.
+    exact_matches = []
+    for item in values:
+        haystack = " ".join(str(item.get(key) or "").casefold() for key in ("subject", "sender", "date"))
+        overlap = question_terms & set(re.findall(r"[a-z0-9à-ÿ]{4,}", haystack))
+        if len(overlap) >= 2:
+            exact_matches.append(item)
+    if len(exact_matches) == 1:
+        return {"document_target_resolution": "unique", "target": exact_matches[0], "candidates": values}
+    if float(values[0]["score"]) > float(values[1]["score"]) * 1.5:
+        return {"document_target_resolution": "unique", "target": values[0], "candidates": values}
+    return {"document_target_resolution": "ambiguous", "candidates": values}
+
 def _condense_question(hist: List[Dict], q: str) -> str:
     """
     Réécriture de la question en requête autonome (standalone query) en utilisant l'historique.
@@ -1634,6 +1721,44 @@ def run_answer_pipeline(
         """Persist and transport only the canonical reader-facing answer."""
         canonical_answer = enforce_final_citation_contract(result.answer, len(result.sources))
         result = replace(result, answer=canonical_answer)
+        grounding_evaluation = evaluate_grounding_candidate(
+            mode=result.mode, status=result.status, validations=result.validations, sources=result.sources,
+        )
+        grounding_candidate_valid = bool(grounding_evaluation["valid"])
+        rejected_reason = grounding_evaluation["rejected_reason"]
+        if result.validations.get("orchestrator_failed"):
+            grounding_origin = "fallback"
+        elif result.validations.get("structural_lookup_used"):
+            grounding_origin = "structural_lookup"
+        elif result.validations.get("active_document_search_used"):
+            grounding_origin = "active_document_search"
+        elif result.validations.get("active_source_search_used"):
+            grounding_origin = "active_source_search"
+        elif (result.validations.get("intelligent_retry") or {}).get("retry_triggered"):
+            grounding_origin = "retry"
+        else:
+            grounding_origin = "nominal"
+        recovered_after_orchestrator_failure = bool(
+            result.validations.get("orchestrator_failed") and grounding_candidate_valid
+        )
+        # This marker is persisted with the assistant message and is the sole
+        # authority for replacing last successful grounding on future turns.
+        result.validations["grounding_candidate_valid"] = grounding_candidate_valid
+        result.validations["grounding_candidate_rejected_reason"] = rejected_reason
+        result.validations["grounding_validation_basis"] = grounding_evaluation["basis"]
+        result.validations["grounding_origin"] = grounding_origin
+        result.validations["orchestrator_failed_but_grounding_recovered"] = recovered_after_orchestrator_failure
+        result.validations["fallback_grounding_recovered"] = grounding_origin == "fallback" and grounding_candidate_valid
+        trace("grounding_candidate", {
+            "grounding_candidate_valid": grounding_candidate_valid,
+            "grounding_candidate_rejected_reason": rejected_reason,
+            "grounding_validation_basis": grounding_evaluation["basis"],
+            "grounding_origin": grounding_origin,
+            "orchestrator_failed_but_grounding_recovered": recovered_after_orchestrator_failure,
+            "fallback_grounding_recovered": grounding_origin == "fallback" and grounding_candidate_valid,
+            "last_successful_grounding_reused": bool(result.validations.get("prior_grounding_reused")),
+            "last_successful_grounding_source_turn": grounded_context.source_turn,
+        })
         generated_chat_title: Optional[str] = None
         persisted_assistant_message_id: Optional[int] = None
         if tenant_id and user_id and user_turn_persisted:
@@ -1651,10 +1776,26 @@ def run_answer_pipeline(
                           "response_format": result.validations.get("response_format", "normal"),
                           "timestamp": datetime.now(timezone.utc).isoformat(),
                           "evidence_provenance": result.validations.get("evidence_provenance", {}),
+                          "grounding_candidate_valid": grounding_candidate_valid,
+                          "grounding_candidate_rejected_reason": rejected_reason,
+                          "grounding_validation_basis": grounding_evaluation["basis"],
+                          "grounding_origin": grounding_origin,
+                          "orchestrator_failed": result.validations.get("orchestrator_failed", False),
+                          "orchestrator_failed_but_grounding_recovered": recovered_after_orchestrator_failure,
+                          "fallback_grounding_recovered": grounding_origin == "fallback" and grounding_candidate_valid,
+                          "last_successful_grounding_reused": bool(result.validations.get("prior_grounding_reused")),
+                          "last_successful_grounding_source_turn": grounded_context.source_turn,
                           "retrieval_query": result.validations.get("retrieval_query"),
+                          "primary_document_ids": result.validations.get("evidence_provenance", {}).get("primary_document_ids", []),
+                          "email_target_document_id": result.validations.get("email_target_document_id"),
+                          "email_target_message_id": result.validations.get("email_target_message_id"),
+                          "attachment_states": result.validations.get("attachment_states", []),
+                          "unresolved_information_needs": result.validations.get("unresolved_information_needs", []),
                           "source_plan": result.validations.get("source_plan", []),
                           "sources_checked": result.validations.get("sources_checked", []),
                           "source_answerability": result.validations.get("source_answerability", {}),
+                          "answerability": result.validations.get("answerability", {}),
+                          "unanswerable_from_current_sources": result.validations.get("unanswerable_from_current_sources", False),
                           "claim_sources": result.validations.get("claim_sources", [])},
                 )
             except Exception as exc:
@@ -1697,8 +1838,9 @@ def run_answer_pipeline(
         hist = trim_history(raw_hist, max_turns=HISTORY_MAX_TURNS)
 
     active_source_context = derive_active_source_context(hist)
+    grounded_context = derive_grounded_conversation_context(hist)
 
-    trace("request", {"history_used": hist, "active_source_context": active_source_context.to_dict(), "orchestrator_enabled": ORCHESTRATOR_SETTINGS.enabled, "provider": _RUNTIME_SETTINGS.generation.provider, "orchestrator_model": ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model, "generation_model": _RUNTIME_SETTINGS.generation.model})
+    trace("request", {"history_used": hist, "active_source_context": active_source_context.to_dict(), "grounded_conversation_context": grounded_context.to_dict(), "orchestrator_enabled": ORCHESTRATOR_SETTINGS.enabled, "provider": _RUNTIME_SETTINGS.generation.provider, "orchestrator_model": ORCHESTRATOR_SETTINGS.model or _RUNTIME_SETTINGS.generation.model, "generation_model": _RUNTIME_SETTINGS.generation.model})
 
     thread_id = (body.thread_id or "default").strip() or "default"
     _touch_session(thread_id)
@@ -1919,6 +2061,53 @@ def run_answer_pipeline(
                 "fallback_strategy": fallback_strategy,
             })
 
+    # Deterministic evidence-scope policy runs even after an orchestrator
+    # failure.  The planner remains advisory; only validated provenance may
+    # narrow a search.
+    conversation_decision = decide_conversation_retrieval(
+        q, grounded_context,
+        intent=orchestration_plan.intent if orchestration_plan else None,
+        reuse_previous_subject=bool(orchestration_plan and orchestration_plan.reuse_previous_subject),
+        needs_retrieval=bool(orchestration_plan.needs_retrieval) if orchestration_plan else True,
+        orchestrator_failed=orchestration_failed,
+    )
+    scoped_document_ids: set[str] = set()
+    if conversation_decision.retrieval_scope == "structural_relations":
+        scoped_document_ids = set(grounded_context.active_attachment_document_ids or grounded_context.active_document_ids)
+    elif conversation_decision.retrieval_scope == "active_documents":
+        scoped_document_ids = set(grounded_context.active_document_ids)
+    if conversation_decision.retrieval_scope == "none" and orchestration_plan is not None:
+        orchestration_plan = orchestration_plan.model_copy(update={
+            "needs_retrieval": False, "use_history": True, "reuse_previous_subject": True,
+        })
+    trace("conversation_retrieval", {
+        "conversation_retrieval_strategy": conversation_decision.operation,
+        "subject_compatibility": "compatible" if conversation_decision.retrieval_scope != "global" else "incompatible",
+        "subject_compatibility_reason": conversation_decision.reason,
+        "structural_relation_candidate": conversation_decision.retrieval_scope == "structural_relations",
+        "structural_relation_resolved": conversation_decision.requires_structural_lookup,
+        "retrieval_scope_before_guard": "global" if (not orchestration_plan or orchestration_plan.needs_retrieval) else "none",
+        "retrieval_scope_after_guard": conversation_decision.retrieval_scope,
+        "retrieval_scope_override_reason": conversation_decision.reason,
+        "retrieval_scope": conversation_decision.retrieval_scope,
+        "prior_grounding_reused": conversation_decision.reuse_prior_grounding,
+        "structural_lookup_used": conversation_decision.requires_structural_lookup,
+        "active_document_search_used": conversation_decision.retrieval_scope == "active_documents",
+        "active_source_search_used": conversation_decision.retrieval_scope == "active_source",
+        "global_search_used": conversation_decision.retrieval_scope == "global",
+        "global_search_avoided": conversation_decision.retrieval_scope != "global",
+        "global_search_blocked_by_grounding": conversation_decision.retrieval_scope != "global" and grounded_context.grounding_valid,
+        "global_search_block_reason": conversation_decision.reason if conversation_decision.retrieval_scope != "global" else None,
+        "retrieval_avoidance_reason": conversation_decision.reason,
+        "grounded_context_available": grounded_context.grounding_valid,
+        "grounded_context_source_turn": grounded_context.source_turn,
+        "primary_document_ids": list(grounded_context.primary_document_ids),
+        "secondary_document_ids": list(grounded_context.secondary_document_ids),
+        "active_attachment_document_ids": list(grounded_context.active_attachment_document_ids),
+        "supported_claim_count": len(grounded_context.supported_claims),
+        "unresolved_information_need_count": len(grounded_context.unresolved_information_needs),
+    })
+
     # A wording-only follow-up is answered from the prior supported turn, not
     # by treating its conversational framing as a new documentary query.
     response_transform_type = _detect_response_transformation(q)
@@ -2037,6 +2226,7 @@ def run_answer_pipeline(
         "ambiguity_level": orchestration_plan.ambiguity_level if orchestration_plan else "none",
         "source_plan": [item.model_dump(mode="json") for item in effective_source_plan],
         "active_source_context": active_source_context.to_dict(),
+        "orchestrator_failed": orchestration_failed,
     })
     if (
         orchestration_plan and multi_source_enabled
@@ -2091,7 +2281,8 @@ def run_answer_pipeline(
         # retrieval engine or index.
         allowed_sources = set()
         if "local" in planned_internal_sources:
-            allowed_sources.update({"pdf", "file"})
+            # ``local`` denotes the internal corpus, including indexed email.
+            allowed_sources.update({"email", "pdf", "file"})
         if "email" in planned_internal_sources:
             allowed_sources.add("email")
     local_followup_continuity = bool(
@@ -2305,6 +2496,16 @@ def run_answer_pipeline(
                              "next_source_action": "STOP_AND_ANSWER",
                              "multi_source_used": False,
                              "active_source_context": active_source_context.to_dict(),
+                             "grounded_conversation_context": grounded_context.to_dict(),
+                             "conversation_retrieval_strategy": conversation_decision.operation,
+                             "retrieval_scope": conversation_decision.retrieval_scope,
+                             "prior_grounding_reused": conversation_decision.reuse_prior_grounding,
+                             "structural_lookup_used": False,
+                             "active_document_search_used": False,
+                             "active_source_search_used": False,
+                             "global_search_used": False,
+                             "global_search_avoided": True,
+                             "retrieval_avoidance_reason": conversation_decision.reason,
                              "claim_sources": [{"claim": "general_answer", "source_type": "general", "source_id": "model_general_knowledge", "support_level": "general", "citation_required": False, "confidence": 0.6}],
                              "source_results": [{"source_type": "general", "source_confidence": 0.6, "evidence_blocks": [], "supported_claims": ["general_answer"], "unsupported_claims": [], "freshness": None, "source_priority": 1}],
                              "evidence_provenance": (previous_meta.get("evidence_provenance", {}) if reuse_previous_evidence else {}),
@@ -2347,13 +2548,16 @@ def run_answer_pipeline(
     # Désactiver si historique trop court (risque de dérive) - compter messages utilisateur uniquement
     user_msg_count_for_condense = len([m for m in hist if m.get("role") == "user"])
     should_condense = (hist and user_msg_count_for_condense >= 2 and ENABLE_CONDENSATION and orchestration_plan is None)
+    fallback_query_removed_wrapper = None
+    fallback_query_normalized = None
     if orchestration_plan:
         q_eff = orchestration_plan.retrieval_query
     elif orchestration_failed:
-        condensed = _condense_question(hist, q) if should_condense else q
+        fallback_query_normalized, fallback_query_removed_wrapper = _documentary_fallback_query(q)
+        condensed = _condense_question(hist, fallback_query_normalized) if should_condense else fallback_query_normalized
         # If the same provider outage also prevented condensation, retain the
         # active subject deterministically instead of searching the raw turn.
-        q_eff = condensed if _norm(condensed) != _norm(q) else _recover_query_from_history(q, hist)
+        q_eff = condensed if _norm(condensed) != _norm(fallback_query_normalized) else _recover_query_from_history(fallback_query_normalized, hist)
     else:
         q_eff = _condense_question(hist, q) if should_condense else q
 
@@ -2401,6 +2605,9 @@ def run_answer_pipeline(
             # An explicit source mode remains authoritative; an empty
             # intersection must not accidentally mean "all sources" to idx.search.
             allowed_sources = {"__no_matching_source__"}
+    if conversation_decision.retrieval_scope == "active_source" and grounded_context.active_source_type in {"local", "email"}:
+        scoped_source = {grounded_context.active_source_type}
+        allowed_sources = scoped_source if allowed_sources is None else (allowed_sources & scoped_source)
     follow_up = bool(orchestration_plan and orchestration_plan.intent == "refine_previous_search" and orchestration_plan.reuse_previous_subject)
     resolved_retrieval_query = resolve_retrieval_query(raw_user_message=q, orchestrator_query=orchestration_plan.retrieval_query or q, history=hist) if follow_up else None
     detected_query_language = detect_query_language(q)
@@ -2420,6 +2627,15 @@ def run_answer_pipeline(
     evidence_query_variants = retrieval_queries[:]
     if resolved_retrieval_query:
         q_eff = resolved_retrieval_query
+    trace("retrieval_scope", {
+        "source_scope_origin": "explicit" if orchestration_plan and orchestration_plan.source_types else ("inferred_internal" if allowed_sources else None),
+        "source_scope_is_hard_filter": bool(orchestration_plan and orchestration_plan.source_types),
+        "source_scope_is_inferred": bool(allowed_sources and not (orchestration_plan and orchestration_plan.source_types)),
+        "internal_sources_enabled": bool(not allowed_sources or "email" in allowed_sources),
+        "fallback_query_original": q if orchestration_failed else None,
+        "fallback_query_normalized": fallback_query_normalized,
+        "fallback_query_removed_wrapper": fallback_query_removed_wrapper,
+    })
     trace("retrieval_input", {"raw_user_message": q, "resolved_retrieval_query": resolved_retrieval_query, "follow_up_retrieval": follow_up, "raw_query_used_for_retrieval": not follow_up, "raw_query_exclusion_reason": "conversational_followup" if follow_up else None, "original_query": q, "orchestrator_query": orchestration_plan.retrieval_query if orchestration_plan else None, "detected_query_language": detected_query_language, "cross_language_source_query": cross_language_decision.source_query, "cross_language_query_semantics": orchestration_plan.query_semantics if orchestration_plan else None, "cross_language_information_need": cross_language_decision.information_need, "cross_language_information_need_retained": cross_language_decision.information_need_retained, "cross_language_semantic_intent_retained": cross_language_decision.semantic_intent_retained, "cross_language_validation_passed": cross_language_decision.validation_passed, "cross_language_validation_reasons": list(cross_language_decision.validation_reasons), "cross_language_query_before_validation": cross_language_decision.query_before_validation, "cross_language_query_after_validation": cross_language_decision.query_after_validation, "cross_language_query_generated": cross_language_decision.query is not None, "cross_language_target_language": cross_language_decision.target_language, "cross_language_query": cross_language_decision.query, "cross_language_query_rejected": cross_language_decision.query is None, "cross_language_rejection_reason": cross_language_decision.rejection_reason, "q_eff": q_eff, "q_eff_source": "resolved_retrieval_query" if resolved_retrieval_query else ("orchestrator_query" if orchestration_plan else ("condensed_query" if should_condense else "original_query")), "retrieval_queries": [{"type": kind, "source": kind, "query": query} for kind, query in retrieval_queries], "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": orchestration_plan.source_types if orchestration_plan else [], "temporal_constraints": [item.model_dump(mode="json") for item in orchestration_plan.temporal_constraints] if orchestration_plan else [], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
     set_stage("retrieval")
     if allowed_sources == {"email"}:
@@ -2438,7 +2654,16 @@ def run_answer_pipeline(
     ce_scores = []
     rejected_candidates = []
     for query_kind, query_text in retrieval_queries:
-        rows, scores = idx.search(query_text, retrieve_k=RETRIEVE_K, top_k_faiss=TOP_K_FAISS, hybrid_alpha=HYBRID_ALPHA, use_rerank=ENABLE_RERANKER, allowed_sources=allowed_sources)
+        search_kwargs = {
+            "retrieve_k": RETRIEVE_K, "top_k_faiss": TOP_K_FAISS,
+            "hybrid_alpha": HYBRID_ALPHA, "use_rerank": ENABLE_RERANKER,
+            "allowed_sources": allowed_sources,
+        }
+        # Preserve the existing search call shape for global retrieval and
+        # test doubles; the new argument exists only for a true local scope.
+        if scoped_document_ids:
+            search_kwargs["document_ids"] = scoped_document_ids
+        rows, scores = idx.search(query_text, **search_kwargs)
         if query_kind == "original_autonomous" or not ce_scores:
             ce_scores = scores
         before_filter = len(rows)
@@ -2463,6 +2688,17 @@ def run_answer_pipeline(
     fused = fuse_contiguous_passages(evidence_prelim, gap=FUSE_ADJACENT_GAP)
     fused = _protect_answer_bearing_fused_blocks(fused, answer_bearing_candidate_uids)
     blocks = clip_context_blocks(fused, max_chars=MAX_CONTEXT_CHARS, keep=FINAL_K)
+    blocks, same_document_expansion = complete_same_document_evidence(
+        blocks, list(getattr(idx, "corpus", []) or []), max_neighbors=2,
+    )
+    blocks = clip_context_blocks(blocks, max_chars=MAX_CONTEXT_CHARS, keep=FINAL_K)
+    trace("same_document_expansion", {
+        "same_document_expansion_triggered": same_document_expansion.get("triggered", False),
+        "same_document_expansion_document_id": same_document_expansion.get("document_id"),
+        "same_document_expansion_seed_chunk_uid": same_document_expansion.get("seed_chunk_uid"),
+        "same_document_expansion_added_chunk_uids": same_document_expansion.get("added_chunk_uids", []),
+        "same_document_expansion_reason": same_document_expansion.get("reason"),
+    })
     emit_status("select_passages", "Sélection des passages pertinents")
 
     # Bounded evidence enrichment happens after the stable first retrieval and
@@ -2529,7 +2765,7 @@ def run_answer_pipeline(
         for uid in (meta.get("fused_chunk_uids") or [meta.get("chunk_uid")])
         if uid and str(uid) in answer_bearing_candidate_uids
     }
-    trace("evidence", {"evidence_query_variants": [{"type": kind, "query": query} for kind, query in evidence_query_variants], "requested_information_need": cross_language_decision.information_need, "information_need_coverage": information_need_coverage, "answer_coverage": information_need_score, "topic_coverage": evidence_decision.morphological_topic_overlap, "best_information_need_query_variant": information_need_variant, "answer_bearing_chunk_uids": sorted(answer_bearing_candidate_uids), "protected_answer_bearing_chunk_uids": sorted(protected_answer_bearing_uids), "answer_bearing_selection_reason": "protected_after_fusion_for_direct_information_need_match" if protected_answer_bearing_uids else "no_answer_bearing_candidate_in_final_context", "evidence_mode": evidence_mode, "evidence_mode_reason": evidence_decision.reason, "context_is_relevant": evidence_decision.context_is_relevant, "context_relevance_reason": evidence_decision.context_relevance_reason, "morphological_topic_overlap": evidence_decision.morphological_topic_overlap, "guard_ok": bool(gated_ok), "strict_local_ok": evidence_mode in {"direct", "related"}, "final_context_blocks": [{"metadata": meta, "score": score, "text": meta.get("text")} for score, meta in blocks]})
+    trace("evidence", {"evidence_query_variants": [{"type": kind, "query": query} for kind, query in evidence_query_variants], "requested_information_need": cross_language_decision.information_need, "information_need_coverage": information_need_coverage, "answer_coverage": information_need_score, "topic_coverage": evidence_decision.morphological_topic_overlap, "best_information_need_query_variant": information_need_variant, "answer_bearing_chunk_uids": sorted(answer_bearing_candidate_uids), "protected_answer_bearing_chunk_uids": sorted(protected_answer_bearing_uids), "answer_bearing_selection_reason": "protected_after_fusion_for_direct_information_need_match" if protected_answer_bearing_uids else "no_answer_bearing_candidate_in_final_context", "same_document_expansion_triggered": same_document_expansion.get("triggered", False), "same_document_expansion_document_id": same_document_expansion.get("document_id"), "same_document_expansion_seed_chunk_uid": same_document_expansion.get("seed_chunk_uid"), "same_document_expansion_added_chunk_uids": same_document_expansion.get("added_chunk_uids", []), "same_document_expansion_reason": same_document_expansion.get("reason"), "evidence_mode": evidence_mode, "evidence_mode_reason": evidence_decision.reason, "context_is_relevant": evidence_decision.context_is_relevant, "context_relevance_reason": evidence_decision.context_relevance_reason, "morphological_topic_overlap": evidence_decision.morphological_topic_overlap, "guard_ok": bool(gated_ok), "strict_local_ok": evidence_mode in {"direct", "related"}, "final_context_blocks": [{"metadata": meta, "score": score, "text": meta.get("text")} for score, meta in blocks]})
 
     # Only the evidence decision controls whether local blocks are usable.
     strict_local_ok = evidence_mode in {"direct", "related"}
@@ -2870,6 +3106,17 @@ def run_answer_pipeline(
         "sources_checked": sources_checked,
         "sources_skipped": sources_skipped,
         "active_source_context": active_source_context.to_dict(),
+        "orchestrator_failed": orchestration_failed,
+        "grounded_conversation_context": grounded_context.to_dict(),
+        "conversation_retrieval_strategy": conversation_decision.operation,
+        "retrieval_scope": conversation_decision.retrieval_scope,
+        "prior_grounding_reused": conversation_decision.reuse_prior_grounding,
+        "structural_lookup_used": conversation_decision.retrieval_scope == "structural_relations",
+        "active_document_search_used": conversation_decision.retrieval_scope == "active_documents",
+        "active_source_search_used": conversation_decision.retrieval_scope == "active_source",
+        "global_search_used": conversation_decision.retrieval_scope == "global",
+        "global_search_avoided": conversation_decision.retrieval_scope != "global",
+        "retrieval_avoidance_reason": conversation_decision.reason,
         "source_answerability": source_answerability,
         "source_expansion_triggered": len(sources_checked) > 1,
         "source_expansion_reason": "planned_required_or_insufficient_primary_source" if len(sources_checked) > 1 else None,
@@ -2883,8 +3130,62 @@ def run_answer_pipeline(
         "optional_structural_evidence_remaining": iterative_sufficiency.optional_structural_evidence_remaining if iterative_sufficiency is not None else False,
         "evidence_chunk_uids": rag_chunk_uids,
         "evidence_document_ids": sorted({str(meta.get("document_id")) for _, meta in blocks if meta.get("document_id")}),
+        # Only selected answer context becomes active next turn; candidates
+        # discarded by clipping/ranking never contaminate continuity.
+        "primary_document_ids": sorted({str(meta.get("document_id")) for _, meta in blocks[:1] if meta.get("document_id")}),
         "anchor_documents": retrieval_rounds[0].get("anchor_documents", []) if retrieval_rounds else [],
     }
+    document_target = resolve_document_target(blocks, q)
+    attachment_states = []
+    seen_attachment_ids = set()
+    for _score, meta in blocks:
+        for attachment in (meta.get("document_metadata") or {}).get("attachments", []):
+            attachment_id = str((attachment or {}).get("document_id") or "")
+            if not attachment_id or attachment_id in seen_attachment_ids:
+                continue
+            seen_attachment_ids.add(attachment_id)
+            attachment_states.append(inspect_attachment_state(
+                meta, list(getattr(idx, "corpus", []) or []), attachment_document_id=attachment_id,
+            ))
+    validations.update({
+        "document_target_resolution": document_target["document_target_resolution"],
+        "email_target_document_id": (document_target.get("target") or {}).get("document_id"),
+        "email_target_message_id": (document_target.get("target") or {}).get("message_id"),
+        "attachment_states": attachment_states,
+        "unresolved_information_needs": (["attachment_content"] if any(
+            item.get("attachment_reference_found") and not item.get("attachment_text_available")
+            for item in attachment_states
+        ) else []),
+    })
+    trace("document_target", {
+        "email_target_resolution": document_target["document_target_resolution"],
+        "email_target_document_id": validations["email_target_document_id"],
+        "email_target_message_id": validations["email_target_message_id"],
+        "attachment_states": attachment_states,
+    })
+    if document_target["document_target_resolution"] == "ambiguous":
+        validations["clarification_triggered_due_to_document_ambiguity"] = True
+        return finalize_result(_result(
+            answer="De quel email parles-tu exactement (expéditeur, objet ou date) ?",
+            sources=[], mode="CLARIFICATION", ctx_len=len(context_local or ""),
+            request_id=request_id, route_mode="clarification", validations=validations,
+        ))
+    if iterative_sufficiency is not None and iterative_sufficiency.reason == "attachment_content_unavailable":
+        # The attachment text is unavailable, but the parent email, relation,
+        # and attachment identifier remain verifiable documentary facts.
+        partial_answerability = dict(validations.get("answerability") or {})
+        partial_answerability["answerability"] = "partial"
+        validations["answerability"] = partial_answerability
+        validations["evidence_provenance"] = {
+            **(validations.get("evidence_provenance") or {}),
+            "evidence_sufficient": bool(blocks and validations.get("email_target_document_id")),
+        }
+        partial_sources, _partial_citation_map = select_cited_references(blocks, [])
+        return finalize_result(_result(
+            answer="J’ai identifié la pièce jointe liée à cet email, mais son contenu n’est pas disponible dans les données documentaires.",
+            sources=partial_sources, mode="PARTIAL_DOCUMENTARY", ctx_len=len(context_local or ""),
+            request_id=request_id, route_mode="strict_local", validations=validations,
+        ))
     table_clarification = structured_clarification(
         q_eff,
         structured_match,

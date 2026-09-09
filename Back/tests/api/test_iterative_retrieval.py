@@ -11,7 +11,7 @@ if "api" not in sys.modules:
     api_package.__path__ = [str(_BACK_ROOT / "api")]
     sys.modules["api"] = api_package
 
-from api.iterative_retrieval import run_iterative_evidence_retrieval  # noqa: E402
+from api.iterative_retrieval import complete_same_document_evidence, inspect_attachment_state, run_iterative_evidence_retrieval  # noqa: E402
 from rag_core.retrieval import clip_context_blocks, format_context_for_llm  # noqa: E402
 
 
@@ -108,6 +108,24 @@ def test_header_only_email_expands_its_existing_body_before_generation():
     assert decision.critical_structural_evidence_incomplete is False
 
 
+def test_same_document_completion_adds_the_decisive_neighbour_of_a_topical_body_hit():
+    question = _row("tropicalisation", "question", "Can 3730 still be tropicalised?", order=0)
+    answer = _row("tropicalisation", "answer", "Tropicalisation is no longer possible.", order=1)
+    question["best_topic_relation_score"] = 0.9
+    evidence, trace = complete_same_document_evidence([(0.95, question)], [question, answer])
+    assert trace["triggered"] is True
+    assert trace["added_chunk_uids"] == ["answer"]
+    assert [meta["chunk_uid"] for _, meta in evidence] == ["question", "answer"]
+
+
+def test_same_document_completion_is_bounded_to_immediate_neighbours():
+    rows = [_row("long", f"c{index}", f"chunk {index}", order=index) for index in range(7)]
+    rows[3]["best_topic_relation_score"] = 0.9
+    evidence, trace = complete_same_document_evidence([(1.0, rows[3])], rows, max_neighbors=2)
+    assert trace["added_chunk_uids"] == ["c2", "c4"]
+    assert len(evidence) == 3
+
+
 def test_header_without_body_is_a_critical_structural_gap():
     header = _row("email-no-body", "header-only", "Subject: Decision", blocks=[{"block_type": "email_header"}])
     _evidence, _rounds, decision = run_iterative_evidence_retrieval(
@@ -182,6 +200,50 @@ def test_email_attachment_is_followed_only_when_declared_and_indexed():
     assert rounds[1]["action"]["relation"] == "attachment"
     assert actions[0].relation == "attachment"
     assert decision.sufficient is True
+
+
+def test_attachment_state_distinguishes_reference_from_indexed_content():
+    attachment = {"document_id": "missing-pdf", "relation_type": "attachment", "path": "/not-present.pdf"}
+    header = _row("email", "header", "Subject: Decision", attachments=[attachment])
+
+    state = inspect_attachment_state(header, [header], attachment_document_id="missing-pdf")
+
+    assert state["attachment_reference_found"] is True
+    assert state["attachment_file_found"] is False
+    assert state["attachment_parsed"] is False
+    assert state["attachment_text_available"] is False
+    assert state["attachment_indexed"] is False
+    assert state["attachment_chunk_count"] == 0
+
+
+def test_explicit_attachment_request_follows_direct_document_id():
+    attachment = {"document_id": "decision-pdf", "relation_type": "attachment"}
+    header = _row("email", "header", "Subject: Decision", attachments=[attachment])
+    body = _row("email", "body", "Please see attached decision.", blocks=[{"block_type": "email_body"}], order=1)
+    pdf = _row("decision-pdf", "pdf", "Decision content.", source="pdf")
+
+    evidence, rounds, _decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.9, header)], initial_evidence=[(0.9, header)],
+        corpus=[header, body, pdf], query="Que dit l'annexe jointe ?", semantics="general_document_question",
+    )
+
+    assert any(meta["document_id"] == "decision-pdf" for _, meta in evidence)
+    assert any(round_["action"].get("relation") == "attachment" for round_ in rounds)
+
+
+def test_explicit_attachment_request_reports_unavailable_content_without_search():
+    attachment = {"document_id": "missing-pdf", "relation_type": "attachment"}
+    header = _row("email", "header", "Subject: Decision", attachments=[attachment])
+    body = _row("email", "body", "Please see attached decision.", blocks=[{"block_type": "email_body"}], order=1)
+
+    _evidence, rounds, decision = run_iterative_evidence_retrieval(
+        candidate_pool=[(0.9, header)], initial_evidence=[(0.9, header)],
+        corpus=[header, body], query="Que dit l'annexe jointe ?", semantics="general_document_question",
+    )
+
+    assert decision.sufficient is False
+    assert decision.reason == "attachment_content_unavailable"
+    assert rounds[-1]["attachment_states"][0]["attachment_indexed"] is False
 
 
 def test_no_relation_stops_without_repeating_actions():

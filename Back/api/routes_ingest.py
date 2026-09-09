@@ -175,7 +175,7 @@ def _recompute_roots_with_flat_emails() -> List[str]:
         if p:
             roots.append(os.path.abspath(p))
 
-    # 2) Emails aplatis si au moins un dossier mail est sélectionné
+    # 2) Emails aplatis et leurs pièces jointes si au moins un dossier mail est sélectionné.
     try:
         mail_folders = get_selected_folders() or []
     except Exception:
@@ -186,6 +186,11 @@ def _recompute_roots_with_flat_emails() -> List[str]:
             flat_abs = os.path.abspath(flat_dir)
             if os.path.isdir(flat_abs):
                 roots.append(flat_abs)
+        att_dir = _email_paths_from_config(str(CONFIG_PATH))["att_dir"]
+        if att_dir:
+            att_abs = os.path.abspath(att_dir)
+            if os.path.isdir(att_abs):
+                roots.append(att_abs)
 
     # Dédoublonner
     seen, uniq = set(), []
