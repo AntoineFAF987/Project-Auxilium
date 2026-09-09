@@ -103,6 +103,36 @@ class CrossLanguageQueryDecision:
     query_after_validation: str | None = None
 
 
+@dataclass(frozen=True)
+class ResolvedUserTask:
+    """Compact boundary between request resolution and documentary retrieval.
+
+    Presentation fields deliberately travel with the factual task, but the
+    retrieval builder below does not read them.  This makes that separation
+    explicit and gives nominal and deterministic resolution one contract.
+    """
+    factual_query: str
+    exact_entities: tuple[str, ...]
+    information_need: str
+    query_semantics: str = "general_document_question"
+    response_format: str = "normal"
+    target_audience: str | None = None
+    source_constraints: tuple[str, ...] = ()
+    temporal_constraints: tuple[Any, ...] = ()
+    uses_history: bool = False
+    original_factual_query: str | None = None
+    orchestrator_rewrite: str | None = None
+    cross_language_rewrite: str | None = None
+    canonical_information_need_query: str | None = None
+    origin: str = "deterministic_fallback"
+
+
+@dataclass(frozen=True)
+class RetrievalQueryBuild:
+    queries: list[tuple[str, str]]
+    cross_language: CrossLanguageQueryDecision
+
+
 _GENERIC_ENTITY_TERMS = frozenset({"actuator", "valve", "positioner", "device", "product", "overview"})
 _SEMANTIC_INTENT_TERMS = {
     "procedure": frozenset({"adjustment", "setting", "procedure", "configuration", "configure", "installation", "mounting"}),
@@ -218,7 +248,8 @@ def normalized_query(original: str) -> str | None:
     """Remove conversational glue only; never add or substitute domain terms."""
     filler = {
         "je", "me", "m", "demandais", "demande", "si", "j", "ai", "avais", "enfin",
-        "peux", "tu", "vous", "pourrais", "voudrais", "savoir", "juste", "svp", "please",
+        "peux", "peut", "tu", "vous", "pourrais", "voudrais", "savoir", "juste", "svp", "please",
+        "le", "la", "les", "du", "des", "est", "etre", "possible", "c",
         "can", "you", "could", "would", "i", "do", "does", "the", "a", "an",
     }
     words = re.findall(r"[\wÀ-ÿ0-9-]+", original)
@@ -227,6 +258,101 @@ def normalized_query(original: str) -> str | None:
     if len(compact) < 3 or _canonical(candidate) == _canonical(original):
         return None
     return candidate[:400]
+
+
+_CANONICAL_FUNCTION_WORDS = frozenset({
+    "a", "an", "au", "aux", "can", "could", "c", "ce", "ces", "cet", "cette",
+    "do", "does", "est", "etre", "il", "elle", "is", "je", "la",
+    "le", "les", "me", "mon", "ma", "mes", "on", "peut", "peux", "pourrais", "pourrait", "que",
+    "quel", "quelle", "quels", "quelles", "si", "t", "the", "tu", "un", "une", "vous", "y",
+})
+
+_INVERSION_AUXILIARIES = frozenset({"a", "aurait", "doit", "est", "faut", "peut", "pourrait", "sera", "serait"})
+_INVERSION_PRONOUNS = frozenset({"elle", "elles", "il", "ils", "on"})
+
+
+def _is_interrogative_syntax_token(token: str) -> bool:
+    """Recognise French inversion and question particles without domain rules."""
+    parts = _canonical(token).split()
+    if parts in (["est", "ce"], ["qu", "est", "ce"]):
+        return True
+    if len(parts) == 2:
+        return parts[0] in _INVERSION_AUXILIARIES and parts[1] in _INVERSION_PRONOUNS
+    if len(parts) == 3:
+        return (
+            parts[0] in _INVERSION_AUXILIARIES
+            and parts[1] == "t"
+            and parts[2] in _INVERSION_PRONOUNS
+        )
+    return False
+
+
+def _canonical_need_token(token: str) -> str:
+    """Apply only a safe, linguistic French -isation derivation.
+
+    This is intentionally not a product vocabulary: the same suffix rule
+    applies to arbitrary verbs/adjectives and leaves all other terms intact.
+    """
+    normalized = _canonical(token)
+    if len(normalized) < 7:
+        return token
+    if normalized.endswith("isation"):
+        return normalized
+    for suffix in ("isable", "iser", "isee", "isees", "ises", "ise"):
+        if normalized.endswith(suffix):
+            stem = normalized[:-len(suffix)]
+            if len(stem) >= 5:
+                return f"{stem}isation"
+    return token
+
+
+def canonicalize_information_need(query: str, *, exact_entities: tuple[str, ...] = ()) -> str | None:
+    """Return a conservative noun-oriented query variant, never a replacement.
+
+    Exact identifiers are copied byte-for-byte.  Apart from lightweight
+    function-word removal, only the productive French ``-iser/-isable/-isé``
+    family is converted to ``-isation``; all other wording, including
+    multi-word documentary terms, remains available as written.
+    """
+    original = " ".join((query or "").split())
+    if not original:
+        return None
+    entity_parts = {
+        part for entity in exact_entities for part in _canonical(entity).split()
+    }
+    tokens = re.findall(r"[A-Za-zÀ-ÿ0-9]+(?:[.-][A-Za-zÀ-ÿ0-9]+)*", original)
+    canonical_tokens: list[str] = []
+    morphology_applied = False
+    syntax_cleanup_applied = False
+    for token in tokens:
+        normalized = _canonical(token)
+        if not normalized:
+            continue
+        # Preserve each technical token exactly, including hyphenated models,
+        # decimal values and uppercase reference groups.
+        if (
+            normalized in entity_parts or token in exact_entities
+            or (token.isupper() and len(token) == 1)
+            or any(char.isdigit() for char in token)
+        ):
+            canonical_tokens.append(token)
+        elif _is_interrogative_syntax_token(token):
+            syntax_cleanup_applied = True
+        elif normalized not in _CANONICAL_FUNCTION_WORDS:
+            transformed = _canonical_need_token(token)
+            morphology_applied = morphology_applied or _canonical(transformed) != normalized
+            canonical_tokens.append(transformed)
+        else:
+            syntax_cleanup_applied = True
+    # Syntactic cleanup is intentionally as valuable as morphology here: it
+    # removes interrogative inversion while preserving modal meaning such as
+    # "possible", "obligatoire" or "compatible".
+    if not (morphology_applied or syntax_cleanup_applied):
+        return original
+    candidate = " ".join(canonical_tokens).strip()[:400]
+    if len(canonical_tokens) < 2 or _obviously_duplicate(candidate, original):
+        return None
+    return candidate
 
 
 def _followup_additions(raw_user_message: str, subject: str) -> str:
@@ -273,7 +399,7 @@ def resolve_retrieval_query(*, raw_user_message: str, orchestrator_query: str, h
     return " ".join(part for part in (subject, additions) if part).strip()
 
 
-def build_retrieval_queries(*, original_query: str, orchestrator_query: str | None, resolved_query: str | None = None, follow_up: bool = False, cross_language_query: str | None = None) -> list[tuple[str, str]]:
+def build_retrieval_queries(*, original_query: str, orchestrator_query: str | None, resolved_query: str | None = None, follow_up: bool = False, cross_language_query: str | None = None, canonical_information_need_query: str | None = None) -> list[tuple[str, str]]:
     """Build factual query variants independently of any response presentation.
 
     An autonomous user query is retained because it can contain exact anchors
@@ -297,6 +423,10 @@ def build_retrieval_queries(*, original_query: str, orchestrator_query: str | No
     )
     if cross_language_query:
         options.append(("cross_language", cross_language_query))
+    if canonical_information_need_query:
+        # Keep this additive and before de-duplication: canonicalization is an
+        # enrichment for lexical retrieval, never a factual-query replacement.
+        options.insert(-1 if cross_language_query else len(options), ("canonical_information_need", canonical_information_need_query))
     result: list[tuple[str, str]] = []
     for kind, query in options:
         if not query or len(query.strip()) < 3:
@@ -304,7 +434,37 @@ def build_retrieval_queries(*, original_query: str, orchestrator_query: str | No
         if any(_obviously_duplicate(query, existing) for _, existing in result):
             continue
         result.append((kind, query.strip()))
-    return result[:4]
+    return result[:5]
+
+
+def build_retrieval_queries_for_task(task: ResolvedUserTask) -> RetrievalQueryBuild:
+    """Build every documentary query from the single resolved-task contract.
+
+    No response-format or audience data participates here.  A fallback task
+    therefore retains the same multi-query path as a planner-resolved task.
+    """
+    factual = task.factual_query.strip()
+    original = (task.original_factual_query or factual).strip()
+    canonical_information_need = task.canonical_information_need_query or canonicalize_information_need(
+        factual, exact_entities=task.exact_entities,
+    )
+    cross_language = evaluate_cross_language_query(
+        original_user_query=original,
+        orchestrator_query=task.orchestrator_rewrite or factual,
+        detected_language=detect_query_language(factual),
+        anchors=set(task.exact_entities) or _specific_anchors(" ".join((original, factual))),
+        query_semantics=task.query_semantics,
+        proposed_query=task.cross_language_rewrite,
+    )
+    queries = build_retrieval_queries(
+        original_query=original,
+        orchestrator_query=task.orchestrator_rewrite or factual,
+        resolved_query=factual if task.uses_history else None,
+        follow_up=task.uses_history,
+        cross_language_query=cross_language.query,
+        canonical_information_need_query=canonical_information_need,
+    )
+    return RetrievalQueryBuild(queries=queries, cross_language=cross_language)
 
 
 def reciprocal_rank_fusion(

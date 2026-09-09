@@ -39,8 +39,9 @@ from .orchestration_debug import record_snapshot
 from .response_trace import ResponseTraceStore
 from .iterative_retrieval import complete_same_document_evidence, inspect_attachment_state, run_iterative_evidence_retrieval
 from .multi_query_retrieval import (
-    _canonical as retrieval_canonical, _specific_anchors as retrieval_specific_anchors, build_retrieval_queries, detect_query_language,
-    evaluate_cross_language_query, reciprocal_rank_fusion, resolve_retrieval_query,
+    _canonical as retrieval_canonical, _specific_anchors as retrieval_specific_anchors,
+    ResolvedUserTask, build_retrieval_queries_for_task, canonicalize_information_need,
+    reciprocal_rank_fusion, resolve_retrieval_query,
 )
 from .intelligent_retry import build_retry_queries, derive_retrieval_gap, evaluate_aspect_coverage, merge_cumulative_evidence
 from .catalog_probe import probe_document_catalog
@@ -655,6 +656,76 @@ def _documentary_fallback_query(question: str) -> tuple[str, str | None]:
             retained.append(clause)
     normalized = " ".join(retained).strip() or original
     return normalized, " ".join(part for part in removed if part) or None
+
+
+def _fallback_query_semantics(factual_query: str) -> str:
+    """Conservative deterministic semantics used only when planning failed."""
+    text = retrieval_canonical(factual_query)
+    if re.search(r"\b(?:validated|approved|rejected|accepted|refused|decision|validation|approuv|refus|valide)\b", text):
+        return "decision"
+    if re.search(r"\b(?:current|latest|status|state|statut|aujourd hui|actuel)\b", text):
+        return "current_state"
+    if re.search(r"\b(?:adjust|setting|configure|reglage|regler|configuration)\b", text):
+        return "procedure"
+    return "general_document_question"
+
+
+def _response_format_from_request(question: str) -> tuple[str, str | None]:
+    """Extract presentation intent without allowing it to alter factual search."""
+    text = retrieval_canonical(question)
+    raw = question.casefold()
+    email = bool(re.search(r"\b(?:mail|email|courriel|draft|brouillon)\b", text)) and bool(
+        re.search(r"\b(?:repond\w*|reply\w*|respond\w*|redige\w*|write\w*|fais moi|faire moi)\b", text)
+        or re.search(r"\b(?:r[eé]pond\w*|rÃ©pond\w*|r[eé]dige\w*|rÃ©dige\w*)", raw)
+    )
+    audience = "client" if re.search(r"\b(?:client|customer)\b", text) else None
+    return ("email_draft", audience) if email else ("normal", audience)
+
+
+def resolve_user_task(
+    question: str,
+    *,
+    plan: OrchestrationPlan | None = None,
+    fallback_factual_query: str | None = None,
+) -> ResolvedUserTask:
+    """Resolve factual content once, independently from requested presentation."""
+    factual, _removed = _documentary_fallback_query(question)
+    if fallback_factual_query:
+        factual = fallback_factual_query
+    factual = " ".join((factual or question).split())
+    planner_query = (plan.retrieval_query or "").strip() if plan else None
+    if planner_query:
+        factual = planner_query
+    response_format, target_audience = _response_format_from_request(question)
+    if plan:
+        response_format = plan.response_format
+        # The model does not currently expose audience as a structured field;
+        # retain deterministic explicit audience detection separately.
+    semantics = plan.query_semantics if plan else _fallback_query_semantics(factual)
+    source_constraints = tuple(plan.source_types) if plan else ()
+    temporal_constraints = tuple(plan.temporal_constraints) if plan else ()
+    exact_entities = tuple(sorted(
+        retrieval_specific_anchors(" ".join(part for part in (factual, question) if part)), key=str.casefold,
+    ))
+    canonical_information_need = canonicalize_information_need(factual, exact_entities=exact_entities)
+    if canonical_information_need and retrieval_canonical(canonical_information_need) == retrieval_canonical(factual):
+        canonical_information_need = None
+    return ResolvedUserTask(
+        factual_query=factual,
+        exact_entities=exact_entities,
+        information_need=factual,
+        query_semantics=semantics,
+        response_format=response_format,
+        target_audience=target_audience,
+        source_constraints=source_constraints,
+        temporal_constraints=temporal_constraints,
+        uses_history=bool(plan and plan.intent == "refine_previous_search" and plan.reuse_previous_subject),
+        original_factual_query=factual,
+        orchestrator_rewrite=planner_query,
+        cross_language_rewrite=plan.cross_language_retrieval_query if plan else None,
+        canonical_information_need_query=canonical_information_need,
+        origin="orchestrator" if plan else "deterministic_fallback",
+    )
 
 
 def _has_explicit_web_request(question: str) -> bool:
@@ -2254,7 +2325,10 @@ def run_answer_pipeline(
     # live Web route. This branch intentionally runs before the local-index
     # readiness check and before any idx.search call.
     explicit_web_request = _has_explicit_web_request(q)
-    email_draft_requested = bool(orchestration_plan and orchestration_plan.response_format == "email_draft")
+    # Presentation is resolved separately from retrieval, including after a
+    # planner failure, so an email request remains an output transformation.
+    presentation_task = resolve_user_task(q, plan=orchestration_plan)
+    email_draft_requested = presentation_task.response_format == "email_draft"
     current_user_first_name = _sender_first_name_from_request(request) if email_draft_requested else None
     if email_draft_requested:
         # Private generation context from authenticated identity, never from
@@ -2486,7 +2560,7 @@ def run_answer_pipeline(
                 ctx_len=len(reply_preamble),
                 validations={"orchestration_intent": orchestration_plan.intent,
                              "orchestration_needs_retrieval": False, "evidence_mode": "none",
-                             "response_format": orchestration_plan.response_format,
+                             "response_format": presentation_task.response_format,
                              "clarification_needed": False,
                              "ambiguity_level": orchestration_plan.ambiguity_level,
                              "source_plan": [item.model_dump(mode="json") for item in effective_source_plan],
@@ -2550,16 +2624,16 @@ def run_answer_pipeline(
     should_condense = (hist and user_msg_count_for_condense >= 2 and ENABLE_CONDENSATION and orchestration_plan is None)
     fallback_query_removed_wrapper = None
     fallback_query_normalized = None
-    if orchestration_plan:
-        q_eff = orchestration_plan.retrieval_query
-    elif orchestration_failed:
+    if orchestration_failed:
         fallback_query_normalized, fallback_query_removed_wrapper = _documentary_fallback_query(q)
         condensed = _condense_question(hist, fallback_query_normalized) if should_condense else fallback_query_normalized
         # If the same provider outage also prevented condensation, retain the
         # active subject deterministically instead of searching the raw turn.
-        q_eff = condensed if _norm(condensed) != _norm(fallback_query_normalized) else _recover_query_from_history(fallback_query_normalized, hist)
-    else:
-        q_eff = _condense_question(hist, q) if should_condense else q
+        fallback_query_normalized = condensed if _norm(condensed) != _norm(fallback_query_normalized) else _recover_query_from_history(fallback_query_normalized, hist)
+    resolved_task = resolve_user_task(
+        q, plan=orchestration_plan, fallback_factual_query=fallback_query_normalized,
+    )
+    q_eff = resolved_task.factual_query
 
     # Protection: si question très vague (<30 chars pure question) ET pas assez d'historique => forcer GENERAL
     # Questions typiques: "Comment ça marche ?", "Pourquoi ?", "Explique", "How does it work?"
@@ -2608,25 +2682,25 @@ def run_answer_pipeline(
     if conversation_decision.retrieval_scope == "active_source" and grounded_context.active_source_type in {"local", "email"}:
         scoped_source = {grounded_context.active_source_type}
         allowed_sources = scoped_source if allowed_sources is None else (allowed_sources & scoped_source)
-    follow_up = bool(orchestration_plan and orchestration_plan.intent == "refine_previous_search" and orchestration_plan.reuse_previous_subject)
-    resolved_retrieval_query = resolve_retrieval_query(raw_user_message=q, orchestrator_query=orchestration_plan.retrieval_query or q, history=hist) if follow_up else None
-    detected_query_language = detect_query_language(q)
-    cross_language_decision = evaluate_cross_language_query(
-        original_user_query=q,
-        # For a resolved follow-up the standalone subject, not the raw prompt,
-        # is the documentary base for expansion.
-        orchestrator_query=resolved_retrieval_query or (orchestration_plan.retrieval_query if orchestration_plan else None),
-        detected_language=detected_query_language,
-        anchors=retrieval_specific_anchors(" ".join(part for part in (q, resolved_retrieval_query, orchestration_plan.retrieval_query if orchestration_plan else None) if part)),
-        query_semantics=orchestration_plan.query_semantics if orchestration_plan and orchestration_plan.needs_retrieval else None,
-        proposed_query=orchestration_plan.cross_language_retrieval_query if orchestration_plan else None,
-    )
-    retrieval_queries = build_retrieval_queries(original_query=q, orchestrator_query=orchestration_plan.retrieval_query, resolved_query=resolved_retrieval_query, follow_up=follow_up, cross_language_query=cross_language_decision.query) if orchestration_plan else [("original_autonomous", q_eff)]
+    follow_up = resolved_task.uses_history
+    resolved_retrieval_query = resolve_retrieval_query(
+        raw_user_message=q, orchestrator_query=resolved_task.factual_query, history=hist,
+    ) if follow_up else None
+    if resolved_retrieval_query:
+        resolved_task = replace(
+            resolved_task,
+            factual_query=resolved_retrieval_query,
+            canonical_information_need_query=canonicalize_information_need(
+                resolved_retrieval_query, exact_entities=resolved_task.exact_entities,
+            ),
+        )
+        q_eff = resolved_retrieval_query
+    retrieval_build = build_retrieval_queries_for_task(resolved_task)
+    retrieval_queries = retrieval_build.queries
+    cross_language_decision = retrieval_build.cross_language
     # These are equivalent retrieval formulations of one information need,
     # not independent questions. Downstream evidence uses the best comparison.
     evidence_query_variants = retrieval_queries[:]
-    if resolved_retrieval_query:
-        q_eff = resolved_retrieval_query
     trace("retrieval_scope", {
         "source_scope_origin": "explicit" if orchestration_plan and orchestration_plan.source_types else ("inferred_internal" if allowed_sources else None),
         "source_scope_is_hard_filter": bool(orchestration_plan and orchestration_plan.source_types),
@@ -2635,8 +2709,19 @@ def run_answer_pipeline(
         "fallback_query_original": q if orchestration_failed else None,
         "fallback_query_normalized": fallback_query_normalized,
         "fallback_query_removed_wrapper": fallback_query_removed_wrapper,
+        "resolved_factual_query": resolved_task.factual_query,
+        "resolved_information_need": resolved_task.information_need,
+        "canonical_information_need_query": resolved_task.canonical_information_need_query,
+        "canonicalization_applied": bool(resolved_task.canonical_information_need_query),
+        "canonicalization_preserved_entities": list(resolved_task.exact_entities),
+        "resolved_exact_entities": list(resolved_task.exact_entities),
+        "resolved_response_format": resolved_task.response_format,
+        "resolved_target_audience": resolved_task.target_audience,
+        "resolved_task_origin": resolved_task.origin,
+        "retrieval_query_builder_origin": resolved_task.origin,
+        "retrieval_query_count": len(retrieval_queries),
     })
-    trace("retrieval_input", {"raw_user_message": q, "resolved_retrieval_query": resolved_retrieval_query, "follow_up_retrieval": follow_up, "raw_query_used_for_retrieval": not follow_up, "raw_query_exclusion_reason": "conversational_followup" if follow_up else None, "original_query": q, "orchestrator_query": orchestration_plan.retrieval_query if orchestration_plan else None, "detected_query_language": detected_query_language, "cross_language_source_query": cross_language_decision.source_query, "cross_language_query_semantics": orchestration_plan.query_semantics if orchestration_plan else None, "cross_language_information_need": cross_language_decision.information_need, "cross_language_information_need_retained": cross_language_decision.information_need_retained, "cross_language_semantic_intent_retained": cross_language_decision.semantic_intent_retained, "cross_language_validation_passed": cross_language_decision.validation_passed, "cross_language_validation_reasons": list(cross_language_decision.validation_reasons), "cross_language_query_before_validation": cross_language_decision.query_before_validation, "cross_language_query_after_validation": cross_language_decision.query_after_validation, "cross_language_query_generated": cross_language_decision.query is not None, "cross_language_target_language": cross_language_decision.target_language, "cross_language_query": cross_language_decision.query, "cross_language_query_rejected": cross_language_decision.query is None, "cross_language_rejection_reason": cross_language_decision.rejection_reason, "q_eff": q_eff, "q_eff_source": "resolved_retrieval_query" if resolved_retrieval_query else ("orchestrator_query" if orchestration_plan else ("condensed_query" if should_condense else "original_query")), "retrieval_queries": [{"type": kind, "source": kind, "query": query} for kind, query in retrieval_queries], "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": orchestration_plan.source_types if orchestration_plan else [], "temporal_constraints": [item.model_dump(mode="json") for item in orchestration_plan.temporal_constraints] if orchestration_plan else [], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
+    trace("retrieval_input", {"raw_user_message": q, "resolved_retrieval_query": resolved_retrieval_query, "follow_up_retrieval": follow_up, "raw_query_used_for_retrieval": not follow_up, "raw_query_exclusion_reason": "conversational_followup" if follow_up else None, "original_query": resolved_task.original_factual_query, "orchestrator_query": resolved_task.orchestrator_rewrite, "cross_language_source_query": cross_language_decision.source_query, "cross_language_query_semantics": resolved_task.query_semantics, "cross_language_information_need": cross_language_decision.information_need, "cross_language_information_need_retained": cross_language_decision.information_need_retained, "cross_language_semantic_intent_retained": cross_language_decision.semantic_intent_retained, "cross_language_validation_passed": cross_language_decision.validation_passed, "cross_language_validation_reasons": list(cross_language_decision.validation_reasons), "cross_language_query_before_validation": cross_language_decision.query_before_validation, "cross_language_query_after_validation": cross_language_decision.query_after_validation, "cross_language_query_generated": cross_language_decision.query is not None, "cross_language_target_language": cross_language_decision.target_language, "cross_language_query": cross_language_decision.query, "cross_language_query_rejected": cross_language_decision.query is None, "cross_language_rejection_reason": cross_language_decision.rejection_reason, "q_eff": q_eff, "q_eff_source": "resolved_retrieval_query" if resolved_retrieval_query else "resolved_factual_query", "retrieval_queries": [{"type": kind, "source": kind, "query": query} for kind, query in retrieval_queries], "should_condense": should_condense, "condensed_query": q_eff if should_condense else None, "allowed_sources": sorted(allowed_sources) if allowed_sources else None, "source_types": list(resolved_task.source_constraints), "temporal_constraints": [item.model_dump(mode="json") for item in resolved_task.temporal_constraints], "metadata_constraints": orchestration_plan.metadata_constraints.model_dump() if orchestration_plan else {}})
     set_stage("retrieval")
     if allowed_sources == {"email"}:
         emit_status("search_emails", "Recherche dans vos e-mails")
@@ -3092,7 +3177,7 @@ def run_answer_pipeline(
         {"source": item.source, "reason": "not_needed_or_not_reached"}
         for item in effective_source_plan if item.source not in sources_checked
     ]
-    validations["response_format"] = orchestration_plan.response_format if orchestration_plan else "normal"
+    validations["response_format"] = resolved_task.response_format
     validations["retrieval_query"] = q_eff
     validations["answerability"] = answerability_decision.to_dict()
     validations["exact_entity_guard"] = exact_entity_decision.to_dict()
@@ -3633,7 +3718,7 @@ def run_answer_pipeline(
         "turn_type_margin": getattr(turn_decision, "semantic_margin", None) if turn_decision else None,
         "orchestration_intent": orchestration_plan.intent if orchestration_plan else None,
         "orchestration_needs_retrieval": orchestration_plan.needs_retrieval if orchestration_plan else None,
-        "response_format": orchestration_plan.response_format if orchestration_plan else "normal",
+        "response_format": resolved_task.response_format,
         "orchestration_use_history": orchestration_plan.use_history if orchestration_plan else None,
         "orchestration_reuse_previous_subject": orchestration_plan.reuse_previous_subject if orchestration_plan else None,
         "orchestration_ms": orchestration_ms,

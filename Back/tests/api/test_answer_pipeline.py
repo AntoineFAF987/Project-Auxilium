@@ -625,7 +625,9 @@ class AnswerPipelineTests(unittest.TestCase):
             result = run_answer_pipeline(AskIn(q="Pourquoi tu n'étudies pas le contenu du mail ?", source_mode="local"), _request())
 
         trace = trace_store.get(result.request_id)["stages"]["orchestration"]
-        self.assertEqual(len(self.index.search_calls), 1)
+        # Validation failure uses the same variant builder as a valid plan;
+        # it must not collapse to the historical single fallback query.
+        self.assertGreaterEqual(len(self.index.search_calls), 2)
         self.assertEqual(trace["error_category"], "model_output_validation_error")
         self.assertEqual(trace["fallback_strategy"], "documentary_retrieval")
 
@@ -649,7 +651,7 @@ class AnswerPipelineTests(unittest.TestCase):
 
         trace = trace_store.get(result.request_id)["stages"]["orchestration"]
         self.assertEqual(result.mode, "STRICT(local)")
-        self.assertEqual(len(self.index.search_calls), 1)
+        self.assertGreaterEqual(len(self.index.search_calls), 2)
         self.assertEqual(trace["error_category"], "provider_error")
         self.assertEqual(trace["provider_error_type"], "BadRequestError")
         self.assertEqual(trace["provider_error_code"], "unsupported_parameter")
@@ -669,7 +671,7 @@ class AnswerPipelineTests(unittest.TestCase):
             result = run_answer_pipeline(AskIn(q="Can you check whether Project Alpha was approved?"), _request())
 
         self.assertEqual(result.mode, "STRICT(local)")
-        self.assertEqual(len(self.index.search_calls), 1)
+        self.assertGreaterEqual(len(self.index.search_calls), 2)
 
     def test_provider_failure_keeps_real_conversation_and_general_questions_out_of_forced_retrieval(self):
         from api import answer_pipeline as pipeline
@@ -2020,6 +2022,24 @@ class AnswerPipelineTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(self.index.search_calls), 1)
         self.assertNotEqual(result.mode, "CLARIFICATION")
+
+    def test_orchestrator_timeout_keeps_email_presentation_out_of_retrieval(self):
+        """A new factual email request still follows the shared fallback builder."""
+        from api import answer_pipeline as pipeline
+
+        with (
+            self._patch_pipeline(post_review_enabled=False, faithfulness_enabled=False),
+            patch.object(pipeline, "ORCHESTRATOR_SETTINGS", pipeline.ORCHESTRATOR_SETTINGS.model_copy(update={"enabled": True})),
+            patch.object(pipeline, "_run_orchestration", side_effect=TimeoutError("timeout")),
+        ):
+            result = run_answer_pipeline(
+                AskIn(q="Un client me demande par mail si le positionneur 3731 peut être tropicalisé. Je lui réponds quoi ?", source_mode="local"),
+                _request(),
+            )
+
+        self.assertEqual(result.validations["response_format"], "email_draft")
+        self.assertTrue(result.validations["orchestrator_failed"])
+        self.assertGreaterEqual(len(self.index.search_calls), 2)
 
 
 class TransportParityTests(unittest.TestCase):

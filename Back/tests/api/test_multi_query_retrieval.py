@@ -11,7 +11,7 @@ if "api" not in sys.modules:
     sys.modules["api"] = package
 
 from api.multi_query_retrieval import (  # noqa: E402
-    build_cross_language_query, build_retrieval_queries, detect_query_language,
+    ResolvedUserTask, _canonical, _specific_anchors, build_cross_language_query, build_retrieval_queries, canonicalize_information_need, detect_query_language,
     evaluate_cross_language_query, reciprocal_rank_fusion, resolve_retrieval_query,
     validate_cross_language_query,
 )
@@ -75,6 +75,90 @@ def test_rrf_preserves_candidate_found_only_by_original_wording():
 def test_duplicate_rewrites_do_not_trigger_duplicate_searches():
     queries = build_retrieval_queries(original_query="Model 3725 maximum temperature", orchestrator_query="Model 3725 maximum temperature")
     assert [kind for kind, _ in queries] == ["original_autonomous"]
+
+
+def test_canonical_information_need_converges_productive_french_isation_forms():
+    variants = [
+        "Peut-on tropicaliser le modèle X ?",
+        "Le modèle X est-il tropicalisable ?",
+        "Le modèle X peut-il être tropicalisé ?",
+        "Quelle est la possibilité de tropicalisation du modèle X ?",
+    ]
+    canonical = [canonicalize_information_need(value) for value in variants]
+    assert all(value and "tropicalisation" in value for value in canonical)
+
+
+def test_canonical_information_need_preserves_exact_technical_entities_byte_for_byte():
+    query = "Le 3731 peut-il être tropicalisé avec 3730-3 HV02 82.7 DN50 PS-AMS KG2 ?"
+    result = canonicalize_information_need(query, exact_entities=tuple(_specific_anchors(query)))
+    assert result
+    for entity in ("3731", "3730-3", "HV02", "82.7", "DN50", "PS-AMS", "KG2"):
+        assert entity in result
+    assert "3730 " not in result
+
+
+def test_canonical_information_need_preserves_multiword_and_structured_terms():
+    dead_band = "Quelle est la dead band du PS AMS ?"
+    price = "Quel est le prix de vente du KG2 DN50 ?"
+    dead_band_result = canonicalize_information_need(dead_band, exact_entities=tuple(_specific_anchors(dead_band)))
+    price_result = canonicalize_information_need(price, exact_entities=tuple(_specific_anchors(price)))
+    assert dead_band_result and "dead band" in dead_band_result and "PS AMS" in dead_band_result
+    assert price_result and "prix de vente" in price_result
+    assert "KG2" in price_result and "DN50" in price_result
+
+
+def test_compact_documentary_query_does_not_receive_a_weaker_canonical_variant():
+    assert canonicalize_information_need("PS AMS dead band", exact_entities=("PS AMS",)) == "PS AMS dead band"
+
+
+def test_canonical_information_need_keeps_current_state_semantics_outside_normalization():
+    result = canonicalize_information_need("Ma demande a-t-elle été validée ?")
+    assert result and "valid" in result.casefold()
+    task = ResolvedUserTask(
+        factual_query="Ma demande a-t-elle été validée ?", exact_entities=(), information_need="validation",
+        query_semantics="current_state", canonical_information_need_query=result,
+    )
+    assert task.query_semantics == "current_state"
+
+
+def _canonical_core(query: str) -> set[str]:
+    return set(_canonical(query).split()) - {"de", "du", "positionneur", "modele"}
+
+
+def test_canonical_information_need_removes_french_interrogative_inversion_generically():
+    variants = [
+        "Le positionneur 3731 peut-il être tropicalisé ?",
+        "Le positionneur 3731 est-il tropicalisable ?",
+        "Peut-on tropicaliser le positionneur 3731 ?",
+        "Est-ce possible de tropicaliser le positionneur 3731 ?",
+        "Quelle est la possibilité de tropicalisation du positionneur 3731 ?",
+    ]
+    canonical = [
+        canonicalize_information_need(value, exact_entities=tuple(_specific_anchors(value)))
+        for value in variants
+    ]
+    assert all(value and "3731" in value and "tropicalisation" in value for value in canonical)
+    assert all("peut-il" not in value.casefold() and "est-il" not in value.casefold() for value in canonical)
+    assert all("tropicalisation" in _canonical_core(value) for value in canonical)
+
+
+def test_syntactic_canonicalization_preserves_modal_and_technical_meaning():
+    mandatory = "Est-il obligatoire de remplacer le produit X ?"
+    compatible = "Le modèle X est-il compatible avec Y ?"
+    price = "Le prix de vente du KG2 DN50 est-il disponible ?"
+    mandatory_result = canonicalize_information_need(mandatory)
+    compatible_result = canonicalize_information_need(compatible)
+    price_result = canonicalize_information_need(price, exact_entities=tuple(_specific_anchors(price)))
+    assert mandatory_result and all(term in mandatory_result.casefold() for term in ("obligatoire", "remplacer", "x"))
+    assert compatible_result and all(term in compatible_result.casefold() for term in ("x", "compatible", "y"))
+    assert price_result and "prix de vente" in price_result and "KG2" in price_result and "DN50" in price_result
+    assert "disponible" in price_result.casefold()
+
+
+def test_syntactic_canonicalization_keeps_ps_ams_documentary_terms():
+    query = "Quelle est la dead band du PS AMS ?"
+    result = canonicalize_information_need(query, exact_entities=tuple(_specific_anchors(query)))
+    assert result and "dead band" in result and "PS AMS" in result
 
 
 def test_followup_uses_resolved_subject_not_literal_conversational_wording():
