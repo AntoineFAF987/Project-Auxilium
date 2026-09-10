@@ -349,6 +349,18 @@ def ask_mistral_with_context(
             "Every company-, product-, price-, case-, or status-specific fact must remain strictly grounded in CONTEXT and cited. "
             "Clearly separate the general explanation and do not attach a documentary citation to it."
         )
+    if context_text and context_text.strip():
+        messages[0]["content"] += (
+            " Avant de répondre, identifie silencieusement tous les éléments de preuve qui aident matériellement à répondre à la question. "
+            "Donne d'abord la réponse directe. Puis inclus tous les faits matériellement utiles qui expliquent pourquoi, comment, "
+            "dans quelles conditions, avec quelles valeurs, limites ou exceptions. Ne t'arrête pas après la première phrase qui répond. "
+            "N'inclus aucun détail qui n'aide pas matériellement à répondre."
+            if is_fr else
+            " Before answering, silently identify all evidence that materially helps answer the user's question. "
+            "Give the direct answer first. Then include all materially useful facts that explain why, how, under what conditions, "
+            "with which values, limits, or exceptions. Do not stop after the first sentence that answers the question. "
+            "Do not include details that do not materially help answer the question."
+        )
     for m in (history or []):
         if isinstance(m, dict) and "role" in m and "content" in m:
             messages.append({"role": m["role"], "content": m["content"]})

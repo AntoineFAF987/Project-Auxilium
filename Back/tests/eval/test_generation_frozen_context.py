@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from eval.generation_frozen_context import FIXTURES, SYNTHETIC_FIXTURES, VARIANTS, evaluate_answer, payload_for_variant
 
 
@@ -44,3 +46,23 @@ def test_synthetic_fixtures_preserve_evaluation_contract_without_real_identifier
         assert "PS AMS" not in synthetic.context
         assert "JAUMOUILL" not in synthetic.context.upper()
         assert "KG2" not in synthetic.context
+
+
+def test_production_completeness_instruction_is_aligned_for_sync_streaming_and_email_draft():
+    from rag_core.llm import ask_mistral_with_context
+    from rag_core.llm_stream import ask_mistral_with_context_stream
+
+    instruction = "Avant de répondre, identifie silencieusement tous les éléments de preuve qui aident matériellement à répondre à la question."
+    sync_payload = {}
+    email_payload = {}
+    stream_payload = {}
+    with patch("rag_core.llm.generate_from_payload", side_effect=lambda payload: sync_payload.update(payload) or "ok"):
+        ask_mistral_with_context("Question", "Contexte", history=[], evidence_mode="direct")
+    with patch("rag_core.llm.generate_from_payload", side_effect=lambda payload: email_payload.update(payload) or "ok"):
+        ask_mistral_with_context("Question", "Contexte", history=[], evidence_mode="direct", response_format="email_draft")
+    with patch("rag_core.llm_stream.stream_from_payload", side_effect=lambda payload: stream_payload.update(payload) or iter(["ok"])):
+        list(ask_mistral_with_context_stream("Question", "Contexte", history=[], evidence_mode="direct"))
+
+    assert instruction in sync_payload["messages"][0]["content"]
+    assert instruction in email_payload["messages"][0]["content"]
+    assert instruction in stream_payload["messages"][0]["content"]

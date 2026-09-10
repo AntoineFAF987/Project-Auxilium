@@ -202,7 +202,7 @@ def _matches(answer: str, terms: Iterable[str]) -> bool:
     if normalized_terms in {("x371", "aucune", "preuve"), ("3731", "aucune", "preuve")}:
         entity = normalized_terms[0]
         return bool(re.search(
-            rf"(?:aucun(?:e)? (?:preuve|information|élément) direct.{0,64}{entity}|"
+            rf"(?:aucun(?:e)? (?:preuve|information|élément) direct.{{0,64}}{entity}|"
             rf"{entity}.{{0,64}}aucun(?:e)? (?:preuve|information|élément) direct|"
             rf"aucun élément ne confirme.{{0,80}}{entity}|"
             rf"{entity}.{{0,64}}sans preuve directe)", text
