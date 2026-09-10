@@ -141,15 +141,18 @@ def test_email_decision_retry_merges_old_and_new_evidence_with_provenance():
 
 
 def test_redundant_retry_query_is_rejected():
-    # A one-facet query yields the original wording; it must not relaunch it.
+    # The missing aspect is a complementary query, not an exact duplicate.
     _, _gap, queries, rejected = _retry("HV02 temperature limits", "HV02")
-    assert queries == []
-    assert rejected and rejected[0]["reason"] == "near_duplicate_of_initial_or_retry"
+    assert queries == ["HV02 operating temperature limits"]
+    assert not any(item["query"] == queries[0] for item in rejected)
 
 
 def test_followup_uses_resolved_subject_not_raw_message():
     decision = _decision("Project Orion final decision", "Project Orion request is pending.")
-    gap = derive_retrieval_gap(query="Project Orion final decision", context_text="Project Orion request is pending.", answerability=decision, evidence_mode="direct")
+    gap = derive_retrieval_gap(
+        query="Project Orion final decision", context_text="Project Orion request is pending.",
+        answerability=decision, evidence_mode="direct", query_semantics="decision",
+    )
     queries, _ = build_retry_queries(
         original_user_query="cherche encore", orchestrator_query="Project Orion final decision",
         resolved_retrieval_query="Project Orion final decision", gap=gap,

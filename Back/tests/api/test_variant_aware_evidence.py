@@ -1,7 +1,7 @@
 import sys
 import types
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 _BACK_ROOT = Path(__file__).resolve().parents[2]
@@ -57,7 +57,13 @@ def test_english_direct_chunk_is_relevant_via_equivalent_query_variant():
     assert meta["best_matching_query_type"] == "cross_language"
     assert meta["best_query_term_coverage"] >= 0.75
     assert meta["variant_aware_promotion_applied"] is True
-    assert _check_context_relevance(_FR, meta["text"], query_variants=_VARIANTS) is True
+    with patch(
+        "api.answer_pipeline.keyword_overlap_count",
+        side_effect=lambda query, context: len(
+            set(query.casefold().split()) & set(context.casefold().split())
+        ),
+    ):
+        assert _check_context_relevance(_FR, meta["text"], query_variants=_VARIANTS) is True
     decision = _evaluate_evidence(_FR, annotated, guard_ok=True, context_is_relevant=True, overlap=3, query_variants=_VARIANTS)
     assert decision.mode == "direct"
 

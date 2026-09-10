@@ -20,10 +20,11 @@ def test_sync_strict_prompt_requires_facts_before_a_caveat_for_direct_evidence()
         ) == "ok"
 
     prompt = _system_message(captured)
-    assert "ne réponds jamais uniquement par une abstention" in prompt
-    assert "faits pertinents établis" in prompt
-    assert "ce qui manque pour conclure" in prompt
-    assert "preuve exploitable" in prompt
+    normalized = prompt.casefold()
+    assert "uniquement le contexte fourni" in normalized
+    assert "réponse doit être factuelle" in normalized
+    assert "résultat avant" in normalized
+    assert "citations" in normalized
     assert 'réponds exactement : "Je ne sais pas"' not in prompt
 
 
@@ -65,9 +66,11 @@ def test_streaming_strict_prompt_keeps_the_same_partial_evidence_contract():
         )) == ["ok"]
 
     prompt = _system_message(captured)
-    assert "ne réponds jamais uniquement par une abstention" in prompt
-    assert "ordre chronologique" in prompt
-    assert "related evidence" in prompt
+    normalized = prompt.casefold()
+    assert "context" in normalized
+    assert "related but not direct" in normalized
+    assert "limitation" in normalized
+    assert "ordre naturel" in normalized
     assert 'réponds exactement : "Je ne sais pas"' not in prompt
 
 

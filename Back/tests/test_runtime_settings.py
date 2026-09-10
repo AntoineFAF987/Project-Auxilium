@@ -212,6 +212,7 @@ class RuntimeSettingsConsumerTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"MISTRAL_API_KEY": "test-key"}, clear=False),
             patch("rag_core.llm.get_runtime_settings", return_value=settings),
+            patch("rag_core.llm_providers.get_runtime_settings", return_value=settings),
             patch("requests.post", return_value=response) as post,
         ):
             answer = ask_mistral_with_context(
@@ -266,7 +267,7 @@ class RuntimeSettingsConsumerTests(unittest.TestCase):
         self.assertTrue(Path(CONFIG_PATH).exists())
         self.assertEqual(settings.retrieval.final_k, 10)
         self.assertEqual(settings.retrieval.max_context_chars, 12000)
-        self.assertEqual(settings.generation.model, "mistral-small-latest")
+        self.assertEqual(settings.generation.model, "gpt-5.6-luna")
         self.assertEqual(settings.generation.max_tokens, 1200)
         self.assertFalse(settings.features.enable_post_generation_review)
         self.assertFalse(settings.features.enable_faithfulness_check)
